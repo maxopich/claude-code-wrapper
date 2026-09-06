@@ -12,6 +12,7 @@ import {
   auditTipPath,
   isMirrorEstablished,
   readLatestAuditTip,
+  readMaxTipForAnchor,
 } from './audit_tip.js';
 
 // [security] Register H14 — tail truncation of the hash-chained audit log.
@@ -186,6 +187,102 @@ describe('[security] tail truncation is detected', () => {
     expect(after.ok).toBe(false);
     if (after.ok) return;
     expect(after.reason).toBe('row_mismatch');
+  });
+});
+
+describe('[security] re-seating the anchor cannot erase the log (Cebab-5y4t)', () => {
+  /**
+   * THE ATTACK, in the failure scenario's own two statements. `anchorRowid` is
+   * `MAX(rowid) WHERE kind='audit.chain_reset'` — attacker-controlled state
+   * inside the very database the mirror exists to corroborate. Moving that row
+   * to a new highest rowid puts every real row BELOW the anchor.
+   */
+  function reseatAnchor(): void {
+    getDb().exec(
+      `UPDATE safety_audit SET rowid = (SELECT MAX(rowid) + 1 FROM safety_audit)
+         WHERE rowid = (SELECT MAX(rowid) FROM safety_audit WHERE kind = 'audit.chain_reset')`,
+    );
+  }
+
+  test('re-seat then erase every row is reported, not reported clean', () => {
+    // Measured on the merged tree before the fix: this sequence returned
+    // { ok: true, rowsChecked: 0 } with the mirror still untouched on disk —
+    // every trust decision, kick and guardrail violation gone, no
+    // audit.tamper_detected notification. The identity gate passed because the
+    // anchor row was REUSED, not forged.
+    appendRows(5);
+    expect(verifyChain()).toMatchObject({ ok: true, rowsChecked: 5 });
+
+    reseatAnchor();
+    getDb().exec(`DELETE FROM safety_audit WHERE kind <> 'audit.chain_reset'`);
+
+    const after = verifyChain();
+    expect(after.ok).toBe(false);
+    if (after.ok) return;
+    expect(after.reason).toBe('tail_truncated');
+  });
+
+  test('the erasure is caught even though NO mirror line names the new anchor', () => {
+    // The precise hole. `readMaxTipForAnchor` scopes the commitment to the
+    // current anchor rowid and returns null when no line names it, which was
+    // read as benign because that is also what a fresh migration anchor looks
+    // like. So the check must not depend on a line naming this anchor.
+    appendRows(3);
+    reseatAnchor();
+    getDb().exec(`DELETE FROM safety_audit WHERE kind <> 'audit.chain_reset'`);
+
+    const anchorRowid = getDb()
+      .prepare<[], { rowid: number }>(
+        `SELECT MAX(rowid) AS rowid FROM safety_audit WHERE kind = 'audit.chain_reset'`,
+      )
+      .get()!.rowid;
+    expect(readMaxTipForAnchor(anchorRowid)).toBeNull();
+    expect(verifyChain().ok).toBe(false);
+  });
+
+  test('rowsChecked = 0 no longer disarms the missing-mirror branch by itself', () => {
+    // `tip_mirror_missing` is guarded on `rowsChecked > 0`, so the re-seat also
+    // bought the attacker a free mirror delete. With the rows gone the survival
+    // check fires first, so the second step is no longer a way out.
+    appendRows(4);
+    reseatAnchor();
+    getDb().exec(`DELETE FROM safety_audit WHERE kind <> 'audit.chain_reset'`);
+    fs.rmSync(auditTipPath(), { force: true });
+
+    // With the mirror gone nothing commits to the erased rows any more, so the
+    // survival check has nothing to say and the established FLAG is what
+    // answers. That flag lives in the DB's settings table, so the erasure now
+    // costs a third action in a third place. `audit_tip.ts`'s header is still
+    // right that a same-uid attacker who does all of it wins — this raises the
+    // bar, it does not end the game.
+    expect(verifyChain()).toMatchObject({ ok: false, reason: 'tip_mirror_missing' });
+  });
+
+  test('a committed tip rewritten below a re-seated anchor is reported', () => {
+    // Re-seating shrinks the digest-checked range to nothing, so rows below the
+    // anchor stop being verified and could be rewritten rather than removed.
+    // The mirror already stores each tip's hashSelf, so comparing it costs
+    // nothing and catches this for the committed tips.
+    appendRows(3);
+    reseatAnchor();
+    getDb()
+      .prepare(`UPDATE safety_audit SET payload_json = '{"tampered":true}' WHERE kind = ?`)
+      .run('test.event');
+
+    const after = verifyChain();
+    expect(after.ok).toBe(false);
+    if (after.ok) return;
+    expect(after.reason).toBe('row_mismatch');
+  });
+
+  test('a fresh database beside an older mirror is NOT called erased', () => {
+    // The false alarm the survival check could produce: an operator who deleted
+    // cebab.sqlite but kept ~/.cebab/audit-tip.jsonl. The established flag lives
+    // in the new DB's settings table and is false, which is the same guard the
+    // missing-mirror branch already uses.
+    appendAuditTip({ ts: 1, rowId: 'row-from-another-life', hashSelf: 'ff', count: 99 });
+    expect(isMirrorEstablished()).toBe(false);
+    expect(verifyChain()).toMatchObject({ ok: true, rowsChecked: 0 });
   });
 });
 
