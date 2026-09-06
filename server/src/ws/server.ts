@@ -6020,8 +6020,17 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       return;
     }
     case 'clear_iterations': {
-      // Delete finished DB rows + their events + their participants. Disk
-      // artifacts under the per-session folder are left in place — useful
+      // Delete finished DB rows: the session, its events, participants, agent
+      // sessions and mutations, plus the soft-FK dependents that no cascade
+      // reaches — OPERATIONAL notifications and recovery-log rows.
+      //
+      // Cebab-2cd0: safety-class notifications and `controllability_forensics`
+      // are deliberately NOT swept. BE-7 requires a safety row to be acked
+      // individually with a typed reason, and every forensics row anchors a
+      // `safety_audit` row that outlives any Clear. `clearFinishedMultiAgentSessions`
+      // carries the full argument.
+      //
+      // Disk artifacts under the per-session folder are left in place — useful
       // for post-mortem; the operator can `rm -rf` by hand. The pure-SDK
       // runtime has no out-of-process sessions to reap: a still-live run
       // is in the in-process registry with a `running` row (never cleared

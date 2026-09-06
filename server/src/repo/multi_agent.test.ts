@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
@@ -433,20 +434,35 @@ describe('clearFinishedMultiAgentSessions', () => {
     expect(listMultiAgentEvents('s1')).toHaveLength(0);
   });
 
-  test('also wipes soft-FK dependents (notifications/forensics/recovery_log) for the deleted bus session (register D31)', () => {
-    // A finished bus session that accrued a sticky safety notification, a
-    // kick forensic bundle and a recovery-log row — all keyed on the bus
-    // session id, none with a REFERENCES/cascade. Before the D31 fix the
-    // parent delete left these three orphaned on a session id that no longer
-    // exists, so the inbox kept badging and the operator couldn't bulk-clear.
+  test('wipes the OPERATIONAL soft-FK dependents but not the safety ones (D31 + Cebab-2cd0)', () => {
+    // REWRITTEN, not weakened. This case used to seed a `class:'safety'`
+    // notification and assert the Clear removed it, on the grounds that
+    // otherwise "the inbox kept badging and the operator couldn't bulk-clear".
+    // For an operational row that is the D31 orphan fix and still holds. For a
+    // safety row it is the defect (Cebab-2cd0): not being bulk-clearable is
+    // precisely what BE-7 requires, and `clearDismissedInbox` enforces the same
+    // rule one function over with `class = 'operational'`. A DELETE is stronger
+    // than the ACK that rule forbids — it drops the row, skips the hash-chain
+    // ack, and leaves the safety_audit row it answered un-acked forever.
+    //
+    // `controllability_forensics` likewise stays: each row is
+    // `safety_audit_id NOT NULL REFERENCES safety_audit(id)`, and that audit row
+    // outlives every Clear (migration 019 leaves ON DELETE RESTRICT for exactly
+    // this reason). Removing the snapshot strands a chain row still claiming one.
     const db = getDb();
     createMultiAgentSession('bus1', 'orchestrator', '001');
     endMultiAgentSession('bus1', 'completed');
 
-    // A sticky class:'safety' notification keyed on the bus session id.
+    // One of each class, keyed on the bus session id — the operational row is
+    // what D31 is about, the safety row is what Cebab-2cd0 is about, and only
+    // seeding both can tell the two rules apart.
     db.prepare(
       `INSERT INTO notifications (id, ts, severity, class, dedupe_key, title, message, session_id, sticky, reason_code)
        VALUES ('n1', 1, 'danger', 'safety', 'd1', 't', 'm', 'bus1', 1, 'dangerous_mutation')`,
+    ).run();
+    db.prepare(
+      `INSERT INTO notifications (id, ts, severity, class, dedupe_key, title, message, session_id, sticky)
+       VALUES ('n2', 1, 'info', 'operational', 'd2', 't', 'm', 'bus1', 0)`,
     ).run();
     // A safety_audit anchor so the forensics FK (safety_audit_id NOT NULL) holds.
     db.prepare(
@@ -462,8 +478,8 @@ describe('clearFinishedMultiAgentSessions', () => {
        VALUES (1, 'bus1', 'archive', 'archive')`,
     ).run();
 
-    // Sanity: the inbox counts the badge pre-clear.
-    expect(countUnackedBySession().bySession['bus1']).toBe(1);
+    // Sanity: the inbox counts both badges pre-clear.
+    expect(countUnackedBySession().bySession['bus1']).toBe(2);
 
     clearFinishedMultiAgentSessions();
 
@@ -476,10 +492,24 @@ describe('clearFinishedMultiAgentSessions', () => {
           )
           .get() as { n: number }
       ).n;
-    expect(count('notifications')).toBe(0);
-    expect(count('controllability_forensics')).toBe(0);
+    // The operational row is gone; the safety row is not.
+    expect(count('notifications')).toBe(1);
+    expect(
+      (
+        db
+          .prepare<[], { id: string }>(`SELECT id FROM notifications WHERE session_id = 'bus1'`)
+          .get() as { id: string }
+      ).id,
+    ).toBe('n1');
+    // The forensic bundle survives with the audit row it anchors.
+    expect(count('controllability_forensics')).toBe(1);
+    // Recovery metrics still go — no audit anchor, no acknowledgment duty.
     expect(count('recovery_log')).toBe(0);
-    expect(countUnackedBySession().bySession['bus1']).toBeUndefined();
+
+    // And the badge still stands, because the safety event is still unanswered.
+    // That is the point of BE-7: it clears when the operator acks it with a
+    // typed reason, never because a bulk action swept the row away.
+    expect(countUnackedBySession().bySession['bus1']).toBe(1);
   });
 
   test('returns 0 and no-ops when only running sessions exist', () => {
@@ -1161,5 +1191,73 @@ describe('migration 034 / register D20 — (session_id, tool_use_id) is unique',
     expect(again?.id).toBe(appended.id);
     expect(again?.confirmedAt).toBe(first?.confirmedAt);
     expect(again?.toolResult).toEqual([{ type: 'text', text: 'ok' }]);
+  });
+});
+
+/**
+ * Cebab-h552: the Clear's blast radius and the sentence an operator authorises
+ * it from must move together.
+ *
+ * #469 widened `clearFinishedMultiAgentSessions` from four tables to seven and
+ * corrected the repo docstring — and none of the four places that describe the
+ * action to a human. The confirm dialog still said "events, participants and the
+ * session itself" and then promised that post-mortem material survives, which by
+ * then was false for the rows that mattered most.
+ *
+ * A behavioural test cannot catch that: widening the delete to a NEW table
+ * breaks no existing assertion. So this pins the SET of tables the function
+ * touches. Adding or removing one fails here, and the failure names the four
+ * copy sites to update. Table names rather than human words on purpose — a
+ * table→prose map would be one more thing that goes stale silently, which is
+ * the defect this exists to stop.
+ */
+describe('[copy] the Clear deletes exactly what the operator is told it deletes', () => {
+  const src = fs.readFileSync(
+    path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'multi_agent.ts'),
+    'utf8',
+  );
+
+  function clearBody(): string {
+    const start = src.indexOf('export function clearFinishedMultiAgentSessions');
+    expect(start).toBeGreaterThanOrEqual(0);
+    const end = src.indexOf('\n}', start);
+    expect(end).toBeGreaterThan(start);
+    return src.slice(start, end);
+  }
+
+  test('the scan actually found the function body', () => {
+    // Anti-vacuity: an empty slice would make the set assertion below pass by
+    // matching nothing at all.
+    expect(clearBody().length).toBeGreaterThan(400);
+    expect(clearBody()).toContain('DELETE FROM');
+  });
+
+  test('the deleted table set is exactly this, or the four copy sites are stale', () => {
+    // If this fails because you widened the Clear on purpose, update:
+    //   1. web/src/components/MultiAgentTab.tsx — the requestConfirm body
+    //   2. web/src/components/MultiAgentTab.tsx — the button's title tooltip
+    //   3. web/src/App.tsx — clearIterations()'s comment
+    //   4. server/src/ws/server.ts — the `clear_iterations` handler comment
+    const tables = [...clearBody().matchAll(/DELETE FROM (\w+)/g)].map((m) => m[1]).sort();
+    expect(tables).toEqual([
+      'multi_agent_agent_sessions',
+      'multi_agent_events',
+      'multi_agent_mutations',
+      'multi_agent_participants',
+      'multi_agent_sessions',
+      'notifications',
+      'recovery_log',
+    ]);
+  });
+
+  test('the notifications delete is still class-scoped (Cebab-2cd0)', () => {
+    // The behavioural case above proves a safety row survives. This proves the
+    // FILTER is how, so a future rewrite cannot pass that test by some other
+    // route and quietly drop the rule.
+    expect(clearBody()).toMatch(/DELETE FROM notifications[\s\S]{0,120}class != 'safety'/);
+  });
+
+  test('controllability_forensics is not deleted at all', () => {
+    expect(clearBody()).not.toContain('DELETE FROM controllability_forensics');
   });
 });
