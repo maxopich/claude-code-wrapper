@@ -180,20 +180,49 @@ describe('store / the replay flag never gets stuck', () => {
     expect(s.historyReplay).toBeNull();
   });
 
-  test('a stuck flag would strand the pending — proving why the two clears matter', () => {
-    // Same sequence as the first test but with the replay never closed out.
-    // Once `ws_close` retires it, the next live session_started migrates.
+  test('a stuck flag would strand the NEXT turn — proving why the two clears matter', () => {
+    // REWRITTEN for Cebab-so96, not weakened — the assertion it used to make
+    // was the defect. It ran the same sequence with the replay never closed
+    // out and required the DRAFT stranded by the disconnect to migrate into
+    // `new-1`, using that adoption as its evidence that `ws_close` had retired
+    // the replay flag.
+    //
+    // That adoption is the so96 bug seen from inside. The message never
+    // reached a turn — the server aborted `conn.inFlight` on the close and
+    // nothing re-sends it — so grafting it onto the next unrelated session
+    // makes the UI claim it was that session's prompt. In the real flow the
+    // operator types AGAIN after reconnecting, adoption is oldest-first, and
+    // their new prompt is the one that gets stranded.
+    //
+    // The flag property is unchanged and still needs proving, so the probe
+    // moves to a pending created AFTER the reconnect: if `historyReplay` were
+    // stuck, `isReplay` would block that adoption too and `new-1` would come up
+    // empty. Same evidence, on a turn that is actually entitled to it.
     let s = open();
     s = reduce(s, { type: 'user_send', text: DRAFT });
-    const pending = pendingId(s)!;
+    const stranded = pendingId(s)!;
 
     s = reduce(s, historyStart('old-1'));
     s = reduce(s, { type: 'ws_close' });
+    s = reduce(s, { type: 'ws_open' });
+
+    // `new_session` matters: `session_history_start` pointed the active session
+    // at `old-1`, so without it the next send RESUMES that history rather than
+    // opening a fresh turn, and there is no pending to adopt either way.
+    s = reduce(s, { type: 'new_session', projectId: PID });
+
+    // The reconnected operator types again. THIS is the turn `new-1` ran.
+    s = reduce(s, { type: 'user_send', text: 'after the reconnect' });
     s = reduce(s, started('new-1'));
 
+    expect(userTexts(s, PID, 'new-1')).toEqual(['after the reconnect']);
     expect(pendingId(s)).toBeUndefined();
-    expect(s.sessionsByProject[PID]?.[pending]).toBeUndefined();
-    expect(userTexts(s, PID, 'new-1')).toEqual([DRAFT]);
+
+    // And the stranded draft is not silently destroyed: its bucket survives,
+    // retired to `done` by `retireRunningSessions`, still holding the message
+    // the operator actually typed.
+    expect(s.sessionsByProject[PID]?.[stranded]?.messages).toHaveLength(1);
+    expect(s.sessionsByProject[PID]?.[stranded]?.status).toBe('done');
   });
 });
 
