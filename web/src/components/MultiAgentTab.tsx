@@ -3358,7 +3358,11 @@ function SessionSettingsAuthorityButton(props: { projectIds: number[] }) {
         {props.projectIds.length === 1 ? '' : 's'}…
       </button>
       {open && (
-        <AuthorityPreflightModal projectIds={props.projectIds} onClose={() => setOpen(false)} />
+        <AuthorityPreflightModal
+          projectIds={props.projectIds}
+          runsWithAllScopes
+          onClose={() => setOpen(false)}
+        />
       )}
     </>
   );
@@ -3383,7 +3387,11 @@ function DraftParticipantAuthorityButton(props: { projectId: number }) {
         ⓘ
       </button>
       {open && (
-        <AuthorityPreflightModal projectIds={[props.projectId]} onClose={() => setOpen(false)} />
+        <AuthorityPreflightModal
+          projectIds={[props.projectId]}
+          runsWithAllScopes
+          onClose={() => setOpen(false)}
+        />
       )}
     </>
   );
@@ -3412,7 +3420,11 @@ function DraftInspectAuthorityButton(props: { projectIds: number[] }) {
         {label}
       </button>
       {open && (
-        <AuthorityPreflightModal projectIds={props.projectIds} onClose={() => setOpen(false)} />
+        <AuthorityPreflightModal
+          projectIds={props.projectIds}
+          runsWithAllScopes
+          onClose={() => setOpen(false)}
+        />
       )}
     </>
   );

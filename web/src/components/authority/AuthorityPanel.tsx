@@ -62,6 +62,27 @@ export type AuthorityPanelProps = {
   projectId: number;
   mode: AuthorityPanelMode;
   /**
+   * Cebab-ph8r [security]: does the run this panel is describing load the
+   * project's OWN files regardless of Trust?
+   *
+   * For a single-agent session the answer is no — Trust decides
+   * `settingSources`, so a project-scope hook or `.mcp.json` server really is
+   * inert while Trust is off, and the "declared but not loaded" copy is true.
+   *
+   * For a BUS participant it is yes. `chain.ts` and `orchestrator.ts` register
+   * every worker and chain participant with a hardcoded
+   * `settingSources: ['user', 'project', 'local']` — Trust is not consulted on
+   * that path at all (CLAUDE.md says so, and the three `register` sites say so).
+   * So the multi-agent preflight was telling the operator that a hostile or
+   * careless project hook was inert when it will auto-execute on every hop with
+   * no human gate. A panel that UNDERSTATES an agent's authority is the worst
+   * direction for this to be wrong in.
+   *
+   * Optional and defaulting to false so the single-agent surfaces — the
+   * in-session disclosure and the new-chat preview — are untouched.
+   */
+  runsWithAllScopes?: boolean;
+  /**
    * When true the panel skips the auto-request on mount. Useful for tests
    * and for the preflight modal which fires the request itself with a
    * `mode: 'probe'` so the operator sees fresh state.
@@ -121,7 +142,14 @@ function toolsModeForPanel(mode: AuthorityPanelMode): {
 }
 
 export function AuthorityPanel(props: AuthorityPanelProps) {
-  const { projectId, mode, noAutoRequest = false, collapsible = false, wantLive = false } = props;
+  const {
+    projectId,
+    mode,
+    noAutoRequest = false,
+    collapsible = false,
+    wantLive = false,
+    runsWithAllScopes = false,
+  } = props;
   const slot = useAuthoritySlot(projectId);
   const { request } = useAuthorityActions();
 
@@ -196,10 +224,10 @@ export function AuthorityPanel(props: AuthorityPanelProps) {
       </header>
       {collapsible ? (
         <div id={bodyId} hidden={collapsed}>
-          {renderBody(slot, mode)}
+          {renderBody(slot, mode, runsWithAllScopes)}
         </div>
       ) : (
-        renderBody(slot, mode)
+        renderBody(slot, mode, runsWithAllScopes)
       )}
     </section>
   );
@@ -223,7 +251,7 @@ function renderStatus(slot: AuthoritySlot): string {
   return `${slot.lastFetchedMode} · ${timeAgo(slot.receivedAt)}`;
 }
 
-function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode) {
+function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode, busScopes: boolean) {
   if (slot.status === 'idle' || slot.status === 'requesting') {
     return <div className="authority-panel-loading">Loading authority…</div>;
   }
@@ -265,8 +293,27 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode) {
   // will not load — real and inert until Trust is on. The panel names them
   // instead of asserting "none declared", the contradiction with the sidebar
   // this bead was filed to remove.
-  const unloadedHooks = authority.unloadedHooks ?? [];
-  const unloadedMcpServers = authority.unloadedMcpServers ?? [];
+  // Cebab-ph8r: on the bus path those "unloaded" declarations DO load, so they
+  // are folded into the loaded lists rather than relabelled. Relabelling alone
+  // would leave the counts wrong — the operator would read "0 MCP servers" for a
+  // participant that starts one on its first hop.
+
+  const declaredHooks = authority.unloadedHooks ?? [];
+  const declaredMcpServers = authority.unloadedMcpServers ?? [];
+  const unloadedHooks = busScopes ? [] : declaredHooks;
+  const unloadedMcpServers = busScopes ? [] : declaredMcpServers;
+  const shownHooks = busScopes ? [...authority.hooks, ...declaredHooks] : authority.hooks;
+  const shownMcpServers = busScopes
+    ? [...authority.mcpServers, ...declaredMcpServers]
+    : authority.mcpServers;
+  // The project's own files are read for a bus participant whatever Trust says,
+  // so the "project scope not read" copy must not fire there either.
+  const scopeRead = busScopes || projectScopeRead;
+  /** Sublabel for a section whose project-scope declarations load without a gate. */
+  const busLoadsNote = (n: number, more: boolean): string | undefined =>
+    n === 0
+      ? undefined
+      : `${n}${more ? ' of these' : ''} from project scope — bus participants load them, Trust does not apply`;
 
   return (
     <div className="authority-panel-body">
@@ -288,26 +335,34 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode) {
       </AuthoritySection>
       <AuthoritySection
         title="MCP servers"
-        count={authority.mcpServers.length}
+        count={shownMcpServers.length}
         sublabel={
-          authority.mcpServers.length === 0
-            ? unloadedMcpServers.length > 0
-              ? `${unloadedMcpServers.length} declared but not loaded — Trust is off`
-              : projectScopeRead
-                ? 'none declared'
-                : 'project scope not read'
-            : unloadedMcpServers.length > 0
-              ? `${unloadedMcpServers.length} more declared but not loaded — Trust is off`
-              : undefined
+          busScopes
+            ? busLoadsNote(declaredMcpServers.length, authority.mcpServers.length > 0)
+            : authority.mcpServers.length === 0
+              ? unloadedMcpServers.length > 0
+                ? `${unloadedMcpServers.length} declared but not loaded — Trust is off`
+                : projectScopeRead
+                  ? 'none declared'
+                  : 'project scope not read'
+              : unloadedMcpServers.length > 0
+                ? `${unloadedMcpServers.length} more declared but not loaded — Trust is off`
+                : undefined
         }
         // Force-open when a declared server sits inert behind Trust — the
-        // operator is about to decide whether to trust exactly these.
-        defaultOpen={unloadedMcpServers.length > 0}
-        stripe={unloadedMcpServers.length > 0 ? 'accent' : 'none'}
+        // operator is about to decide whether to trust exactly these. On the bus
+        // path the same declarations are the reason to open it, for the opposite
+        // reason: they are already live.
+        defaultOpen={unloadedMcpServers.length > 0 || (busScopes && declaredMcpServers.length > 0)}
+        stripe={
+          unloadedMcpServers.length > 0 || (busScopes && declaredMcpServers.length > 0)
+            ? 'accent'
+            : 'none'
+        }
       >
         <McpServersList
-          servers={authority.mcpServers}
-          projectScopeRead={projectScopeRead}
+          servers={shownMcpServers}
+          projectScopeRead={scopeRead}
           unloaded={unloadedMcpServers}
         />
       </AuthoritySection>
@@ -340,26 +395,35 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode) {
       </AuthoritySection>
       <AuthoritySection
         title="Hooks"
-        count={authority.hooks.length}
+        count={shownHooks.length}
         sublabel={
-          authority.hooks.length === 0
-            ? unloadedHooks.length > 0
-              ? `${unloadedHooks.length} declared but not loaded — Trust is off`
-              : 'none declared'
-            : hasLocalHook(authority.hooks)
-              ? 'project-local hook present — review'
-              : unloadedHooks.length > 0
-                ? `${unloadedHooks.length} more declared but not loaded — Trust is off`
-                : undefined
+          busScopes
+            ? (busLoadsNote(declaredHooks.length, authority.hooks.length > 0) ??
+              (hasLocalHook(shownHooks) ? 'project-local hook present — review' : undefined))
+            : authority.hooks.length === 0
+              ? unloadedHooks.length > 0
+                ? `${unloadedHooks.length} declared but not loaded — Trust is off`
+                : 'none declared'
+              : hasLocalHook(authority.hooks)
+                ? 'project-local hook present — review'
+                : unloadedHooks.length > 0
+                  ? `${unloadedHooks.length} more declared but not loaded — Trust is off`
+                  : undefined
         }
         // Force-open when a project-local hook exists (UI-B40's force-expand
         // intent) OR when a declared hook sits inert behind Trust: the operator
         // is about to decide whether to trust the project into auto-executing
         // exactly these (Cebab-66y).
-        defaultOpen={hasLocalHook(authority.hooks) || unloadedHooks.length > 0}
-        stripe={hasLocalHook(authority.hooks) || unloadedHooks.length > 0 ? 'removed' : 'none'}
+        defaultOpen={
+          hasLocalHook(shownHooks) || unloadedHooks.length > 0 || declaredHooks.length > 0
+        }
+        stripe={
+          hasLocalHook(shownHooks) || unloadedHooks.length > 0 || declaredHooks.length > 0
+            ? 'removed'
+            : 'none'
+        }
       >
-        <HooksList hooks={authority.hooks} unloaded={unloadedHooks} />
+        <HooksList hooks={shownHooks} unloaded={unloadedHooks} />
       </AuthoritySection>
       {/* Phase 8 — UI-B41 / B42 / B43: the three name-only enumerations
        *  from the SDK init payload. All collapsed-by-default since their

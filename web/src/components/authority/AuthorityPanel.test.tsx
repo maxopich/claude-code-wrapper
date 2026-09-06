@@ -77,6 +77,7 @@ function mountPanel(props: {
   noAutoRequest?: boolean;
   collapsible?: boolean;
   wantLive?: boolean;
+  runsWithAllScopes?: boolean;
 }) {
   const sent: ClientMsg[] = [];
   const send = props.send ?? ((m) => sent.push(m));
@@ -92,6 +93,7 @@ function mountPanel(props: {
           noAutoRequest={props.noAutoRequest}
           collapsible={props.collapsible}
           wantLive={props.wantLive}
+          runsWithAllScopes={props.runsWithAllScopes}
         />
       </AuthorityProvider>,
     );
@@ -689,5 +691,140 @@ describe('AuthorityPanel — collapsible (in-session inline)', () => {
     const toggle = container.querySelector('.authority-panel-toggle') as HTMLButtonElement;
     expect(toggle.getAttribute('aria-expanded')).toBe('true');
     expect((container.querySelector('#authority-body-1') as HTMLElement).hidden).toBe(false);
+  });
+});
+
+/**
+ * Cebab-ph8r [security]: the panel must not repeat the single-agent scope rule
+ * on the bus path.
+ *
+ * `chain.ts` and `orchestrator.ts` register every worker and chain participant
+ * with a hardcoded `settingSources: ['user', 'project', 'local']` — Trust is not
+ * consulted there. So the multi-agent preflight, which reuses this panel, was
+ * telling the operator that a project's hooks and `.mcp.json` servers were
+ * "declared but not loaded — Trust is off" for a run that loads and
+ * auto-executes them on every hop with no human gate.
+ *
+ * Understating an agent's authority is the dangerous direction: the operator
+ * reads "inert" and approves a run they would otherwise have stopped.
+ */
+describe('AuthorityPanel — bus participants load project scope whatever Trust says', () => {
+  const declaredServer = {
+    name: 'proj-server',
+    status: 'unloaded',
+    scope: 'mcp-json' as const,
+    tools: [],
+    trust: 'pending_tofu' as const,
+  };
+  const declaredHook = {
+    hookKind: 'PreToolUse',
+    scope: 'project' as const,
+    scopePath: '/u/p/.claude/settings.json',
+    command: '/bin/rm -rf /',
+  };
+
+  function deliverUntrusted(handlerRef: { current: ((m: ServerMsg) => void) | null }) {
+    act(() => {
+      handlerRef.current!({
+        type: 'project_authority',
+        projectId: 1,
+        authority: mkAuthority({
+          settingSourcesUsed: ['user'],
+          mcpServers: [],
+          hooks: [],
+          unloadedMcpServers: [declaredServer],
+          unloadedHooks: [declaredHook],
+        }),
+      });
+    });
+  }
+
+  function sublabels(): string[] {
+    return [...container.querySelectorAll('.authority-section-sublabel')].map(
+      (e) => e.textContent ?? '',
+    );
+  }
+
+  test('CONTROL: single-agent still says the declaration is inert behind Trust', () => {
+    // The rule is real for a single-agent session — Trust decides
+    // `settingSources` there — so this must keep saying so. A fix that just
+    // deleted the copy would satisfy the bus case and break this one.
+    const handlerRef = { current: null as ((m: ServerMsg) => void) | null };
+    mountPanel({ mode: 'preflight', noAutoRequest: true, handlerRef });
+    deliverUntrusted(handlerRef);
+
+    const text = sublabels().join(' | ');
+    expect(text).toContain('declared but not loaded — Trust is off');
+  });
+
+  test('bus preflight never claims a declaration is unloaded', () => {
+    const handlerRef = { current: null as ((m: ServerMsg) => void) | null };
+    mountPanel({ mode: 'preflight', noAutoRequest: true, handlerRef, runsWithAllScopes: true });
+    deliverUntrusted(handlerRef);
+
+    expect(sublabels().join(' | ')).not.toContain('not loaded');
+    expect(sublabels().join(' | ')).not.toContain('Trust is off');
+  });
+
+  test('bus preflight says instead that Trust does not apply', () => {
+    const handlerRef = { current: null as ((m: ServerMsg) => void) | null };
+    mountPanel({ mode: 'preflight', noAutoRequest: true, handlerRef, runsWithAllScopes: true });
+    deliverUntrusted(handlerRef);
+
+    const text = sublabels().join(' | ');
+    expect(text).toContain('bus participants load them');
+    expect(text).toContain('Trust does not apply');
+  });
+
+  test('the COUNTS include them, so the operator does not read zero', () => {
+    // Relabelling alone would have left "MCP servers 0" beside a sentence
+    // saying one loads. The counts are what most readers scan.
+    const handlerRef = { current: null as ((m: ServerMsg) => void) | null };
+    mountPanel({ mode: 'preflight', noAutoRequest: true, handlerRef, runsWithAllScopes: true });
+    deliverUntrusted(handlerRef);
+
+    const counts = [...container.querySelectorAll('.authority-section-count')].map(
+      (e) => e.textContent ?? '',
+    );
+    // One MCP server and one hook are declared; both load on this path.
+    expect(counts.filter((c) => c === '1').length).toBeGreaterThanOrEqual(2);
+  });
+
+  test('the two "will not load while Trust is off" notes do not render', () => {
+    // Found by a revert-check on my own fix: a mutation that left the sublabels
+    // correct but still handed the lists their `unloaded` arrays passed every
+    // other case here. The sublabel is the summary; THESE are the sentences
+    // that tell the operator to go turn Trust on to make a hook that is already
+    // live "auto-execute".
+    const handlerRef = { current: null as ((m: ServerMsg) => void) | null };
+    mountPanel({ mode: 'preflight', noAutoRequest: true, handlerRef, runsWithAllScopes: true });
+    deliverUntrusted(handlerRef);
+
+    expect(container.querySelector('.mcp-servers-unloaded')).toBeNull();
+    expect(container.querySelector('.hooks-unloaded-note')).toBeNull();
+    expect(container.textContent).not.toContain('while Trust is off');
+    expect(container.textContent).not.toContain('Turn Trust on');
+  });
+
+  test('CONTROL: single-agent still renders both of those notes', () => {
+    // The selectors above only mean something if they match when they should.
+    const handlerRef = { current: null as ((m: ServerMsg) => void) | null };
+    mountPanel({ mode: 'preflight', noAutoRequest: true, handlerRef });
+    deliverUntrusted(handlerRef);
+
+    expect(container.querySelector('.mcp-servers-unloaded')).not.toBeNull();
+    expect(container.querySelector('.hooks-unloaded-note')).not.toBeNull();
+    expect(container.textContent).toContain('while Trust is off');
+  });
+
+  test('and the project-scope-not-read copy does not fire either', () => {
+    // `settingSourcesUsed` is `['user']` because the resolve used the
+    // single-agent rule. On the bus path the project's files ARE read, so the
+    // "Not checked" empty state would be a second false claim.
+    const handlerRef = { current: null as ((m: ServerMsg) => void) | null };
+    mountPanel({ mode: 'preflight', noAutoRequest: true, handlerRef, runsWithAllScopes: true });
+    deliverUntrusted(handlerRef);
+
+    expect(container.textContent).not.toContain('Not checked');
   });
 });
