@@ -1614,6 +1614,27 @@ export function reduce(state: AppState, action: Action): AppState {
         sessionsByProject: drainPendingPermissionCards(
           retireRunningSessions(state.sessionsByProject),
         ),
+        // Cebab-so96: and the same argument retires the PENDING QUEUE. A
+        // `pending:*` bucket is a turn waiting for its `session_started`; the
+        // server aborted and cleared `conn.inFlight` on this socket's close, so
+        // that message will never arrive and the bucket is dead.
+        //
+        // Left queued it was worse than stale: adoption is oldest-first
+        // (Cebab-ygu.25, so overlapping fresh turns keep their own messages),
+        // and nothing else drains a bucket whose turn never reported. So the
+        // NEXT unrelated turn's `session_started` adopted the stranded head —
+        // the operator's new prompt vanished into an orphan bucket, the answer
+        // streamed under the previous prompt, and the tab stayed permanently
+        // one message behind for that project until a full page reload. #478
+        // removed the only path that used to clear it (`new_session`), and
+        // #479 then un-wedged the composer after exactly this event, so the
+        // documented escape walked straight into it.
+        //
+        // Clearing the QUEUE only. The bucket itself stays in
+        // `sessionsByProject`, retired to `done` by `retireRunningSessions`
+        // above: it holds a message the operator actually typed, and deleting
+        // it would blank the chat they are looking at.
+        pendingByProject: {},
         // Registers W08/W09: a replay in flight when the socket dropped will
         // never get its `session_history_end`. Clearing here bounds the stuck
         // flag to the connection that stranded it — see the field's JSDoc for
