@@ -4295,6 +4295,42 @@ export function trustChipState(trusted: boolean, mode: SessionPermissionMode): T
  * `isLive` is the server-confirmed liveness (`state.liveSessions[id]`); it
  * backstops the optimistic `status:'running'` set in `user_send`.
  */
+/**
+ * Is a turn still in flight for this session AS THE SERVER SEES IT — the
+ * predicate the composer's submit gate must use.
+ *
+ * Deliberately NOT the same question `sessionPhase` answers, and the split is
+ * the point. `sessionPhase` describes what to SHOW the operator and is right to
+ * call the turn `done` the instant `result` lands: the answer is complete and
+ * the thinking indicator should go. This one decides whether a `send_message`
+ * would be ACCEPTED, and the server keeps refusing for a while after that.
+ *
+ * WHY THE TWO DIVERGE. `runOneTurn`'s `finally` (`ws/server.ts`) runs
+ * `runner.close()` — full SDK subprocess teardown — BEFORE it clears
+ * `conn.inFlight`, and `describeTurnInFlight` reads that map. Measured live on
+ * 2026-09-05: a follow-up sent the moment `result` arrived was refused for
+ * 549ms / 565ms / 545ms across three runs, with `session_running(false)` landing
+ * at 536-539ms. Stable, because it is teardown rather than jitter.
+ *
+ * That window is inside human reaction time for someone who read the answer as
+ * it streamed and already knows their next message — and until this existed the
+ * UI told them the turn was over, took the Enter, appended their message
+ * optimistically, and then surfaced `that session already has a turn running`.
+ * `InputBox`'s Register W02 guard exists precisely so the operator is
+ * "PREVENTED rather than shown an error toast for something the UI let them
+ * do"; it was reading the optimistic status, so it stopped covering the case it
+ * was written for.
+ *
+ * `isLive` is `state.liveSessions[id]`, set by `session_running(true)` and
+ * cleared by the `finally`'s `session_running(false)` — the same block that
+ * clears `conn.inFlight`, which is what makes it the honest signal here. It
+ * cannot wedge: a disconnect resets `liveSessions` to `{}` and retires running
+ * sessions, and `project_opened` re-seeds it from `runningSessionIds`.
+ */
+export function turnInFlight(status: SessionView['status'] | undefined, isLive: boolean): boolean {
+  return status === 'running' || isLive;
+}
+
 export type SessionPhase =
   'idle' | 'thinking' | 'tool-running' | 'streaming' | 'awaiting-permission' | 'done' | 'error';
 

@@ -21,7 +21,7 @@ const ws = new WebSocket(url);
 
 let projectId: number | undefined;
 let sessionId: string | undefined;
-let phase: 'first' | 'second' | 'done' = 'first';
+let phase: 'first' | 'awaiting-release' | 'second' | 'done' = 'first';
 let approvals = 0;
 let lastResultText = '';
 
@@ -107,16 +107,21 @@ ws.on('message', (raw) => {
     console.log(`[live] phase=${phase} cost=$${msg.totalCostUsd.toFixed(6)}`);
     console.log('[live] result text:', JSON.stringify(msg.result));
     if (phase === 'first') {
-      phase = 'second';
-      // Pass the sessionId to test --resume
-      setTimeout(() => {
-        send({
-          type: 'send_message',
-          projectId,
-          sessionId,
-          text: 'What exact string did the bash command print? Answer with just that string, nothing else.',
-        });
-      }, 500);
+      // Cebab-uyuh: WAIT FOR THE RELEASE, do not sleep on a guess.
+      //
+      // `result` is not the end of the turn as the server sees it. The
+      // `finally` in `runOneTurn` tears the SDK subprocess down BEFORE it
+      // clears `conn.inFlight`, and `describeTurnInFlight` reads that map — so
+      // a follow-up sent here is refused with `that session already has a turn
+      // running`. This used to be a `setTimeout(…, 500)`, which is a guess that
+      // sat just UNDER the real window: measured 2026-09-05 the guard cleared
+      // after 549 / 565 / 545 ms, with `session_running(false)` at 536-539 ms.
+      // So the sleep failed every run, and read like a flaky resume check.
+      //
+      // `session_running { running: false }` is emitted from that same finally,
+      // which makes it the signal rather than a proxy for one. The UI now gates
+      // its composer on the same fact (`turnInFlight` in `web/src/store.ts`).
+      phase = 'awaiting-release';
     } else {
       phase = 'done';
       console.log('');
@@ -139,6 +144,19 @@ ws.on('message', (raw) => {
         process.exit(resumed ? 0 : 1);
       }, 200);
     }
+  } else if (
+    msg.type === 'session_running' &&
+    msg.running === false &&
+    phase === 'awaiting-release'
+  ) {
+    phase = 'second';
+    console.log('[live] turn released by the server — sending the resume follow-up');
+    send({
+      type: 'send_message',
+      projectId,
+      sessionId,
+      text: 'What exact string did the bash command print? Answer with just that string, nothing else.',
+    });
   } else if (msg.type === 'wrapper_error') {
     console.error('[live] wrapper_error', msg.kind, msg.message);
     process.exit(1);
