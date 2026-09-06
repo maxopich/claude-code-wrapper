@@ -85,7 +85,7 @@ import {
   resolveFromAuthTokenResponse,
   resolveFromCloseInfo,
 } from './components/connectionLost';
-import { canSaveManagedEdit, HELD_MESSAGES_CAP, managedEditorMode } from './store';
+import { canSaveManagedEdit, HELD_MESSAGES_CAP, managedEditorMode, turnInFlight } from './store';
 import type { ActiveRunView } from './store';
 import { downloadSessionLog, isDownloadError } from './exports';
 import { readStored, writeStored } from './prefs';
@@ -2509,7 +2509,11 @@ function AppShell({
     }
   }, [activeStatus, refreshIterations]);
 
-  const running = session?.status === 'running';
+  // Cebab-uyuh: the server's guard, not the optimistic status. `result` sets
+  // status 'done' ~540ms before `conn.inFlight` is cleared, and a Send in that
+  // window is refused with an error toast for something the UI said was over.
+  // `turnInFlight` carries the measurement and why this is not `sessionPhase`.
+  const running = turnInFlight(session?.status, sessionIsLive);
   const workspaceReady = state.settings?.workspaceRootValid ?? false;
   // Cluster C Phase 1: `running` no longer hard-disables the composer —
   // the InputBox now flips its button to Stop + leaves the textarea
