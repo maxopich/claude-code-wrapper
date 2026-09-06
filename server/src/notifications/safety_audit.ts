@@ -4,8 +4,10 @@ import { getDb } from '../db.js';
 import { getOperatorId } from './operator.js';
 import {
   appendAuditTip,
+  highWaterTipsPerAnchor,
   isMirrorEstablished,
   markMirrorEstablished,
+  readAuditTipEntries,
   readLatestAuditTip,
   readMaxTipForAnchor,
 } from './audit_tip.js';
@@ -504,7 +506,14 @@ function checkAgainstTipMirror(rowsChecked: number, anchorRowid: number): Verify
     // No mirror. Benign on the first boot after upgrading to a build that has
     // one; suspicious once we know mirroring was live — the DB flag is what
     // separates those two, and an attacker has to find and clear it too.
-    if (isMirrorEstablished() && rowsChecked > 0) {
+    // Cebab-5y4t: NOT `&& rowsChecked > 0`. The flag is set by the first
+    // append, which is also what writes the mirror, so "mirroring was
+    // established and the file is gone" is already the whole signal — a fresh
+    // install has the flag false and is covered without the conjunct. The count
+    // added nothing legitimate and was load-bearing for the attacker: re-seating
+    // the anchor drives `rowsChecked` to 0, which disarmed this branch and made
+    // deleting the mirror the free second step of the erasure.
+    if (isMirrorEstablished()) {
       return { ok: false, reason: 'tip_mirror_missing' };
     }
     return null;
@@ -517,16 +526,96 @@ function checkAgainstTipMirror(rowsChecked: number, anchorRowid: number): Verify
   // Both are benign: nothing claims this anchor ever held more rows than it
   // does now, so there is nothing to be short of.
   const commitment = readMaxTipForAnchor(anchorRowid);
-  if (!commitment) return null;
 
   // `<` and not `!==`: the chain legitimately grows between an append and a
   // verify, so only a SHORTER chain than the mirror's high-water mark for this
   // anchor is evidence of truncation. The max is what a post-truncation append
   // cannot lower — reading the newest line instead was the self-heal defect.
-  if (rowsChecked < commitment.count) {
+  if (commitment && rowsChecked < commitment.count) {
     return { ok: false, reason: 'tail_truncated', brokenAt: commitment.rowId };
   }
 
+  // Cebab-5y4t: and whether or not THIS anchor has a commitment, the rows every
+  // PRIOR generation committed to must still be here, unchanged.
+  return checkCommittedRowsSurvive();
+}
+
+/**
+ * Cebab-5y4t [security]: do the rows the mirror committed to still exist, with
+ * the digests it recorded?
+ *
+ * THE HOLE THIS CLOSES. `readMaxTipForAnchor` scopes the commitment to the
+ * CURRENT anchor's rowid and yields `null` when no line names it — which was
+ * read as benign, because that is what a fresh migration anchor looks like
+ * before its first post-migration append. But `anchorRowid` is
+ * `MAX(rowid) WHERE kind='audit.chain_reset'`, computed from the very database
+ * the mirror exists to corroborate. Moving that row to a new highest rowid puts
+ * every real row BELOW the anchor, so `rowsChecked` is 0, no line names the new
+ * rowid, and `verifyChain` returned `{ ok: true, rowsChecked: 0 }`. Zero also
+ * disarmed the `tip_mirror_missing` branch, which is guarded on
+ * `rowsChecked > 0`, so the mirror could then be deleted too.
+ *
+ * MEASURED on the merged tree before this landed: five appends verify at
+ * `rowsChecked: 5`; after `UPDATE ... SET rowid=(SELECT MAX(rowid)+1 ...)` on
+ * the anchor, `{ ok: true, rowsChecked: 0 }`; after
+ * `DELETE FROM safety_audit WHERE kind <> 'audit.chain_reset'`, still
+ * `{ ok: true, rowsChecked: 0 }` with the mirror untouched on disk. That
+ * falsified `audit_tip.ts`'s "erasing the trail now takes two coordinated
+ * actions in two places" — it took two SQL statements in one place.
+ *
+ * THE DISCRIMINATOR. Not "does a line name the current anchor" — that is a fact
+ * about attacker-controlled state. It is whether the rows PRIOR generations
+ * committed to are still present and still hash to what was committed. A real
+ * migration leaves them all in place (it inserts a marker, it deletes nothing);
+ * an erasure does not.
+ *
+ * WHY A DIGEST AND NOT JUST EXISTENCE. Re-seating shrinks the verified range to
+ * nothing, so rows below the anchor stop being digest-checked and could be
+ * rewritten rather than removed. The committed tip's digest is RECOMPUTED from
+ * the row's bytes and compared against what the mirror committed — comparing
+ * the row's STORED `hash_self` instead would catch only a rewritten digest, and
+ * the realistic edit changes `payload_json` and leaves `hash_self` alone, so the
+ * row still matches itself. No chain walk is needed: each row stores the
+ * `hash_prev` it was computed with.
+ *
+ * WHAT IT STILL DOES NOT CATCH, stated because `audit_tip.ts`'s header is
+ * careful about this and must stay honest: a re-seat alone still reports
+ * `{ ok: true, rowsChecked: 0 }` when nothing was removed or rewritten, and a
+ * row that is neither a committed high-water tip nor above the anchor can still
+ * be mutated undetected. Closing that needs the verified range not to depend on
+ * an in-DB anchor at all — `Cebab-lf1u`.
+ *
+ * Guarded on `isMirrorEstablished()` for the same reason the missing-mirror
+ * branch is: a fresh database beside an older operator's mirror would otherwise
+ * report every commitment as erased.
+ */
+function checkCommittedRowsSurvive(): VerifyChainResult | null {
+  if (!isMirrorEstablished()) return null;
+  const highWater = highWaterTipsPerAnchor(readAuditTipEntries());
+  if (highWater.length === 0) return null;
+
+  const db = getDb();
+  const lookup = db.prepare<[string], SafetyAuditRow>(
+    `SELECT id, ts, session_id, parent_session_id, operator_id, agent_id, kind, reason_code,
+            payload_json, hash_prev, hash_self, mode
+     FROM safety_audit WHERE id = ?`,
+  );
+  for (const tip of highWater) {
+    const row = lookup.get(tip.rowId);
+    if (!row) {
+      return { ok: false, reason: 'tail_truncated', brokenAt: tip.rowId };
+    }
+    // RECOMPUTED from the row's own bytes, not compared to its stored
+    // `hash_self`. A stored-digest comparison catches only a rewritten digest;
+    // the realistic edit changes `payload_json` and leaves `hash_self` alone,
+    // and that row still matches itself. Recomputing against the digest the
+    // MIRROR committed catches both, and needs no chain walk because each row
+    // stores the `hash_prev` it was computed with.
+    const recomputed = computeHashSelf(row, row.hash_prev).toString('hex');
+    if (recomputed !== tip.hashSelf) {
+      return { ok: false, reason: 'row_mismatch', brokenAt: tip.rowId };
+    }
+  }
   return null;
 }
 

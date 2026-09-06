@@ -30,10 +30,22 @@ import { getSetting, setSetting } from '../repo/settings.js';
  *
  *   - The realistic attack — SQL against `cebab.sqlite`, or swapping the file
  *     out — no longer verifies clean.
- *   - Erasing the trail now takes two coordinated actions in two places.
- *   - Skipping the second is caught (`tail_truncated`); doing only the second
- *     is also caught (`tip_mirror_missing`), because the database records that
- *     mirroring was established.
+ *   - Erasing the trail takes three coordinated actions: the rows, this file,
+ *     and the `settings` flag that records mirroring was ever established.
+ *   - Doing only the rows is caught (`tail_truncated`); doing only this file is
+ *     caught (`tip_mirror_missing`), because of that flag.
+ *
+ * Cebab-5y4t is why the third is named. That sentence used to say two actions
+ * in two places, and it was false: `verifyChain` scoped its commitment to the
+ * CURRENT anchor's rowid, which is `MAX(rowid) WHERE kind='audit.chain_reset'`
+ * — a value inside the database being corroborated. Moving that row to a new
+ * highest rowid put every real row below it, so nothing was verified, no line
+ * named the new anchor, and the whole log could then be deleted while
+ * verification reported healthy. Worse, the resulting `rowsChecked: 0` also
+ * disarmed the `tip_mirror_missing` branch, so this file could be deleted for
+ * free afterwards. `verifyChain` now requires the rows every PRIOR generation
+ * committed to to still be present and to still hash to what was committed, and
+ * the missing-mirror branch no longer consults `rowsChecked` at all.
  *
  * A determined same-uid attacker who does both, in the right order, still
  * wins. Closing that needs a commitment the operator's own account cannot
@@ -168,30 +180,66 @@ export function readLatestAuditTip(): AuditTipEntry | null {
  * documented upgrade window (see the header) for one anchor generation, until
  * the first append under the new build re-commits with a tagged line.
  */
-export function readMaxTipForAnchor(anchorRowid: number): AuditTipEntry | null {
+/**
+ * Every commitment the mirror holds, in file order, torn or garbage lines
+ * skipped. One parse implementation for all three readers — `readLatestAuditTip`
+ * and `readMaxTipForAnchor` both used to carry their own copy of the same
+ * validation, which is two more places for "what counts as a usable line" to
+ * drift apart.
+ *
+ * Returns `[]` when the mirror is absent or unreadable; callers separate
+ * "no mirror" from "mirror disagrees" themselves, because those mean different
+ * things (see `checkAgainstTipMirror`).
+ */
+export function readAuditTipEntries(): AuditTipEntry[] {
   let text: string;
   try {
     text = fs.readFileSync(auditTipPath(), 'utf8');
   } catch {
-    return null;
+    return [];
   }
-  let best: AuditTipEntry | null = null;
+  const out: AuditTipEntry[] = [];
   for (const raw of text.split('\n')) {
     const line = raw.trim();
     if (!line) continue;
     try {
       const parsed = JSON.parse(line) as AuditTipEntry;
-      if (
-        typeof parsed?.rowId === 'string' &&
-        typeof parsed?.count === 'number' &&
-        parsed?.anchorRowid === anchorRowid &&
-        (best === null || parsed.count > best.count)
-      ) {
-        best = parsed;
-      }
+      if (typeof parsed?.rowId === 'string' && typeof parsed?.count === 'number') out.push(parsed);
     } catch {
-      // Torn or garbage line — skip, same tolerance as readLatestAuditTip.
+      // Torn or garbage line — a crash artifact, not evidence of tampering.
     }
+  }
+  return out;
+}
+
+/**
+ * The high-water commitment for each anchor GENERATION the mirror has seen —
+ * the entry with the greatest `count` per distinct `anchorRowid`, with legacy
+ * untagged entries grouped under their own key.
+ *
+ * Cebab-5y4t: these are the rows the mirror asserts once existed, across every
+ * generation rather than only the current one. `verifyChain` requires each to
+ * still be present and unchanged, which is what makes re-seating the anchor
+ * stop being a way to shrink the verified range to nothing and then erase what
+ * fell outside it.
+ */
+export function highWaterTipsPerAnchor(entries: readonly AuditTipEntry[]): AuditTipEntry[] {
+  const best = new Map<string, AuditTipEntry>();
+  for (const e of entries) {
+    // `undefined` is its own generation, not a wildcard: a legacy untagged line
+    // must not be attributed to a tagged anchor it was not written under.
+    const key = e.anchorRowid === undefined ? 'legacy' : String(e.anchorRowid);
+    const prev = best.get(key);
+    if (!prev || e.count > prev.count) best.set(key, e);
+  }
+  return [...best.values()];
+}
+
+export function readMaxTipForAnchor(anchorRowid: number): AuditTipEntry | null {
+  let best: AuditTipEntry | null = null;
+  for (const entry of readAuditTipEntries()) {
+    if (entry.anchorRowid !== anchorRowid) continue;
+    if (best === null || entry.count > best.count) best = entry;
   }
   return best;
 }
