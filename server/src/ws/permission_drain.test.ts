@@ -40,6 +40,17 @@ withTempDataDir('cebab-permission-drain-');
 
 const SESSION = 'sess-drain';
 
+/** Collects what a drain puts on the wire, so the live half can be asserted. */
+function collectSends(): { sent: ServerMsg[]; send: (m: ServerMsg) => void } {
+  const sent: ServerMsg[] = [];
+  return { sent, send: (m) => sent.push(m) };
+}
+
+/** A `send` that must never be called. */
+const noSend = (): never => {
+  throw new Error('send called for an empty drain');
+};
+
 function seedSession(sessionId = SESSION): void {
   const project = upsertProject('drain-proj', '/tmp/drain-proj');
   createSession(sessionId, project.id, null);
@@ -131,7 +142,7 @@ describe('[security] a drained permission replays as decided, not as a live card
       ['req-mine', pendingEntry(SESSION)],
       ['req-theirs', pendingEntry('sess-other')],
     ]);
-    await settle(cleanupPendingPermissionsForSession(pending, SESSION));
+    await settle(cleanupPendingPermissionsForSession(pending, SESSION, collectSends().send));
 
     expect(undecidedCards(replay())).toEqual([]);
     expect(replay().filter((m) => m.type === 'permission_decided')[0]).toMatchObject({
@@ -163,7 +174,7 @@ describe('[security] a drained permission replays as decided, not as a live card
       ['req-mine', pendingEntry(SESSION)],
       ['req-theirs', pendingEntry('sess-other')],
     ]);
-    await settle(drainPendingPermissionsForEndedTurn(pending, SESSION));
+    await settle(drainPendingPermissionsForEndedTurn(pending, SESSION, collectSends().send));
 
     // The dead turn's card now replays as decided — and NOT as `interrupted`,
     // which would falsely claim the operator hit Stop on a turn that crashed.
@@ -186,7 +197,7 @@ describe('[security] a drained permission replays as decided, not as a live card
     await seedRequest('req-1');
     const pending = new Map<string, PendingPermission>([['req-1', pendingEntry(SESSION)]]);
 
-    await settle(drainPendingPermissionsForEndedTurn(pending, SESSION));
+    await settle(drainPendingPermissionsForEndedTurn(pending, SESSION, collectSends().send));
 
     // The map is empty — a subsequent operator click finds nothing to resolve.
     expect(pending.has('req-1')).toBe(false);
@@ -240,15 +251,123 @@ describe('[security] a drained permission replays as decided, not as a live card
     const a = drainAllPendingPermissions(new Map(), () => {
       throw new Error('recorder called for an empty drain');
     });
-    const b = cleanupPendingPermissionsForSession(new Map(), SESSION, () => {
+    // Cebab-4igs: `send` took the third slot, so these must name BOTH
+    // injections explicitly. Passing one throwing function and letting it land
+    // on whichever parameter is third would keep the test green while quietly
+    // measuring the other one.
+    const b = cleanupPendingPermissionsForSession(new Map(), SESSION, noSend, () => {
       throw new Error('recorder called for an empty drain');
     });
-    const c = drainPendingPermissionsForEndedTurn(new Map(), SESSION, () => {
+    const c = drainPendingPermissionsForEndedTurn(new Map(), SESSION, noSend, () => {
       throw new Error('recorder called for an empty drain');
     });
     expect([...a, ...b, ...c]).toEqual([]);
 
     expect(listEvents(SESSION)).toHaveLength(before);
+  });
+});
+
+describe('[security] Cebab-4igs — the LIVE client is told, not just the transcript', () => {
+  // Register S06 made the drains persist an honest row, so a REPLAY renders the
+  // card as decided. The tab that was already open saw nothing: the drains sent
+  // no `permission_decided`, and nothing else closes a card short of `ws_close`.
+  //
+  // The operator therefore kept enabled Allow/Deny buttons for a settled
+  // request. Clicking Allow dispatched an optimistic `allow` locally and hit
+  // `if (!pending) return` on the server, which echoes nothing back — so the
+  // live UI displayed ALLOWED for a call the audit record calls denied, and a
+  // reload flipped it to "denied — automatic".
+
+  test('turn death echoes a deny the open tab can act on', async () => {
+    seedSession();
+    await seedRequest('req-1');
+    const { sent, send } = collectSends();
+    const pending = new Map<string, PendingPermission>([['req-1', pendingEntry(SESSION)]]);
+
+    await settle(drainPendingPermissionsForEndedTurn(pending, SESSION, send));
+
+    expect(sent).toEqual([
+      {
+        type: 'permission_decided',
+        sessionId: SESSION,
+        requestId: 'req-1',
+        decision: 'deny',
+        reason: 'turn_ended',
+      },
+    ]);
+  });
+
+  test('interrupt echoes a deny, and says the operator did not make it', async () => {
+    seedSession();
+    await seedRequest('req-1');
+    const { sent, send } = collectSends();
+    const pending = new Map<string, PendingPermission>([['req-1', pendingEntry(SESSION)]]);
+
+    await settle(cleanupPendingPermissionsForSession(pending, SESSION, send));
+
+    // `reason` is what stops the tab claiming a human refused this. A bare
+    // deny on the wire would render the same as an operator's own Deny click.
+    expect(sent).toEqual([
+      {
+        type: 'permission_decided',
+        sessionId: SESSION,
+        requestId: 'req-1',
+        decision: 'deny',
+        reason: 'interrupted',
+      },
+    ]);
+  });
+
+  test('the echo is session-scoped, like the drain itself', async () => {
+    // A concurrent session's card on the same connection belongs to its own
+    // turn. Telling the client it was decided would be the same lie in reverse.
+    seedSession();
+    seedSession('sess-other');
+    await seedRequest('req-mine');
+    await seedRequest('req-theirs', 'sess-other');
+    const { sent, send } = collectSends();
+    const pending = new Map<string, PendingPermission>([
+      ['req-mine', pendingEntry(SESSION)],
+      ['req-theirs', pendingEntry('sess-other')],
+    ]);
+
+    await settle(drainPendingPermissionsForEndedTurn(pending, SESSION, send));
+
+    expect(sent.map((m) => (m as { requestId: string }).requestId)).toEqual(['req-mine']);
+  });
+
+  test('the wire and the transcript agree — one deny each, same reason', async () => {
+    // The divergence this closes is between these two views, so assert them
+    // against each other rather than each alone.
+    seedSession();
+    await seedRequest('req-1');
+    const { sent, send } = collectSends();
+    const pending = new Map<string, PendingPermission>([['req-1', pendingEntry(SESSION)]]);
+
+    await settle(drainPendingPermissionsForEndedTurn(pending, SESSION, send));
+
+    const replayed = replay().filter((m) => m.type === 'permission_decided');
+    expect(replayed).toHaveLength(1);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      decision: (replayed[0] as { decision: string }).decision,
+      reason: (replayed[0] as { reason: string }).reason,
+    });
+  });
+
+  test('the socket-close drain deliberately sends NOTHING', async () => {
+    // Its socket is going away, so nothing could receive it; the client closes
+    // those cards itself in `ws_close` via `drainPendingPermissionCards`. This
+    // is here so "add a send to the other one too" is a deliberate change
+    // rather than a consistency tidy-up.
+    seedSession();
+    await seedRequest('req-1');
+    const pending = new Map<string, PendingPermission>([['req-1', pendingEntry(SESSION)]]);
+
+    await settle(drainAllPendingPermissions(pending));
+
+    expect(pending.size).toBe(0);
+    expect(replay().filter((m) => m.type === 'permission_decided')).toHaveLength(1);
   });
 });
 
@@ -263,9 +382,13 @@ describe('[security] Cebab-ygu.8 source tripwire — runOneTurn drains on turn d
   const serverSrc = fs.readFileSync(path.resolve(__dirname, 'server.ts'), 'utf8');
 
   test('the finally drains the session pending permissions after inFlight.delete', () => {
+    // Cebab-4igs: the call now threads the connection's `send`, so the pinned
+    // shape moves with it. Still the same tripwire — it reddens if the drain is
+    // dropped from the teardown, and now also if it stops reaching the wire.
     expect(serverSrc).toContain(
-      'drainPendingPermissionsForEndedTurn(conn.pendingPermissions, sessionId);',
+      'drainPendingPermissionsForEndedTurn(conn.pendingPermissions, sessionId, (m) =>',
     );
+    expect(serverSrc).toContain('send(conn.ws, m),');
   });
 
   test('the drain sits inside runOneTurn between inFlight.delete and closeLogger', () => {
@@ -273,7 +396,7 @@ describe('[security] Cebab-ygu.8 source tripwire — runOneTurn drains on turn d
     // not in some unrelated branch. Pin the ordering the fix relies on.
     const teardown = serverSrc.indexOf('conn.inFlight.delete(sessionId);');
     const drain = serverSrc.indexOf(
-      'drainPendingPermissionsForEndedTurn(conn.pendingPermissions, sessionId);',
+      'drainPendingPermissionsForEndedTurn(conn.pendingPermissions, sessionId, (m) =>',
     );
     const closeLog = serverSrc.indexOf('closeLogger(sessionId);');
     expect(teardown).toBeGreaterThanOrEqual(0);
