@@ -115,6 +115,7 @@ import {
   multiAgentEventToLogRow,
   multiAgentMutationToLogRow,
 } from './session_log.js';
+import { pendingRetryToDescriptor } from '../bus/pending_retry.js';
 import { InstallError, installBusForProject, uninstallBusForProject } from '../bus/install.js';
 import {
   abandonPendingBusGates,
@@ -3379,19 +3380,13 @@ export function emitResumedSession(conn: Conn, resumed: ResumedSession): void {
   // Item #4: hydrate the pending-retry banner descriptor from the persisted
   // columns. Survives both R-A (live re-attach — slot was set by an
   // onWorkerFailed in this process and lives in the DB) and R-B
-  // (server restart — slot persisted in the prior process). Translate from
-  // the DB `prompt` field to the wire `lastPrompt` field; both carry the
-  // same bytes, just different names. The router's onPendingRetry callback
-  // handles AFTER-attach transitions (a Continue+turn that re-fails, etc.).
+  // (server restart — slot persisted in the prior process). The DB `prompt`
+  // field becomes the wire `lastPrompt` field via the one shared mapper both
+  // routers use; the router's onPendingRetry callback handles AFTER-attach
+  // transitions (a Continue+turn that re-fails, etc.).
   const pendingRow = getPendingRetry(resumed.handle.sessionId);
   const pendingRetry: PendingRetryDescriptor | undefined = pendingRow
-    ? {
-        agentName: pendingRow.agentName,
-        reason: pendingRow.reason,
-        lastPrompt: pendingRow.prompt,
-        ts: pendingRow.ts,
-        errorEventId: pendingRow.errorEventId,
-      }
+    ? pendingRetryToDescriptor(pendingRow)
     : undefined;
   // Item #5: hydrate the pause-on-dangerous overlay from the DB so the banner
   // restores after R-A re-attach (live registry still wired) and R-B

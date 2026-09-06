@@ -532,23 +532,22 @@ function rowToPendingRetry(row: PendingRetryRow): PendingRetry {
  * session. `clearPendingRetry` is the per-agent reap and is what the
  * orchestrator uses; prefer it wherever one agent's slot is meant.
  *
- * "TEARDOWN ONLY" IS WHAT THIS USED TO SAY, AND IT IS NOT WHAT THE CALLERS DO.
- * `chain.ts` uses the null-clear at three sites and only one is teardown:
- * `handle.stop` (teardown), `onTurnSucceeded` when the recovered agent owns the
- * single slot, and the retry path clearing before re-delivery. That is a
- * consequence of chain still being on the single-slot pending-retry API rather
- * than a misuse — `Cebab-6c1m` tracks moving it over, and `Cebab-mnba` tracks
- * the front-of-queue condition on the `onTurnSucceeded` reap. Until then a
- * chain session has at most one slot, so session-wide and per-agent coincide
- * there; in an orchestrator session they do not, which is why the enumeration
- * below is worth keeping accurate.
+ * "TEARDOWN ONLY" IS WHAT THIS USED TO SAY, AND IT WAS FALSE OF `chain.ts`,
+ * which reached the null-clear from `onTurnSucceeded` and from the retry path
+ * as well — the single-slot API it had been left on when migration 041 made
+ * the storage a queue (`Cebab-6c1m` / `Cebab-mnba`, both fixed). It is true
+ * again now: every remaining null-clear is a teardown, and every reap of one
+ * agent's row goes through `clearPendingRetry`. Keep the enumeration accurate
+ * rather than restoring the shorter sentence — the claim is only as good as
+ * the last time someone checked the call sites.
  *
  * Callers:
  *   - `router.onWorkerFailed` (non-null) when a worker's deliverTurn rejects,
  *     to persist enough state that the operator can come back later — even
  *     after a Cebab restart — and click Retry.
- *   - `handle.stop` / `abandon_session` (null) to keep the row clean.
- *   - `chain.ts`'s `onTurnSucceeded` and retry re-delivery (null), per above.
+ *   - `chain.ts`'s stalled-drop park (non-null), same purpose.
+ *   - `handle.stop` / `abandon_session` (null) to keep the row clean. Both
+ *     routers, and the only shape of null-clear left.
  */
 export function setPendingRetry(sessionId: string, p: PendingRetry | null): void {
   if (p === null) {

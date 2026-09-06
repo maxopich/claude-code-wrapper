@@ -57,7 +57,6 @@ import {
   type EventKind,
   type MultiAgentLifecycle,
   type MutationRecord,
-  type PendingRetry,
 } from '../repo/multi_agent.js';
 import { classifyArtifact } from '@cebab/shared';
 import type { BashClassifierReason } from '@cebab/shared';
@@ -81,6 +80,7 @@ import {
   isTurnStalled,
   MutationNotRecordedError,
 } from './errors.js';
+import { pendingRetryToDescriptor } from './pending_retry.js';
 import { hopBudgetExhaustedText, turnRefusalText, type TurnRefusalReason } from './turn_guard.js';
 import { decideStrandedRun, strandedRunText, type StrandedCause } from './quiescence.js';
 import {
@@ -127,22 +127,6 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 
 /** Bus agent name for the orchestrator. Reserved; no project may use it. */
 export const ORCHESTRATOR_AGENT_NAME = 'orchestrator';
-
-/**
- * Map a persisted `PendingRetry` (repo shape) to the wire `PendingRetryDescriptor`
- * — the only difference is `prompt` → `lastPrompt`. Used to emit whichever slot
- * is now at the FRONT of the per-agent queue (migration 041) after a failure,
- * retry, or recovery moves it.
- */
-function pendingRetryToDescriptor(p: PendingRetry): PendingRetryDescriptor {
-  return {
-    agentName: p.agentName,
-    reason: p.reason,
-    lastPrompt: p.prompt,
-    ts: p.ts,
-    errorEventId: p.errorEventId,
-  };
-}
 
 /**
  * Hard cap on total persisted hops (`multi_agent_events` rows) per session,
@@ -481,9 +465,11 @@ type OrchestratorRouter = {
    *  the pending-retry slot, and emits `onPendingRetry`. Does NOT teardown
    *  — the session stays `running` waiting for Retry or Abandon. */
   onWorkerFailed: (agentName: string, prompt: string, err: unknown) => void;
-  /** Called by `deliver`'s .then when an agent's `deliverTurn` resolves. If a
-   *  pending-retry slot is currently owned by that agent, it is stale (the
-   *  agent just recovered) — clear it and emit `onPendingRetry(null)`. This is
+  /** Called by `deliver`'s .then when an agent's `deliverTurn` resolves. That
+   *  agent's pending-retry row is stale (it just recovered), so it is reaped
+   *  wherever it sits in the queue — NOT only when it is the front, which is
+   *  what `Cebab-mnba` fixed. The wire then carries whatever is at the front
+   *  now, and nothing at all when the reap did not move the front. This is
    *  the "success clears" half documented in migration 010, without which a
    *  transient-error banner survives even after the agent delivers a `final`. */
   onTurnSucceeded: (agentName: string) => void;
@@ -1504,17 +1490,32 @@ export function createOrchestratorRouter(params: {
   // uses the same `sink.onPendingRetry` channel so the clear reaches whichever
   // client is currently attached. Fully guarded: a DB/callback hiccup here must
   // never bubble into `deliver`'s .catch and be mis-reported as a turn failure.
+  //
+  // `Cebab-mnba`: this asked "is this agent AT THE FRONT?" and returned early
+  // otherwise — the single-slot question, left behind when migration 041 made
+  // the storage a queue. `clearPendingRetry` is a keyed delete that needs no
+  // front check, and the recovering agent is routinely NOT the front (reviewer
+  // fails at ts=1000, editor at ts=1200, editor recovers). The early return
+  // left editor's row alive, so the next Retry click offered to re-run a turn
+  // that had already delivered — with tools auto-allowed, duplicate `bus_send`,
+  // and extra hops against the budget.
   const onTurnSucceeded = (agentName: string) => {
     if (ended) return;
     try {
-      const front = getPendingRetry(sessionId);
-      if (!front || front.agentName !== agentName) return;
-      // Reap only THIS agent's slot (migration 041) so a sibling's queued retry
-      // survives, then promote whatever is now at the front onto the wire.
+      const before = getPendingRetry(sessionId);
+      // Reap THIS agent's slot wherever it sits in the queue (migration 041) so
+      // a sibling's queued retry survives.
       clearPendingRetry(sessionId, agentName);
-      const next = getPendingRetry(sessionId);
+      const after = getPendingRetry(sessionId);
+      // The wire carries one descriptor — the front — so a reap BEHIND the
+      // front changes nothing the client can render, and re-emitting the same
+      // banner would be noise. Comparing the agent name is sufficient: the
+      // delete cannot alter a row it did not touch, so an unchanged front name
+      // means an unchanged front. Both-null (this agent had no slot, and there
+      // was none at all) compares equal and stays silent too.
+      if (after?.agentName === before?.agentName) return;
       try {
-        sink.onPendingRetry?.(sessionId, next ? pendingRetryToDescriptor(next) : null);
+        sink.onPendingRetry?.(sessionId, after ? pendingRetryToDescriptor(after) : null);
       } catch (sinkErr) {
         console.error('[orchestrator] turn-succeeded onPendingRetry threw', sinkErr);
       }
