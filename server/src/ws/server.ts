@@ -346,9 +346,39 @@ export const recordDrainedPermission: RecordDrainedPermission =
  * temp data directory, because `persistMessage` holds a JSONL handle until it
  * resolves and Windows will not remove a directory out from under one.
  */
+/**
+ * Cebab-4igs: settle the card ON THE WIRE too, not only in the map.
+ *
+ * Both drains resolve the parked promise, drop the map entry and persist a
+ * `permission_decided { decision:'deny', reason }` row — and neither told the
+ * LIVE client, whose socket is still open in both cases. Nothing else closes
+ * the card either: `session_running` touches only liveness and the rate-limit
+ * slice, `wrapper_error` only sets session status, `session_interrupted` only
+ * stashes Stop metadata, and `drainPendingPermissionCards` — the helper written
+ * for this exact class — is wired to `ws_close` alone.
+ *
+ * So the operator kept working-looking Allow/Deny buttons for a request already
+ * settled. Clicking Allow dispatched the optimistic `decision:'allow'` locally
+ * and reached `if (!pending) return` on the server, which echoes nothing to
+ * correct it. The tab then displayed ALLOWED for a tool call the transcript
+ * records as denied, and a reload flipped it to "denied — automatic". That is
+ * the live UI asserting the opposite of the audit record about a
+ * human-in-the-loop decision — the same divergence Cebab-ygu.27 already fixed
+ * once for the disconnect path.
+ *
+ * `send` is a REQUIRED parameter placed before the defaulted `record` on
+ * purpose. An optional one with a no-op default is how this defect returns: the
+ * production call site drops it, every test still passes, and the wire goes
+ * quiet again with nothing to notice.
+ *
+ * The socket-close sibling below deliberately does NOT send. Its socket is
+ * going away, so nothing could receive it, and the client closes those cards
+ * itself in `ws_close`.
+ */
 export function cleanupPendingPermissionsForSession(
   pending: Map<string, PendingPermission>,
   sessionId: string,
+  send: (msg: ServerMsg) => void,
   record: RecordDrainedPermission = recordDrainedPermission,
 ): Promise<void>[] {
   const writes: Promise<void>[] = [];
@@ -357,6 +387,13 @@ export function cleanupPendingPermissionsForSession(
     p.resolve({ behavior: 'deny', message: 'interrupted' });
     pending.delete(requestId);
     writes.push(record(p.sessionId, requestId, 'interrupted'));
+    send({
+      type: 'permission_decided',
+      sessionId: p.sessionId,
+      requestId,
+      decision: 'deny',
+      reason: 'interrupted',
+    });
   }
   return writes;
 }
@@ -382,6 +419,7 @@ export function cleanupPendingPermissionsForSession(
 export function drainPendingPermissionsForEndedTurn(
   pending: Map<string, PendingPermission>,
   sessionId: string,
+  send: (msg: ServerMsg) => void,
   record: RecordDrainedPermission = recordDrainedPermission,
 ): Promise<void>[] {
   const writes: Promise<void>[] = [];
@@ -390,6 +428,14 @@ export function drainPendingPermissionsForEndedTurn(
     p.resolve({ behavior: 'deny', message: 'turn ended' });
     pending.delete(requestId);
     writes.push(record(p.sessionId, requestId, 'turn_ended'));
+    // Cebab-4igs: see the note on `cleanupPendingPermissionsForSession`.
+    send({
+      type: 'permission_decided',
+      sessionId: p.sessionId,
+      requestId,
+      decision: 'deny',
+      reason: 'turn_ended',
+    });
   }
   return writes;
 }
@@ -4741,7 +4787,9 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
         pendingPermissions: conn.pendingPermissions,
         capturedPrompts: conn.capturedPrompts,
       });
-      cleanupPendingPermissionsForSession(conn.pendingPermissions, msg.sessionId);
+      cleanupPendingPermissionsForSession(conn.pendingPermissions, msg.sessionId, (m) =>
+        send(conn.ws, m),
+      );
       executeInterrupt({
         inFlight: conn.inFlight.get(msg.sessionId),
         sessionId: msg.sessionId,
@@ -6966,7 +7014,9 @@ async function runOneTurn(
     // never ran. Fire-and-forget (recordDrainedPermission swallows its own
     // errors), session-filtered, records `turn_ended`; a no-op on the success
     // path and idempotent when interrupt/close already drained.
-    drainPendingPermissionsForEndedTurn(conn.pendingPermissions, sessionId);
+    drainPendingPermissionsForEndedTurn(conn.pendingPermissions, sessionId, (m) =>
+      send(conn.ws, m),
+    );
     closeLogger(sessionId);
     // Cluster D Phase 4b: clear the captured prompt UNLESS the turn
     // ended held by a rate-limit. This is the only path that wants the
