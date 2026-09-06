@@ -764,9 +764,15 @@ export function DraftView(props: {
                       body: (
                         <>
                           <p>
-                            Removes finished session rows — events, participants and the session
-                            itself — from the Cebab database. The active session, if any, is
-                            preserved.
+                            Removes finished session rows from the Cebab database — the session
+                            itself, its events, participants, agent sessions and recorded mutations,
+                            plus its operational notifications and recovery-log entries. The active
+                            session, if any, is preserved.
+                          </p>
+                          <p>
+                            Safety notifications and kick/stop forensic bundles are NOT removed.
+                            Those are acknowledged one at a time with a reason, and a bulk action
+                            must not answer them for you.
                           </p>
                           <p>
                             On-disk transcripts and iteration files inside each session folder stay
@@ -782,7 +788,7 @@ export function DraftView(props: {
                       },
                     })
                   }
-                  title="Remove finished iterations from the list (DB rows only). On-disk artifacts are preserved; the active session, if any, is kept."
+                  title="Remove finished iterations from the list (DB rows only — safety notifications and forensic bundles are kept). On-disk artifacts are preserved; the active session, if any, is kept."
                 >
                   {clearPending ? (
                     <>

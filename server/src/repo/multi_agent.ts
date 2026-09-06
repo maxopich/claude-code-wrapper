@@ -1233,8 +1233,40 @@ export function clearFinishedMultiAgentSessions(): number {
     db.prepare(`DELETE FROM multi_agent_mutations WHERE session_id IN (${finishedIds})`).run();
     // Soft-FK dependents (register D31): no REFERENCES, no cascade, so the
     // parent delete below leaves these behind unless we remove them here.
-    db.prepare(`DELETE FROM notifications WHERE session_id IN (${finishedIds})`).run();
-    db.prepare(`DELETE FROM controllability_forensics WHERE session_id IN (${finishedIds})`).run();
+    //
+    // Cebab-2cd0 [security]: NOT unconditionally. #469 widened this from four
+    // multi_agent_* tables to seven and swept two safety surfaces with them.
+    //
+    //   - `class = 'safety'` notifications are EXCLUDED. `inbox.ts`'s header
+    //     states the BE-7 rule — "safety acknowledgment is per-row +
+    //     typed-reason and cannot be bulk-cleared" — and `clearDismissedInbox`
+    //     enforces it with `class = 'operational'`. A bulk DELETE is strictly
+    //     stronger than the bulk ACK that rule forbids: it removes the row
+    //     instead of marking it, skips the individual-ack path that appends to
+    //     the hash chain (`appendSafetyAuditAck`), and leaves the safety_audit
+    //     row it answered permanently un-acked. Acknowledgment-by-disappearance
+    //     is the thing BE-7 exists to prevent.
+    //
+    //   - `controllability_forensics` is NOT deleted at all. Every row carries
+    //     `safety_audit_id TEXT NOT NULL REFERENCES safety_audit(id)`, and
+    //     migration 019's header explains that ON DELETE is left RESTRICT
+    //     "because deleting an audit row is forbidden by the append-only policy
+    //     anyway". The audit row outlives any Clear; deleting the snapshot it
+    //     anchors leaves `getForensicsByAuditId` returning undefined for a chain
+    //     row that still claims a bundle exists.
+    //
+    // `recovery_log` still goes: it is recovery METRICS for the session being
+    // removed, anchors no audit row, and carries no acknowledgment obligation.
+    //
+    // The orphan-cleanup motive behind #469 is real — bus session ids never
+    // appear in `sessions`, so no cascade reaches these rows. It just does not
+    // extend to the two surfaces above. What survives is bounded by actual
+    // safety events rather than by traffic, and an orphaned safety row still
+    // renders: `listInbox` selects from `notifications` alone and joins no
+    // session table.
+    db.prepare(
+      `DELETE FROM notifications WHERE session_id IN (${finishedIds}) AND class != 'safety'`,
+    ).run();
     db.prepare(`DELETE FROM recovery_log WHERE session_id IN (${finishedIds})`).run();
     const info = db.prepare(`DELETE FROM multi_agent_sessions WHERE status != 'running'`).run();
     return info.changes;

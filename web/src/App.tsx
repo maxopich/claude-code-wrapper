@@ -2369,11 +2369,18 @@ function AppShell({
     wsRef.current?.send({ type: 'list_iterations' });
   }, [wsRef]);
   function clearIterations() {
-    // Server-side: deletes every multi_agent_sessions row whose status is
-    // not 'running', along with its events and participants, then re-sends
-    // the (now empty / running-only) iterations list. No client-side
-    // optimistic update — we wait for the server reply so the cache stays
-    // consistent with the DB even if the WS round-trip fails.
+    // Server-side: deletes every multi_agent_sessions row whose status is not
+    // 'running', along with its events, participants, agent sessions,
+    // mutations, OPERATIONAL notifications and recovery-log rows, then re-sends
+    // the (now empty / running-only) iterations list.
+    //
+    // Cebab-2cd0: safety notifications and forensic bundles survive on purpose
+    // — see `clearFinishedMultiAgentSessions`. The confirm dialog in
+    // `MultiAgentTab` says so, because this is the text an operator authorises
+    // an irreversible delete from.
+    //
+    // No client-side optimistic update — we wait for the server reply so the
+    // cache stays consistent with the DB even if the WS round-trip fails.
     wsRef.current?.send({ type: 'clear_iterations' });
   }
   // Cebab-1uk: memoised for the same reason as `refreshIterations` above.
