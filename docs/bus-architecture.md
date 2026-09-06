@@ -35,10 +35,10 @@ survives a detach, and is restored by R-A re-attach and R-B reconstruction.
 Three details are load-bearing:
 
 - **Parked on turn end, not at drop time.** `bus_send` runs inside the sender's
-  turn, so that turn resolves moments later and `onTurnSucceeded` nulls the
-  slot the sender owns. A slot written at drop time is erased by the sender's
-  own success. `handleEvent` only records the drop; `onTurnSucceeded` parks,
-  after its clear branch.
+  turn, so that turn resolves moments later and `onTurnSucceeded` reaps the
+  sender's own pending-retry row. A slot written at drop time is erased by the
+  sender's own success. `handleEvent` only records the drop; `onTurnSucceeded`
+  parks, after its clear branch.
 - **A wake counter, not a flag.** The same turn may still make a legal
   `bus_send` after a rejected one, which makes the drop moot — but a legal send
   _before_ the drop does not, because the dropped message is still missing. The
@@ -48,6 +48,55 @@ Three details are load-bearing:
   renders) rather than re-running the turn that just misfired. Cebab does not
   re-route on the agent's behalf — the drop's safety notification and audit row
   are still what surfaces the violation, and the operator decides.
+
+## The pending-retry slot is a QUEUE, and three questions about it read wrong
+
+Migration 010 gave a session ONE pending-retry slot and justified it with "only
+one worker can be in the pending-retry slot at a time". That premise is false in
+orchestrator mode — `renderRosterPrompt` opens with an N-way concurrent fan-out,
+and different agents' turns really do run in parallel — so migration 041 moved
+the state onto `multi_agent_pending_retries`, keyed `(session_id, agent_name)`.
+Chain reaches two rows too: `deliver` is fire-and-forget, so A's turn is still
+live once its `bus_send` has woken B.
+
+What a row holds is why this matters more than a banner usually would. It is the
+**post-briefing bytes captured from the failed turn** — the only copy — and
+Retry re-runs that turn under the bus's auto-allow posture. A lost row destroys
+the replay; a stale row offers to re-run work that already landed, with
+duplicate `Edit`/`Bash`, a duplicate `bus_send`, and hops off the budget.
+
+Three call sites were left asking the single-slot question of queue-shaped
+storage (`Cebab-6c1m`, `Cebab-mnba`), and each is a different way to get it
+wrong:
+
+- **`setPendingRetry(sessionId, null)` is a session-wide DELETE, not "clear this
+  agent".** It is correct in exactly one place — `handle.stop`, where the whole
+  session is going away. Everywhere else the reap is `clearPendingRetry(session,
+agent)`, which is keyed and needs no front check. Chain used the null-clear in
+  `onTurnSucceeded` and in `retry()`, so recovering or retrying one agent wiped
+  every sibling's bytes.
+- **"Is this agent the front?" is never the right guard on a reap.** The
+  recovering agent is routinely behind the front (reviewer fails at ts=1000,
+  editor at ts=1200, editor recovers), and the keyed delete does not care where
+  the row sits. Guarding on the front is what left a dead row for an agent that
+  had already delivered.
+- **The wire carries ONE descriptor, so every emit must be the FRONT** —
+  `getPendingRetry`, which is `ORDER BY ts ASC, rowid ASC LIMIT 1`, never the row
+  the caller happens to be holding. A newer failure must not displace the banner
+  the operator is already reading. `bus/pending_retry.ts` exists so the row →
+  descriptor mapping has one definition across both routers and the WS
+  re-attach hydration.
+
+One consequence that reads as a bug and is not: a reap BEHIND the front emits
+nothing at all. The front did not move, so there is no renderable change, and
+re-sending the same banner is noise. The row is still gone.
+
+`bus_pending_retry_queue_smoke.ts` is the live check. It caps two concurrent
+workers so both fail for real, then recovers whichever ended up behind the front
+— a shape no fixture can produce, since mock mode ignores `maxTurns` and
+therefore cannot fail a turn at all. Note its own recorded trap: **delivery order
+is not failure order**, so it reads the front back from the queue instead of
+naming an agent.
 
 ## Custom topology layouts, and why the validator refuses every one
 

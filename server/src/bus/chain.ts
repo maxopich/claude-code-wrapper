@@ -55,6 +55,7 @@ import {
   addAgentCost,
   addParticipant,
   clearPendingMutations,
+  clearPendingRetry,
   confirmMutationByToolUseId,
   createMultiAgentSession,
   endMultiAgentSession,
@@ -92,6 +93,7 @@ import {
   isTurnStalled,
   MutationNotRecordedError,
 } from './errors.js';
+import { pendingRetryToDescriptor } from './pending_retry.js';
 import { hopBudgetExhaustedText, turnRefusalText, type TurnRefusalReason } from './turn_guard.js';
 import { decideStrandedRun, strandedRunText, type StrandedCause } from './quiescence.js';
 import {
@@ -290,10 +292,11 @@ type ChainRouter = {
    *  `running` waiting for the operator's Retry or Abandon click. */
   onWorkerFailed: (agentName: string, prompt: string, err: unknown) => void;
   /** Called from the `deliver` .then handler when an agent's `deliverTurn`
-   *  resolves. Clears the pending-retry slot iff that agent owns it (a resolved
-   *  turn means it recovered) and emits `onPendingRetry(null)` — the "success
-   *  clears" half of migration 010, so a transient-error banner doesn't outlive
-   *  the recovery. */
+   *  resolves. Reaps that agent's pending-retry row wherever it sits in the
+   *  queue (a resolved turn means it recovered) and emits whatever is at the
+   *  FRONT afterwards — the "success clears" half of migration 010, so a
+   *  transient-error banner doesn't outlive the recovery. Silent when the reap
+   *  did not move the front. */
   onTurnSucceeded: (agentName: string) => void;
   /**
    * `Cebab-vie.18` [security]: the precondition check the two operator replay
@@ -588,9 +591,9 @@ export function createChainRouter(params: {
    *
    * 1. `bus_send` runs INSIDE the sending agent's turn (`handleBusSend` →
    *    `onEvent` → here, all synchronous), so that turn resolves moments
-   *    later and `onTurnSucceeded` runs `setPendingRetry(sessionId, null)`
-   *    for exactly this agent. A slot written here would be erased by the
-   *    sender's own success, silently, with every router test still green.
+   *    later and `onTurnSucceeded` runs `clearPendingRetry(sessionId, <this
+   *    agent>)`. A slot written here would be erased by the sender's own
+   *    success, silently, with every router test still green.
    * 2. Until that turn ends the run is not actually stalled: the same turn
    *    may still make a legal `bus_send`, which wakes someone and makes the
    *    drop moot. `wakes` is the check — see `parkIfStalled`.
@@ -696,7 +699,14 @@ export function createChainRouter(params: {
       console.error('[chain] persist stalled-drop pending-retry failed', dbErr);
     }
     try {
-      sink.onPendingRetry?.(sessionId, descriptor);
+      // Emit the FRONT of the queue, not necessarily the agent just parked —
+      // `Cebab-6c1m`, and the same rule orchestrator.ts follows. The wire
+      // carries one descriptor; if an earlier failure is still pending, its
+      // banner stays put and this one surfaces when the front is cleared.
+      // `descriptor` remains the fallback for the (unreachable-in-practice)
+      // case where the write above threw and left nothing to read back.
+      const front = getPendingRetry(sessionId);
+      sink.onPendingRetry?.(sessionId, front ? pendingRetryToDescriptor(front) : descriptor);
     } catch (sinkErr) {
       console.error('[chain] stalled-drop onPendingRetry threw', sinkErr);
     }
@@ -1257,7 +1267,11 @@ export function createChainRouter(params: {
       console.error('[chain] persist pending-retry failed', dbErr);
     }
     try {
-      sink.onPendingRetry?.(sessionId, descriptor);
+      // The FRONT, not this failure — see the stalled-drop park above. Chain
+      // CAN hold two rows: `deliver` is fire-and-forget, so A's turn is still
+      // live after its `bus_send` woke B and both can fail.
+      const front = getPendingRetry(sessionId);
+      sink.onPendingRetry?.(sessionId, front ? pendingRetryToDescriptor(front) : descriptor);
     } catch (sinkErr) {
       console.error('[chain] onPendingRetry callback threw', sinkErr);
     }
@@ -1267,16 +1281,30 @@ export function createChainRouter(params: {
   // so a pending-retry slot it OWNS is stale. Mirrors onWorkerFailed and reuses
   // the same `sink.onPendingRetry` channel. Fully guarded so a DB/callback hiccup
   // can never bubble into `deliver`'s .catch as a spurious turn failure.
+  //
+  // `Cebab-6c1m` / `Cebab-mnba`: this used to ask whether the recovering agent
+  // owned the FRONT and, if so, `setPendingRetry(sessionId, null)` — a
+  // session-wide wipe. Both halves were wrong once migration 041 made the
+  // storage a queue: a reap behind the front never happened, and a reap AT the
+  // front took every sibling's row with it.
   const onTurnSucceeded = (agentName: string) => {
     if (ended) return;
     try {
-      const pending = getPendingRetry(sessionId);
-      if (pending && pending.agentName === agentName) {
-        setPendingRetry(sessionId, null);
+      const before = getPendingRetry(sessionId);
+      // Keyed delete — reaps THIS agent's row wherever it sits, and no-ops when
+      // it has none.
+      clearPendingRetry(sessionId, agentName);
+      const after = getPendingRetry(sessionId);
+      // Only speak when the front actually moved: the wire carries one
+      // descriptor, so a reap behind the front changes nothing renderable.
+      // Comparing the name suffices — the delete cannot alter a row it did not
+      // touch — and both-null compares equal, so "this agent had no slot" is
+      // silent too.
+      if (after?.agentName !== before?.agentName) {
         try {
-          sink.onPendingRetry?.(sessionId, null);
+          sink.onPendingRetry?.(sessionId, after ? pendingRetryToDescriptor(after) : null);
         } catch (sinkErr) {
-          console.error('[chain] turn-succeeded onPendingRetry-null threw', sinkErr);
+          console.error('[chain] turn-succeeded onPendingRetry threw', sinkErr);
         }
       }
     } catch (err) {
@@ -1289,9 +1317,10 @@ export function createChainRouter(params: {
     // hand the sender's own success the slot to erase, which is the exact
     // shape that makes this whole fix inert.
     //
-    // Unconditional second: the clear returns early when the slot belongs to
-    // a different agent (or when there is none at all), and a stalled chain
-    // must still be parked in both of those cases.
+    // Unconditional second: the clear above reaps only THIS agent's row and
+    // may find none at all, and a stalled chain must still be parked in either
+    // case. (Before `Cebab-6c1m` the clear was a session-wide wipe guarded by a
+    // front check — same conclusion, different mechanism.)
     parkIfStalled(agentName);
   };
 
@@ -1990,19 +2019,24 @@ export function wireChainSession(p: {
       // cap. Mirrors orchestrator.ts, minus the kick branch chain has no set
       // for. The slot stays put: teardown owns it.
       if (router.checkTurnRefused(pending.agentName)) return;
-      // Clear the slot BEFORE re-delivery so a racing second click sees
-      // the empty slot and no-ops. If the retried turn fails again, the
-      // onWorkerFailed callback re-asserts the slot with a fresh reason
-      // and re-emits the pending-retry ServerMsg.
+      // Clear THIS agent's slot BEFORE re-delivery so a racing second click
+      // sees a different front (or none) rather than double-firing the same
+      // agent, then promote whatever is now at the front. `Cebab-6c1m`: this
+      // was `setPendingRetry(sessionId, null)`, which wiped every OTHER
+      // agent's row too — destroying the captured post-briefing bytes that are
+      // the only thing making those retries possible. If the retried turn
+      // fails again, `onWorkerFailed` re-parks this agent (at the back, by
+      // fresh `ts`) and re-emits the front.
       try {
-        setPendingRetry(sessionId, null);
+        clearPendingRetry(sessionId, pending.agentName);
       } catch (err) {
         console.error('[chain] clear pending-retry on retry failed', err);
       }
       try {
-        p.onPendingRetry?.(sessionId, null);
+        const next = getPendingRetry(sessionId);
+        p.onPendingRetry?.(sessionId, next ? pendingRetryToDescriptor(next) : null);
       } catch (err) {
-        console.error('[chain] retry onPendingRetry-null callback threw', err);
+        console.error('[chain] retry onPendingRetry callback threw', err);
       }
       // Re-call `deliver` so the activity observer / liveness ticks see
       // the new turn. The agent's `briefed` Set is already populated by
