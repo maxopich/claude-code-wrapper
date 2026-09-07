@@ -9,8 +9,8 @@
  * `mcp_scope_smoke.ts` are scripts.
  *
  * WHY IT EXISTS. `Cebab-ws0.15` attaches a short factual note about unhealthy
- * MCP servers to `Options.systemPrompt`, and that is only safe because Cebab
- * sets no system prompt today. The SDK's normalizer (`pO` in `sdk.mjs` 0.3.220)
+ * MCP servers to `Options.systemPrompt`, and that is only safe because an
+ * ordinary project turn sets no system prompt. The SDK's normalizer (`pO` in `sdk.mjs` 0.3.220)
  * maps an OMITTED `systemPrompt` to the empty string — an explicit override,
  * not "use the CLI default" — so writing a note there adds a line where there
  * was nothing rather than replacing Claude Code's preset with one sentence.
@@ -38,7 +38,7 @@
  *
  * Measured 2026-08-20, SDK 0.3.220, CLI 2.1.212:
  *
- *   omitted (what Cebab ships)   → "UNKNOWN"
+ *   omitted (ordinary project turn) → "UNKNOWN"
  *   explicit ''                  → "UNKNOWN"
  *   preset 'claude_code'         → "/private/var/folders/.../cebab-sysprompt-cwd-yRXlEm"
  *   sentinel string              → "PINEAPPLE"
@@ -104,8 +104,9 @@ type Case = {
 };
 
 const CASES: Case[] = [
-  // The subject: exactly what every Cebab turn ships today.
-  { label: 'omitted (what Cebab ships)', expect: 'UNKNOWN' },
+  // The subject: what an ordinary project turn ships (the help assistant and
+  // the MCP status note are the two paths that set a real prompt instead).
+  { label: 'omitted (ordinary project turn)', expect: 'UNKNOWN' },
   // The equivalence partner. If this matches the subject, "omitted == empty
   // override" is established behaviourally rather than by reading `sdk.mjs`.
   { label: "explicit ''", systemPrompt: '', expect: 'UNKNOWN' },
@@ -272,7 +273,7 @@ async function main(): Promise<void> {
     return;
   }
   console.log(
-    '\n  Cebab turns run with an EMPTY system prompt. A note written to ' +
+    '\n  Ordinary Cebab project turns run with an EMPTY system prompt. A note written to ' +
       '`Options.systemPrompt` adds text where there was none.',
   );
 }

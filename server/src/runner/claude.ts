@@ -41,13 +41,18 @@ export type RunOptions = {
    * full system prompt, a change no caller should be able to make by passing a
    * differently-shaped value to an options field.
    *
-   * WHY WRITING HERE IS ADDITIVE RATHER THAN DESTRUCTIVE. Cebab sets no system
-   * prompt anywhere, and an omitted `systemPrompt` is not "use the CLI's
-   * default" — the SDK normalizes it to the empty string, an explicit
-   * override. So every Cebab turn today runs with NO system prompt, and text
-   * put here fills a blank instead of replacing the agent's instructions.
-   * That is measured, not inferred: `src/system_prompt_smoke.ts` re-runs the
-   * measurement against the live CLI, and it is the one claim that has to hold
+   * WHY WRITING HERE IS ADDITIVE RATHER THAN DESTRUCTIVE. Every ORDINARY
+   * project turn runs with NO system prompt (Cebab-ws0.15), and an omitted
+   * `systemPrompt` is not "use the CLI's default" — the SDK normalizes it to the
+   * empty string, an explicit override. So on those turns text put here fills a
+   * blank instead of replacing the agent's instructions. Two production paths do
+   * set a real value and are the whole writer set: the built-in help assistant
+   * (`ASSISTANT_SYSTEM_PROMPT` in `assistant/identity.ts`) and the MCP
+   * status note (`mcpStatusNoteSpec` in `runner/mcp_status_note.ts`); both reach
+   * the spawn through the ternary at `ws/server.ts`. The additivity claim is
+   * measured, not inferred: `src/system_prompt_smoke.ts` re-runs the measurement
+   * against the live CLI, and `system_prompt_writers.test.ts` pins the writer
+   * set so a third one cannot land silently. That is the claim that has to hold
    * for this field to be safe.
    */
   systemPrompt?: string;

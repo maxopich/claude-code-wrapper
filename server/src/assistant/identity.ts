@@ -33,9 +33,12 @@ export const ASSISTANT_PROJECT_NAME = 'cebab/assistant';
 export const ASSISTANT_MAX_TURNS = 12;
 
 /**
- * The assistant's own system prompt. Cebab sets no system prompt on any other
- * turn (Cebab-ws0.15), so this fills a blank rather than replacing a preset —
- * measured, and the one claim `src/system_prompt_smoke.ts` keeps honest.
+ * The assistant's own system prompt — one of the two production paths that set
+ * a real value (the other is `mcpStatusNoteSpec` in `runner/mcp_status_note.ts`;
+ * see `RunOptions.systemPrompt`). Every ORDINARY project turn sets none
+ * (Cebab-ws0.15), so on those turns writing to `systemPrompt` fills a blank
+ * rather than replacing a preset — measured, and the claim
+ * `src/system_prompt_smoke.ts` keeps honest.
  *
  * It states the identity and the hard boundary the posture below enforces
  * mechanically: read-only, answers from the bundled knowledge base, never
