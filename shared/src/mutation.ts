@@ -734,10 +734,15 @@ export function classifyBashCommand(command: string): ToolClassification {
  * peels a redirect operator glued to its target (`>~/.ssh/known_hosts`).
  *
  * A SUPERSET is returned on purpose — every token, command name and flags
- * included. `pathLooksSensitive` is the narrow judge, so a token that is not a
- * path (`cat`, `-rf`, `>&2`) matches nothing and costs nothing; missing a real
- * path would leak. Same fail-toward-masking direction as the rest of the
- * redactor.
+ * included. `pathLooksSensitive` is the narrow judge for most tokens, so a flag
+ * or an ordinary command word (`cat`, `-rf`, `>&2`) matches nothing; missing a
+ * real path would leak, so the direction is deliberate. It is NOT free in every
+ * case, though (`Cebab-k5qm`): `pathLooksSensitive` treats the bare stems
+ * `token`, `secret`, `secrets` and `credentials` as sensitive basenames, so a
+ * command whose bare word is one of those (`git secret`, `pass token`) masks
+ * the whole mutation row's captured output. That over-mask is accepted in the
+ * same fail-toward-masking direction as the rest of the redactor, and pinned as
+ * a known limit in `redact.test.ts`.
  */
 export function bashCommandPathArguments(command: string): string[] {
   const args: string[] = [];
@@ -880,6 +885,18 @@ const NULL_DEVICE_TARGETS: ReadonlySet<string> = new Set([
 /**
  * System, device, or secret-store redirect targets: writing here is an
  * RCE-on-next-shell, secret-overwrite, or device-destroying vector.
+ *
+ * DELIBERATELY NOT delegated to `redact.ts`'s `pathLooksSensitive`, and the
+ * divergence is intentional (`Cebab-k5qm`). This predicate answers a different
+ * question — "is this a WRITE target whose overwrite is dangerous?" — over a
+ * different vocabulary: `/etc`, `/usr`, `/dev`, Windows system roots and the
+ * shell-init dotfiles (`.zshrc`, `.gitconfig`, …), none of which `pathLooksSensitive`
+ * knows, and it anchors on `~/.ssh`/`~/.aws` with `^~\/…\b` rather than on a
+ * final path segment. The overlap (`.ssh`, `.aws`, `.kube`) is small and the two
+ * lists move for unrelated reasons, so unifying them would couple a redaction
+ * widening to the pause-gate's dangerous-write set. The credential-DIRECTORY
+ * matcher fix that motivated this note lives in `pathLooksSensitive`; this site
+ * is left as-is on purpose.
  */
 function isSensitiveRedirectTarget(target: string): boolean {
   return (
