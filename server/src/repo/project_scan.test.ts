@@ -176,6 +176,29 @@ describe('project_scan — declared vs loaded (Cebab-ws0.6)', () => {
     expect(scan.mcpServers.map((s) => [s.name, s.loads])).toEqual([['perProject', false]]);
   });
 
+  test('a name in BOTH .mcp.json and ~/.claude.json folds to one entry, and LOADS', () => {
+    // The fold's OR over the loaded flag, on the one ordering that exercises it.
+    // The call site folds settings layers, then `.mcp.json`, then
+    // `~/.claude.json` top-level — so on an UNTRUSTED project the `.mcp.json`
+    // entry folds FIRST with loads:false (scope 'project' is not read) and the
+    // `~/.claude.json` entry SECOND with loads:true (user scope always loads).
+    // Without `prior.loads ||= loads` the first, false value would win and a
+    // server that DOES load would be reported inert — wrong in the dangerous
+    // direction for a trust signal.
+    const row = makeProject('bothsources');
+    write(path.join(row.path, '.mcp.json'), { mcpServers: { github: { command: 'npx' } } });
+    write(path.join(os.homedir(), '.claude.json'), {
+      mcpServers: { github: { command: 'npx' } },
+    });
+
+    const scan = scanProject(row);
+    expect(scan.scopesLoaded).toEqual(['user']);
+    // Exactly one entry — the two declarations merged, not two rows that never
+    // met — and it is reported as loading.
+    const github = scan.mcpServers.filter((s) => s.name === 'github');
+    expect(github.map((s) => s.loads)).toEqual([true]);
+  });
+
   test('hooks split declared vs loaded, and a local-scope hook is flagged', () => {
     const row = makeProject('hooky');
     write(path.join(row.path, '.claude', 'settings.json'), {
