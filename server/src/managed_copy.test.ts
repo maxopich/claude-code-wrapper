@@ -166,6 +166,38 @@ describe('runManagedCopy', () => {
     expect(result?.result.ok).toBe(false);
   });
 
+  test('[security] a copy that cannot be registered is removed, not left orphaned', async () => {
+    // The tree copies successfully, then the project-row registration throws —
+    // `upsertProject`'s name-disambiguation loop gives up after 20 tries. Its
+    // catch must take the tree back, because a rowless managed directory holds
+    // `.claude/credentials.json` in the clear and no delete verb will touch it.
+    //
+    // Seed the source `tpl` plus `tpl (2)`..`tpl (20)` so every disambiguation
+    // candidate collides. The 19 fillers need distinct paths but not real
+    // trees — `upsertProject` inserts by name and never stats the path.
+    const id = seedProject(tmp.root(), 'tpl');
+    for (let n = 2; n <= 20; n++) {
+      upsertProject(`tpl (${n})`, path.join(tmp.root(), `filler-${n}`));
+    }
+    const sent: ServerMsg[] = [];
+
+    // Capture the settled outcome rather than bare-awaiting, so a REVERTED fix
+    // (the registration rejects) still reaches every assertion below instead of
+    // aborting the case on the first rejection.
+    const settled = await runManagedCopy(id, (m) => sent.push(m)).then(
+      (outcome) => ({ ok: true as const, outcome }),
+      (error: unknown) => ({ ok: false as const, error }),
+    );
+
+    expect(settled.ok).toBe(true);
+    expect(settled.ok && settled.outcome.registered).toBe(false);
+    const result = sent.find((m) => m.type === 'managed_copy_result');
+    expect(result?.result.ok).toBe(false);
+    // The orphan the fix exists to prevent: `claimManagedDir` runs once and
+    // takes the first free slug `tpl`, so a reverted fix leaves it here.
+    expect(managedDirs()).toEqual([]);
+  });
+
   test('the positive control: the same copy succeeds when the audit works', async () => {
     // Without this, a handler that refused unconditionally would pass the case
     // above and ship a feature that never copies anything.

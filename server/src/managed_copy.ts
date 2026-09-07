@@ -184,7 +184,18 @@ export async function runManagedCopy(
     return fail(`the copy failed partway and was removed: ${String(err)}`);
   }
 
-  const row = registerManagedProject(project.name, target, project.path, Date.now());
+  let row;
+  try {
+    row = registerManagedProject(project.name, target, project.path, Date.now());
+  } catch (err: unknown) {
+    // The tree is on disk but the project row could not be created — the name
+    // disambiguation loop can exhaust, a schema error can bite. Same reasoning
+    // as the two failure points above: a managed tree with no row pointing at
+    // it holds `.claude/credentials.json` in the clear and NO delete verb will
+    // touch a rowless directory, so it is unreachable garbage. Take it back.
+    await removeManagedDir(target).catch(() => {});
+    return fail(`the copy could not be registered and was removed: ${String(err)}`);
+  }
   const { skips, skipsTruncated } = truncateSkips(copied.skips);
   send({
     type: 'managed_copy_result',
