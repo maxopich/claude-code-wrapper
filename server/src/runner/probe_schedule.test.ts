@@ -126,6 +126,41 @@ describe('createProbeScheduler', () => {
     expect(activeProbeCount()).toBe(0);
   });
 
+  test('re-selecting a project after its probe has settled starts a second', async () => {
+    // The other half of the dedup rule: once a probe finishes it releases the
+    // project from the in-flight set, so selecting the SAME project again is a
+    // fresh probe. Dropping `inFlight.delete` in the finally block leaves the
+    // project stuck in the set forever, and this second selection would never
+    // start — the sibling above proves the set holds a running probe; this one
+    // proves it lets go once that probe is done.
+    let release!: () => void;
+    const s = createProbeScheduler(
+      makeDeps({
+        runProbe: async (projectId: number) => {
+          probed.push(projectId);
+          await new Promise<void>((r) => {
+            release = r;
+          });
+        },
+      }),
+    );
+    s.onProjectSelected(7);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(probed).toEqual([7]);
+
+    // Let the probe settle, and flush the microtask that runs its finally block
+    // so the project is actually released from the in-flight set before the
+    // second selection arms. Without the flush this would race the existing
+    // dedup case instead of testing the release.
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(activeProbeCount()).toBe(0);
+
+    s.onProjectSelected(7);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(probed).toEqual([7, 7]);
+  });
+
   test('cancel() disarms a pending probe', async () => {
     const s = createProbeScheduler(makeDeps());
     s.onProjectSelected(7);
