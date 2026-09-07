@@ -1,4 +1,5 @@
 import type { ServerMsg } from '@cebab/shared';
+import { isUnanalyzableCommand } from '@cebab/shared';
 import type { MutationRecord } from '../repo/multi_agent.js';
 import { emit as emitNotification, type DispatcherEmitResult } from './dispatcher.js';
 
@@ -39,7 +40,17 @@ export function maybeDispatchDangerousMutation(
       // where dedupeKey would collapse a burst). The id is the
       // `multi_agent_mutations.id` row id.
       dedupeKey: `dangerous_mutation:${sessionId}:${mutation.id}`,
-      title: 'Dangerous mutation observed',
+      // Cebab-ygu.46: separate the two axes. A command held by the shell- /
+      // process-substitution rules is `dangerous` because it could not be
+      // ANALYSED, not because anything was observed to mutate — announcing it
+      // as a "mutation" is the control crying wolf on its first use. The DB
+      // category, audit row, dedupeKey and pause behaviour are unchanged; only
+      // the operator-facing copy is corrected. A `dangerous` row with no stored
+      // reason (pre-022) takes the plain "Dangerous command" branch — absence
+      // must not manufacture a new claim.
+      title: isUnanalyzableCommand(mutation.classifierReason)
+        ? 'Unanalyzable command observed'
+        : 'Dangerous command observed',
       message: mutation.summary,
       sessionId,
       action: {

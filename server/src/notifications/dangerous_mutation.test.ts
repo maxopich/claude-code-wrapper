@@ -108,6 +108,67 @@ describe('[security][BE-1] dangerous-mutation safety toast — audit row before 
   });
 });
 
+// Cebab-ygu.46: the toast title separates the two axes the model already
+// tracks — WHAT the tool does vs HOW CONFIDENT the classifier is. A command
+// held by the shell-/process-substitution rules is `dangerous` because it
+// could not be ANALYSED, not because anything was observed to mutate. The DB
+// category, audit row, dedupeKey and pause behaviour are unchanged; only the
+// operator-facing copy is corrected.
+describe('[security] dangerous-mutation toast title (Cebab-ygu.46)', () => {
+  function titleOf(mutation: MutationRecord): string {
+    const sent: ServerMsg[] = [];
+    maybeDispatchDangerousMutation(SID, mutation, (m) => sent.push(m));
+    const env = sent[0] as NotificationEnvelope & { type: 'notification' };
+    return env.title;
+  }
+
+  test("shell-substitution rule → 'Unanalyzable command observed', not 'mutation'", () => {
+    const title = titleOf(
+      makeMutation({
+        summary: 'wc -l $(find /subject/src -type f)',
+        classifierReason: {
+          rule: 'shell_substitution',
+          detail: 'command contains shell-substitution',
+          matched: '$(',
+        },
+      }),
+    );
+    expect(title).toBe('Unanalyzable command observed');
+    expect(title).not.toMatch(/mutation/i);
+  });
+
+  test("process-substitution rule → 'Unanalyzable command observed'", () => {
+    const title = titleOf(
+      makeMutation({
+        classifierReason: { rule: 'process_substitution', detail: 'proc-sub', matched: '<(' },
+      }),
+    );
+    expect(title).toBe('Unanalyzable command observed');
+  });
+
+  test("a genuinely-destructive rule keeps 'Dangerous command observed'", () => {
+    const title = titleOf(
+      makeMutation({
+        summary: 'rm -rf /tmp/risky',
+        classifierReason: {
+          rule: 'dangerous_first_token',
+          detail: "first token 'rm' is always dangerous",
+          matched: 'rm',
+        },
+      }),
+    );
+    expect(title).toBe('Dangerous command observed');
+  });
+
+  test("null reason (pre-022 row) → 'Dangerous command observed' — absence makes no new claim", () => {
+    expect(titleOf(makeMutation({ classifierReason: null }))).toBe('Dangerous command observed');
+  });
+
+  test("no surface reads 'Dangerous mutation observed' any more", () => {
+    expect(titleOf(makeMutation())).not.toBe('Dangerous mutation observed');
+  });
+});
+
 describe('[security][BE-2] dangerous-mutation burst is NEVER coalesced at recording', () => {
   test('20 dangerous mutations → 20 audit rows + 20 envelopes (distinct ids)', () => {
     const sent: ServerMsg[] = [];

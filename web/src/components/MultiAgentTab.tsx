@@ -15,7 +15,7 @@ import type {
   TemplateLastRun,
 } from '@cebab/shared/protocol';
 import type { MultiAgentEventView, MultiAgentRun, MultiAgentState } from '../store';
-import { activeAgent, eventDefaultCollapsed } from '../store';
+import { activeAgent, eventDefaultCollapsed, summarizeMutationCounts } from '../store';
 import { agentIdentity } from '../agentIdentity';
 import { formatElapsed, timeAgo } from '../format';
 import { ThinkingIndicator, useElapsed } from './ThinkingIndicator';
@@ -2978,19 +2978,26 @@ export function MultiAgentActivityBar(props: {
  * in v1 (the disclosure is in Session info); the chip is read-only signal.
  */
 function MutationsCounterChip(props: { mutations: MultiAgentMutationView[] }) {
-  const n = props.mutations.length;
+  // Cebab-ygu.46: partition into genuinely-mutating vs merely-unanalysable so
+  // the chip never labels an unanalysable read-only command a "mutation".
+  const { mutations: m, unanalyzable: u } = summarizeMutationCounts(props.mutations);
+  // R2: the red alarm is a SEPARATE signal — kept derived from `category`, not
+  // from the partition, so an unanalysable-only run still flags dangerous.
   const hasDangerous = props.mutations.some((m) => m.category === 'dangerous');
+  const mutationsText = `${m} mutation${m === 1 ? '' : 's'}`;
+  const unanalyzableText = u > 0 ? `, ${u} unanalyzable command${u === 1 ? '' : 's'}` : '';
   return (
     <span
       className={`ma-mutations-chip${hasDangerous ? ' has-dangerous' : ''}`}
-      aria-label={`${n} mutations${hasDangerous ? ' (some dangerous)' : ''}`}
+      aria-label={`${mutationsText}${unanalyzableText}${hasDangerous ? ' (some dangerous)' : ''}`}
       title={
-        hasDangerous
-          ? `${n} mutation${n === 1 ? '' : 's'} this session — at least one is classified dangerous. Open Session info to inspect.`
-          : `${n} mutation${n === 1 ? '' : 's'} this session. Open Session info to inspect.`
+        `${mutationsText}${unanalyzableText} this session` +
+        (hasDangerous ? ' — at least one is classified dangerous' : '') +
+        '. Open Session info to inspect.'
       }
     >
-      ⚠ {n}
+      ⚠ {m}
+      {u > 0 && <span className="ma-mutations-unanalyzable"> +{u}?</span>}
     </span>
   );
 }
@@ -3200,9 +3207,14 @@ function validateDraft(participants: Project[], mode: 'chain' | 'orchestrator'):
  * grouped by agent, in chronological order. Read-only tool calls are NOT in
  * this list — `multi_agent_mutations` only logs non-`read` rows.
  */
-function MutationsDisclosure(props: { run: MultiAgentRun }) {
+export function MutationsDisclosure(props: { run: MultiAgentRun }) {
   const [open, setOpen] = useState(false);
   const { mutations } = props.run;
+  // Cebab-ygu.46: split genuinely-mutating from merely-unanalysable rows so the
+  // summary never over-claims a read-only listing as a mutation.
+  const { mutations: mutCount, unanalyzable: unanalyzableCount } =
+    summarizeMutationCounts(mutations);
+  // R2: `has-dangerous` stays derived from `category`, independent of the split.
   const hasDangerous = mutations.some((m) => m.category === 'dangerous');
   // Group by agentName, preserving ts order within each group.
   const grouped = new Map<string, typeof mutations>();
@@ -3220,7 +3232,13 @@ function MutationsDisclosure(props: { run: MultiAgentRun }) {
         onClick={() => setOpen((o) => !o)}
         title="Files written, edits, and Bash commands that mutated the filesystem during this session. Read-only tool calls are not listed."
       >
-        {open ? '▾' : '▸'} {mutations.length} mutation{mutations.length === 1 ? '' : 's'}
+        {open ? '▾' : '▸'} {mutCount} mutation{mutCount === 1 ? '' : 's'}
+        {unanalyzableCount > 0 && (
+          <span className="mutations-unanalyzable-marker">
+            {' '}
+            · {unanalyzableCount} unanalyzable command{unanalyzableCount === 1 ? '' : 's'}
+          </span>
+        )}
         {hasDangerous && <span className="mutations-danger-marker"> · contains dangerous</span>}
       </button>
       {open && (
