@@ -47,6 +47,16 @@ import { getSetting, setSetting } from '../repo/settings.js';
  * committed to to still be present and to still hash to what was committed, and
  * the missing-mirror branch no longer consults `rowsChecked` at all.
  *
+ * Cebab-lf1u closed the residual Cebab-5y4t left explicit: a BARE re-seat, with
+ * nothing removed or rewritten, still verified clean because the survival check
+ * finds every committed row intact and the digest walk covers nothing. Each
+ * mirror line now also records the anchor's ID (`anchorId`) — a migration
+ * inserts a marker with a NEW id, a re-seat relocates an EXISTING one — and
+ * `verifyChain` reports `anchor_reseated` when the current top anchor's id was
+ * committed by some line but never at the rowid it now occupies. It helps only
+ * installs whose mirror already holds a tagged line, and does not beat an
+ * attacker who relocates the anchor back to a committed rowid.
+ *
  * A determined same-uid attacker who does both, in the right order, still
  * wins. Closing that needs a commitment the operator's own account cannot
  * rewrite — a remote witness, an append-only device, an OS-enforced log — all
@@ -92,6 +102,23 @@ export type AuditTipEntry = {
    * written before this field existed — see `readMaxTipForAnchor`.
    */
   anchorRowid?: number;
+  /**
+   * Cebab-lf1u [security]: the `id` of the chain-reset anchor this line was
+   * committed under (the marker at `anchorRowid`). This is the datum
+   * `anchorRowid` alone could not supply — the mirror recorded WHERE the anchor
+   * was but not WHICH anchor it was, so "a marker was added" (a legitimate
+   * migration, always a NEW id) could not be told from "a marker moved" (a
+   * re-seat: the SAME id relocated to a new highest rowid). `verifyChain`
+   * reports `anchor_reseated` when the current top anchor's id was committed by
+   * some mirror line but never at the rowid it now occupies — i.e. an existing
+   * anchor was relocated rather than a fresh one inserted. Committing the id
+   * rather than a count resists padding the marker tally with a junk row and
+   * shuffling other markers into the vacated rowid; only relocating the anchor
+   * BACK undoes the signal. Absent on entries written before this field
+   * existed; an install whose mirror holds no tagged line cannot be protected
+   * this way (the documented "new format only" limit of Cebab-lf1u).
+   */
+  anchorId?: string;
 };
 
 /**

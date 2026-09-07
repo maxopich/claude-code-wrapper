@@ -2861,6 +2861,8 @@ export function describeChainFailure(reason: string, brokenAt?: string): string 
       return `Audit rows were deleted: the chain ends before ${brokenAt}, which Cebab recorded outside the database. Entries the log should contain are gone.`;
     case 'tip_mirror_missing':
       return 'The out-of-database record of the audit chain tip is gone, so deletions from the log can no longer be detected. It was present before.';
+    case 'anchor_reseated':
+      return 'The safety audit log’s chain-reset anchor was moved to sit above existing rows without a migration adding it. That excludes those rows from verification; Cebab recorded the marker count outside the database and it did not grow.';
     default:
       return `Row ${brokenAt} no longer matches its recorded hash.`;
   }

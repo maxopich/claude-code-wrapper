@@ -138,23 +138,33 @@ describe('[security] tail truncation is detected', () => {
     // the DB, just below the new anchor, and the mirror re-commits at the next
     // append. Left unfixed this fires a non-dismissible `danger` alarm once per
     // such migration on every healthy install.
+    //
+    // Cebab-lf1u note. A migration is now told from a re-seat by WHICH anchor
+    // sits at the tip (`checkAnchorNotReseated`): a migration carries a NEW id
+    // the mirror never committed, a re-seat relocates an existing one. So this
+    // test must model a migration faithfully — a marker whose id the mirror has
+    // not seen. The fresh DB already holds both allowlisted markers (015 + 023),
+    // so to reach a state where inserting 023 is genuinely NEW to the mirror we
+    // first delete 023 and append under the lone 015 anchor (committing
+    // anchorId 015), then re-insert 023 at the tip. The committed lines name
+    // 015, never 023, so the fresh 023 anchor reads as an add, not a relocation.
+    // An `INSERT OR REPLACE` that reused an id the mirror HAD committed is now
+    // (correctly) reported as a re-seat — see the Cebab-lf1u suite below.
+    getDb().exec(`DELETE FROM safety_audit WHERE id = 'chain-reset-023'`);
     appendRows(5);
     expect(verifyChain()).toMatchObject({ ok: true, rowsChecked: 5 });
 
-    // Simulate the migration's fresh marker: re-anchor above the current tip.
-    // INSERT OR REPLACE deletes the old anchor row and inserts a new one at a
-    // higher rowid — exactly what a migration's fresh marker does relative to
-    // the rows already present. (This is the reproduction the finding's probe
-    // used.)
     getDb()
       .prepare(
-        `INSERT OR REPLACE INTO safety_audit
+        `INSERT INTO safety_audit
            (id, ts, kind, reason_code, payload_json, hash_prev, hash_self, mode)
          VALUES ('chain-reset-023', 0, 'audit.chain_reset', 'migration_023', '{}', NULL, X'00', 'live')`,
       )
       .run();
 
-    // Before the fix this returned { ok:false, reason:'tail_truncated' }.
+    // The mirror committed anchorId 015, never 023, so the fresh 023 anchor
+    // reads as a migration, not a re-seat.
+    // Before H14 the raw check returned { ok:false, reason:'tail_truncated' }.
     expect(verifyChain()).toMatchObject({ ok: true, rowsChecked: 0 });
   });
 
@@ -283,6 +293,96 @@ describe('[security] re-seating the anchor cannot erase the log (Cebab-5y4t)', (
     appendAuditTip({ ts: 1, rowId: 'row-from-another-life', hashSelf: 'ff', count: 99 });
     expect(isMirrorEstablished()).toBe(false);
     expect(verifyChain()).toMatchObject({ ok: true, rowsChecked: 0 });
+  });
+
+  describe('[security] a bare re-seat no longer reports clean (Cebab-lf1u)', () => {
+    test('re-seat alone, nothing else touched, is reported as anchor_reseated', () => {
+      // The residual Cebab-5y4t left explicit. With the rows all still present
+      // and hashing correctly, the survival check says nothing; before this the
+      // whole verify returned { ok: true, rowsChecked: 0 } because the digest
+      // walk covered zero rows. The mirror now records WHICH anchor each line
+      // was committed under, and this re-seat put an already-committed anchor id
+      // at a rowid it was never committed at, so it is caught.
+      appendRows(5);
+      expect(verifyChain()).toMatchObject({ ok: true, rowsChecked: 5 });
+
+      reseatAnchor();
+
+      const after = verifyChain();
+      expect(after.ok).toBe(false);
+      if (after.ok) return;
+      expect(after.reason).toBe('anchor_reseated');
+    });
+
+    test('re-anchoring by REPLACING an existing marker id is a re-seat, not a migration', () => {
+      // INSERT OR REPLACE on an existing marker id (what the old migration test
+      // used as a stand-in) deletes the marker and re-inserts it at a higher
+      // rowid: the SAME id reappears at a new rowid. A real migration carries a
+      // NEW id the mirror never committed. So reusing an id now reads as a
+      // re-seat — the same end state the bare `UPDATE ... SET rowid` produces.
+      appendRows(4);
+      getDb()
+        .prepare(
+          `INSERT OR REPLACE INTO safety_audit
+             (id, ts, kind, reason_code, payload_json, hash_prev, hash_self, mode)
+           VALUES ('chain-reset-023', 0, 'audit.chain_reset', 'migration_023', '{}', NULL, X'00', 'live')`,
+        )
+        .run();
+
+      const after = verifyChain();
+      expect(after.ok).toBe(false);
+      if (after.ok) return;
+      expect(after.reason).toBe('anchor_reseated');
+    });
+
+    test('a non-tip row stranded below a re-seated anchor cannot be edited undetected', () => {
+      // The second clause of the residual: re-seating stops the rows below the
+      // anchor from being digest-checked, so a row that is neither a committed
+      // high-water tip nor above the anchor could be rewritten unseen. Editing
+      // one no longer hides — the re-seat that stranded it is itself reported.
+      appendRows(5);
+      reseatAnchor();
+      // Rewrite the SECOND-oldest row: not the committed high-water tip (the
+      // last append), so `checkCommittedRowsSurvive` does not name it.
+      getDb()
+        .prepare(
+          `UPDATE safety_audit SET payload_json = '{"tampered":true}'
+             WHERE rowid = (
+               SELECT rowid FROM safety_audit WHERE kind = 'test.event'
+                ORDER BY rowid ASC LIMIT 1 OFFSET 1)`,
+        )
+        .run();
+
+      expect(verifyChain().ok).toBe(false);
+    });
+
+    test('the anchorId tag is what catches the re-seat; a legacy mirror abstains', () => {
+      // Positive control AND the documented limit in one case, so the assertion
+      // is not vacuous. With the tag present a re-seat is caught — that half
+      // reddens the moment the fix is reverted. Stripping `anchorId` from every
+      // committed line (as a pre-Cebab-lf1u build wrote them) then leaves the
+      // SAME re-seat indistinguishable from a migration, which is the honest
+      // new-format-only limit of direction 1.
+      appendRows(5);
+      reseatAnchor();
+      expect(verifyChain()).toMatchObject({ ok: false, reason: 'anchor_reseated' });
+
+      const stripped = fs
+        .readFileSync(auditTipPath(), 'utf8')
+        .split('\n')
+        .filter((l) => l.trim())
+        .map((l) => {
+          const obj = JSON.parse(l) as Record<string, unknown>;
+          delete obj.anchorId;
+          return JSON.stringify(obj);
+        })
+        .join('\n');
+      fs.writeFileSync(auditTipPath(), stripped + '\n');
+
+      // No tagged commitment to measure against, so the check abstains — the
+      // very same re-seated DB now reads clean.
+      expect(verifyChain()).toMatchObject({ ok: true, rowsChecked: 0 });
+    });
   });
 });
 
