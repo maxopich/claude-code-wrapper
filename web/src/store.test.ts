@@ -2890,6 +2890,44 @@ describe('store / draftHopBudget + source (F-D9)', () => {
     expect(s.multiAgent.draftHopBudgetSource).toBeNull();
   });
 
+  // Cebab-ygu.45: applying a template must restore the dangerous-command pause
+  // toggle — it is a SAFETY control, so dropping it silently fails OPEN.
+  test('ma_apply_template with pauseOnDangerous=true restores the toggle ON', () => {
+    // Start with the box OFF (the initial-state default) to prove apply flips it on.
+    let s = initialState;
+    expect(s.multiAgent.draftPauseOnDangerous).toBe(false);
+    s = reduce(s, {
+      type: 'ma_apply_template',
+      template: {
+        id: 't-pod',
+        name: 'Risky panel',
+        mode: 'orchestrator',
+        lifecycle: 'persistent',
+        participants: [],
+        pauseOnDangerous: true,
+      },
+    });
+    expect(s.multiAgent.draftPauseOnDangerous).toBe(true);
+  });
+
+  test('ma_apply_template without pauseOnDangerous reads back as false', () => {
+    // Pre-set the box ON, then apply a pre-field template — absent reads as the
+    // historical pause-off default (consistent with the other atomic-fill fields).
+    let s = reduce(initialState, { type: 'ma_set_draft_pause_on_dangerous', value: true });
+    expect(s.multiAgent.draftPauseOnDangerous).toBe(true);
+    s = reduce(s, {
+      type: 'ma_apply_template',
+      template: {
+        id: 't-nopod',
+        name: 'Legacy panel',
+        mode: 'orchestrator',
+        lifecycle: 'persistent',
+        participants: [],
+      },
+    });
+    expect(s.multiAgent.draftPauseOnDangerous).toBe(false);
+  });
+
   test('ma_set_draft_hop_budget(75) sets value + source="user"', () => {
     let s = initialState;
     s = reduce(s, { type: 'ma_set_draft_hop_budget', value: 75 });

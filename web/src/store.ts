@@ -2001,6 +2001,12 @@ export function reduce(state: AppState, action: Action): AppState {
           // the next Start mirrors it onto `start_multi_agent.roles`. `{}` when
           // the template predates the field or has no role text.
           draftRoles: { ...(action.template.roles ?? {}) },
+          // Cebab-ygu.45: restore the dangerous-command pause toggle. Without
+          // this the box came back unchecked even for a roster saved with it
+          // ON — a SAFETY control silently dropping to the fail-open state.
+          // Absent (pre-field templates) reads as `false`, the historical
+          // pause-off default, matching the other atomic-fill fields above.
+          draftPauseOnDangerous: action.template.pauseOnDangerous ?? false,
         },
       };
     }

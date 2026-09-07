@@ -48,6 +48,11 @@ export function saveTemplate(input: {
    *  to a positive integer; non-finite or sub-1 input is silently dropped
    *  (the template then falls back to the global default at start). */
   hopBudget?: number;
+  /** Cebab-ygu.45: persisted state of the dangerous-command pause toggle.
+   *  A SAFETY control — when the operator saved the roster with the pause ON,
+   *  applying the template must bring it back ON. Absent → stays undefined
+   *  (read back as `false`, the historical pause-off default). */
+  pauseOnDangerous?: boolean;
 }): MultiAgentTemplate[] {
   const name = input.name.trim();
   const list = listTemplates();
@@ -70,6 +75,10 @@ export function saveTemplate(input: {
     roles: input.roles,
     layout: input.layout,
     hopBudget,
+    // Cebab-ygu.45: store only when explicitly ON. Persisting `false` as
+    // `undefined` matches the `roles?`/`layout?` precedent (the settings JSON
+    // serializer drops the key) and reads back as pause-off — the safe default.
+    pauseOnDangerous: input.pauseOnDangerous === true ? true : undefined,
   };
   const out = idx >= 0 ? list.map((t, i) => (i === idx ? next : t)) : [...list, next];
   setSetting(SETTING_KEY, out);
