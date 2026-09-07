@@ -95,6 +95,45 @@ describe('saveTemplate / listTemplates (PR-6 round-trip)', () => {
     expect(second[0]!.layout?.positions['2']).toEqual({ x: 20, y: 20 });
   });
 
+  // Cebab-ygu.45: the dangerous-command pause is a SAFETY control. A roster
+  // saved with the pause ON must round-trip ON — dropping it fails OPEN.
+  test('pauseOnDangerous=true round-trips through save/list', () => {
+    saveTemplate({
+      name: 'Risky panel',
+      mode: 'orchestrator',
+      lifecycle: 'persistent',
+      participants: [11, 13, 12, 15],
+      pauseOnDangerous: true,
+    });
+    expect(listTemplates()[0]!.pauseOnDangerous).toBe(true);
+  });
+
+  // Re-saving the same roster with the pause OFF must clear the stored flag —
+  // the operator turning the toggle off and re-saving persists pause-off. The
+  // opening `true` assertion also keeps this case change-dependent (it reddens
+  // when the pauseOnDangerous threading is reverted), while the closing
+  // assertion pins the `false → undefined` normalization.
+  test('upsert with pauseOnDangerous=false clears a previously-saved ON flag', () => {
+    saveTemplate({
+      name: 'Toggle panel',
+      mode: 'orchestrator',
+      lifecycle: 'persistent',
+      participants: [1],
+      pauseOnDangerous: true,
+    });
+    expect(listTemplates()[0]!.pauseOnDangerous).toBe(true);
+    // Same name → upsert keeps the id but rebuilds the row; false must not
+    // linger as ON, and stores as `undefined` (serializer drops the key).
+    saveTemplate({
+      name: 'Toggle panel',
+      mode: 'orchestrator',
+      lifecycle: 'persistent',
+      participants: [1],
+      pauseOnDangerous: false,
+    });
+    expect(listTemplates()[0]!.pauseOnDangerous).toBeUndefined();
+  });
+
   test('mixed list: chain + orchestrator + custom coexist', () => {
     saveTemplate({
       name: 'A chain',

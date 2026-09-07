@@ -1466,8 +1466,9 @@ function TemplateNameModal(props: {
             />
           </label>
           <p className="hint">
-            Saves the current participant list + lifecycle. Per-agent roles are authored after, in
-            the expanded card. The first prompt is never stored — you type it fresh each time.
+            Saves the current participant list, lifecycle, and the dangerous-command pause toggle.
+            Per-agent roles are authored after, in the expanded card. The first prompt is never
+            stored — you type it fresh each time.
           </p>
           {isDup && (
             <p className="hint warn">

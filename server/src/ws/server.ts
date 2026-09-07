@@ -6197,6 +6197,10 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
         // non-finite/sub-1 input; passing `undefined` keeps the template
         // on the global default (no override).
         hopBudget: msg.hopBudget,
+        // Cebab-ygu.45: persist the dangerous-command pause toggle so applying
+        // the template restores this SAFETY control rather than silently
+        // dropping to the fail-open (pause off) state.
+        pauseOnDangerous: msg.pauseOnDangerous,
       });
       send(conn.ws, { type: 'templates', items });
       return;

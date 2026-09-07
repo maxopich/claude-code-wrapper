@@ -2388,17 +2388,22 @@ function AppShell({
     wsRef.current?.send({ type: 'list_templates' });
   }, [wsRef]);
   function saveTemplate(name: string, mode: 'chain' | 'orchestrator') {
-    const { draftLifecycle, draftParticipants } = state.multiAgent;
+    const { draftLifecycle, draftParticipants, draftPauseOnDangerous } = state.multiAgent;
     // Mode comes from the active tab (passed down), not draft state. Per-agent
     // roles are authored later in the expanded card, not at save time. No
     // optimistic update — the server replies with the full refreshed
     // `templates` list (settings is the source of truth).
+    //
+    // Cebab-ygu.45: carry the dangerous-command pause toggle. It is a SAFETY
+    // control, so a roster saved with the pause ON must apply back ON rather
+    // than silently reverting to the fail-open (pause off) state.
     wsRef.current?.send({
       type: 'save_template',
       name,
       mode,
       lifecycle: draftLifecycle,
       participants: draftParticipants,
+      pauseOnDangerous: draftPauseOnDangerous,
     });
   }
   function updateTemplateRoles(t: MultiAgentTemplate, roles: Record<string, string>) {
@@ -2418,6 +2423,9 @@ function AppShell({
       roles,
       layout: t.layout,
       hopBudget: t.hopBudget,
+      // Cebab-ygu.45: preserve the saved dangerous-command pause toggle so
+      // editing roles doesn't silently drop this SAFETY control back to off.
+      pauseOnDangerous: t.pauseOnDangerous,
     });
   }
   function deleteTemplate(id: string) {

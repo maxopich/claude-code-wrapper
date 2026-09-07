@@ -1362,6 +1362,13 @@ export type ClientMsg =
        * rejects non-finite numbers.
        */
       hopBudget?: number;
+      /**
+       * Cebab-ygu.45: persist the "Pause before a worker runs a dangerous
+       * command" safety toggle alongside the roster so applying the template
+       * restores it. Absent on pre-field clients; the repo stores absent as
+       * `undefined` (read back as `false`).
+       */
+      pauseOnDangerous?: boolean;
     }
   | {
       /** Delete a template by id. Reply: a fresh `templates` ServerMsg. */
@@ -5091,6 +5098,16 @@ export type MultiAgentTemplate = {
    * Sanity: positive integer. Sub-1 values are rejected at the save handler.
    */
   hopBudget?: number;
+  /**
+   * Cebab-ygu.45: optional persisted state of the "Pause before a worker runs
+   * a dangerous command" safety toggle. When a roster is saved with the pause
+   * ON, applying the template must restore it — otherwise the template silently
+   * comes back in the LESS safe (fail-open) state and every later run executes
+   * dangerous commands with no pause. Absent on templates saved before this
+   * field existed; the renderer reads absent as `false` (the historical
+   * behaviour — pause off — which is the safe default for the toggle).
+   */
+  pauseOnDangerous?: boolean;
 };
 
 /**

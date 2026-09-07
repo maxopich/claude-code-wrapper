@@ -188,6 +188,7 @@ const SHAPES: Table = {
     roles: 'object?',
     layout: 'object?',
     hopBudget: 'number?',
+    pauseOnDangerous: 'boolean?',
   },
   delete_template: { id: 'string' },
   load_session_log: {
