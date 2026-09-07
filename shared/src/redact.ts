@@ -81,7 +81,12 @@ const SENSITIVE_KEY_PATTERNS: readonly RegExp[] = [
 ];
 
 /** Directory segments whose CONTENTS (anywhere under that path) are sensitive.
- *  Matched as a substring `/<seg>/` in the normalized path. */
+ *  Matched two ways in the normalized path: as a substring `/<seg>/` (the
+ *  directory has contents below it, e.g. `~/.aws/credentials`), and as the
+ *  path's FINAL segment via `===` after stripping one trailing slash — a bare
+ *  credential DIRECTORY argument such as `cp -r ~/.aws /tmp/x`, where `.aws` is
+ *  the last component with nothing after it, which the substring form cannot
+ *  see (`Cebab-k5qm`). */
 const SENSITIVE_DIR_SEGMENTS: readonly string[] = ['.aws', '.gnupg', '.ssh', '.kube'];
 
 /** Basenames that are always sensitive on their own (no extension required). */
@@ -295,9 +300,18 @@ export function pathLooksSensitive(value: string): boolean {
     const bare = tail.slice(1);
     if (norm === bare || norm.endsWith(`/${bare}`)) return true;
   }
+  // Cebab-k5qm: normalise for the final-segment rule below. Strip a single
+  // trailing slash so `.aws/` and `.aws` compare alike, then take everything
+  // after the last `/` — the whole string when there is none.
+  const withoutTrailingSlash = norm.endsWith('/') ? norm.slice(0, -1) : norm;
+  const finalSegment = withoutTrailingSlash.slice(withoutTrailingSlash.lastIndexOf('/') + 1);
   for (const seg of SENSITIVE_DIR_SEGMENTS) {
     const wrapped = `/${seg}/`;
     if (norm.includes(wrapped) || norm.startsWith(`${seg}/`)) return true;
+    // A bare credential directory argument (`cp -r ~/.aws /tmp/x`) has the
+    // segment as the path's final component with nothing after it, so neither
+    // substring form above matches. Compare the last segment for equality.
+    if (finalSegment === seg) return true;
   }
 
   const basename = basenameOf(norm);

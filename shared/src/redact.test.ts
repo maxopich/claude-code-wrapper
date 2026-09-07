@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { redactSensitive, isSensitiveKey, ROOT_FIELD } from './redact.js';
+import { redactSensitive, isSensitiveKey, pathLooksSensitive, ROOT_FIELD } from './redact.js';
 
 describe('redactSensitive — key-based', () => {
   it('masks values for sensitive-named keys', () => {
@@ -579,6 +579,47 @@ describe('[security] Cebab-documented credential files (of0)', () => {
 });
 
 /**
+ * [security] Cebab-k5qm — a bare credential DIRECTORY argument.
+ *
+ * `cp -r ~/.aws /tmp/x` names `.aws` as a directory with NOTHING after it: no
+ * trailing slash, so the substring rule `/.aws/` never matches and the whole
+ * command's captured output (the copied credentials) shipped unmasked. The
+ * matcher now also compares the path's FINAL segment for equality.
+ *
+ * Every positive is labelled NEW (false on main before this change, reddens if
+ * the final-segment rule is reverted) or CONTROL (already true via the
+ * substring rule — proves the added rule did not REPLACE the old one). At least
+ * four must be NEW, so the block cannot pass while measuring nothing.
+ */
+describe('[security] a bare credential directory argument (Cebab-k5qm)', () => {
+  it.each([
+    // ---- NEW: bare directory, no trailing slash. All false on main. ----
+    ['a bare segment, no path', '.aws'],
+    ['home-relative', '~/.aws'],
+    ['absolute', '/home/u/.aws'],
+    ['dot-relative .ssh', './.ssh'],
+    ['relative .kube', 'x/.kube'],
+    ['absolute .gnupg', '/home/u/.gnupg'],
+    // ---- CONTROL: already true via the substring `/<seg>/` rule. ----
+    ['CONTROL: trailing slash (substring rule)', '.aws/'],
+    ['CONTROL: a file under the directory', '/home/u/.aws/credentials'],
+  ])('treats %s as sensitive', (_label, path) => {
+    expect(pathLooksSensitive(path)).toBe(true);
+  });
+
+  // Negatives — without these the final-segment rule could widen to "any path
+  // whose last component merely contains the word" and every positive passes.
+  it.each([
+    ['a longer name that ends with the segment text', '/home/u/.awsome'],
+    ['the segment as a substring of the basename', '/home/u/my.aws.notes'],
+    ['a sibling that only starts like it', '/home/u/.aws-backup'],
+    ['an ordinary directory', '/home/u/projects'],
+  ])('does NOT treat %s as sensitive', (_label, path) => {
+    expect(pathLooksSensitive(path)).toBe(false);
+  });
+});
+
+/**
  * [security] Register of0 — the SECOND copy of a sensitive file body.
  *
  * A `Read` puts the body in the payload twice. `tool_use_result.file` carries
@@ -816,6 +857,48 @@ describe('[security] a Bash mutation names its file in the command (Cebab-5j1)',
     expect((redacted as Record<string, unknown>).toolResult).toBe(SECRET);
     expect(fields).toEqual([]);
   });
+
+  // Cebab-k5qm. A bare credential DIRECTORY argument — `.aws` named with no
+  // trailing slash and no file under it. Before the final-segment matcher fix,
+  // `pathLooksSensitive('~/.aws')` was false, so this row's captured output (the
+  // copied credentials) shipped verbatim. This is the Bash-path proof of the
+  // widened predicate, and it reddens on main.
+  //
+  // The fixture toolResult is stated here rather than reused: it is 40 alnum
+  // characters with NO vendor prefix, so the UNPATCHED predicate leaves it
+  // byte-identical (no SENSITIVE_VALUE_PATTERN matches it) and the new mask is
+  // the ONLY thing that can change it. Assembled at runtime for the secret scan.
+  it('masks a bare credential directory argument (cp -r ~/.aws)', () => {
+    const HALF = 'K7m2N9p4Q1r6S3t8';
+    const dirSecret = HALF + HALF + '01234567'; // 40 chars, no vendor prefix
+    const { redacted, fields } = redactSensitive(bashMutation('cp -r ~/.aws /tmp/x', dirSecret));
+    const obj = redacted as Record<string, unknown>;
+    expect(JSON.stringify(redacted)).not.toContain(dirSecret);
+    expect(obj.toolResult).toBe('<redacted>');
+    expect(obj.toolInput).toBe('<redacted>');
+    expect(fields.sort()).toEqual(['toolInput', 'toolResult']);
+  });
+
+  // Cebab-k5qm [security] pinned limitation. The over-mask the bead's item 2
+  // named: `pathLooksSensitive` treats the bare stems `token`/`secret`/
+  // `secrets`/`credentials` as sensitive basenames, so a Bash command whose bare
+  // WORD is one of those masks the whole row even though no file is touched. The
+  // JSDoc on `bashCommandPathArguments` once claimed "a token that is not a path
+  // matches nothing and costs nothing"; it is false, and this pins the behaviour
+  // rather than narrowing the stems (which would weaken the file-path coverage
+  // those stems exist for).
+  it.each(['git secret', 'pass token', 'vault credentials', 'show secrets'])(
+    'over-masks a benign Bash command containing the bare word in %p',
+    (command) => {
+      const benign = 'ordinary command output, no credential here at all';
+      const { redacted, fields } = redactSensitive(bashMutation(command, benign));
+      const obj = redacted as Record<string, unknown>;
+      // The whole captured output is masked, purely because the command word is
+      // a credential stem. Accepted, fail-toward-masking.
+      expect(obj.toolResult).toBe('<redacted>');
+      expect(fields.sort()).toEqual(['toolInput', 'toolResult']);
+    },
+  );
 });
 
 describe('[security] pinned limitation: a streaming delta is NOT this module’s job', () => {
