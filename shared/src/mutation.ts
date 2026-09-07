@@ -81,6 +81,37 @@ export type BashClassifierRule =
   | 'mutating_first_token'
   | 'unknown_first_token';
 
+/**
+ * Cebab-ygu.46: the subset of Bash classifier rules that mean "the classifier
+ * could not analyse what this command does", NOT "this command mutates". A
+ * command held by one of these is still category `dangerous` — the substituted
+ * / process-substituted text could be anything, so the pause gate is right to
+ * fire — but the operator-facing surfaces must not then call a read-only file
+ * listing a MUTATION. Two orthogonal axes: WHAT the tool does (read / mutate)
+ * and HOW CONFIDENT the classifier is (analysable / unanalysable).
+ *
+ * Deliberately exactly these two. `shell_invocation_*`,
+ * `unknown_subcommand_of_known_tool` and `unknown_first_token` are contested
+ * and unmeasured (they may genuinely mutate), so they stay counted as
+ * mutations until measured — see the bead's "do not widen" note.
+ */
+export const UNANALYZABLE_BASH_RULES: ReadonlySet<BashClassifierRule> = new Set([
+  'shell_substitution',
+  'process_substitution',
+]);
+
+/**
+ * True when a classifier reason marks a command the classifier could not
+ * analyse (see `UNANALYZABLE_BASH_RULES`). Accepts the wire shape
+ * (`{ rule: string }`, as `MultiAgentMutationView.classifierReason` carries it)
+ * as well as the full `BashClassifierReason`. A missing reason is analysable —
+ * absence must never manufacture a new claim, so a pre-022 `dangerous` row with
+ * no stored reason is treated as a genuine dangerous mutation, not unanalysable.
+ */
+export function isUnanalyzableCommand(reason: { rule: string } | null | undefined): boolean {
+  return reason != null && (UNANALYZABLE_BASH_RULES as ReadonlySet<string>).has(reason.rule);
+}
+
 export type BashClassifierReason = {
   /** Stable rule ID; see `BashClassifierRule` above. */
   rule: BashClassifierRule;

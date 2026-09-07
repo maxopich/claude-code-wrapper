@@ -3,9 +3,11 @@ import { describe, expect, it } from 'vitest';
 import {
   BUS_SEND_TOOL,
   COMMAND_WRAPPERS,
+  UNANALYZABLE_BASH_RULES,
   bashCommandPathArguments,
   classifyBashCommand,
   classifyToolCall,
+  isUnanalyzableCommand,
 } from './mutation.js';
 
 describe('classifyToolCall', () => {
@@ -1223,5 +1225,50 @@ describe('bashCommandPathArguments (Cebab-5j1)', () => {
   it('returns [] for an empty command', () => {
     expect(bashCommandPathArguments('')).toEqual([]);
     expect(bashCommandPathArguments('   ')).toEqual([]);
+  });
+});
+
+// Cebab-ygu.46: a shell-substitution verdict means "could not be analysed",
+// NOT "mutates". The classifier keeps the conservative `dangerous` category
+// (so the pause gate still fires), but a separate axis lets the operator-facing
+// surfaces avoid calling a read-only listing a mutation.
+describe('isUnanalyzableCommand (Cebab-ygu.46)', () => {
+  it('the unanalyzable set is EXACTLY the two substitution rules', () => {
+    // Widening this set is explicitly out of scope — `shell_invocation_*`,
+    // `unknown_subcommand_of_known_tool` and `unknown_first_token` are
+    // contested and stay counted as mutations.
+    expect([...UNANALYZABLE_BASH_RULES].sort()).toEqual([
+      'process_substitution',
+      'shell_substitution',
+    ]);
+  });
+
+  it('is true for the two unanalyzable rules', () => {
+    expect(isUnanalyzableCommand({ rule: 'shell_substitution' })).toBe(true);
+    expect(isUnanalyzableCommand({ rule: 'process_substitution' })).toBe(true);
+  });
+
+  it('is false for genuinely-mutating / destructive rules', () => {
+    expect(isUnanalyzableCommand({ rule: 'dangerous_first_token' })).toBe(false);
+    expect(isUnanalyzableCommand({ rule: 'redirect_system_path' })).toBe(false);
+    expect(isUnanalyzableCommand({ rule: 'unknown_first_token' })).toBe(false);
+    expect(isUnanalyzableCommand({ rule: 'shell_invocation_dash_c' })).toBe(false);
+  });
+
+  it('treats a missing reason as analysable — absence must not manufacture a claim', () => {
+    expect(isUnanalyzableCommand(null)).toBe(false);
+    expect(isUnanalyzableCommand(undefined)).toBe(false);
+  });
+
+  it('agrees with the classifier verdict on the reported find | wc $(...) command', () => {
+    const cmd =
+      "find /subject -type f -not -path '*/node_modules/*' | head -100; " +
+      'echo ---; wc -l $(find /subject/src -type f)';
+    const cls = classifyToolCall('Bash', { command: cmd });
+    // The pause STILL fires: category is unchanged (criterion 16, shared half).
+    expect(cls.category).toBe('dangerous');
+    expect(cls.reason?.rule).toBe('shell_substitution');
+    // …but the operator surfaces can now tell this apart from a real mutation.
+    expect(isUnanalyzableCommand(cls.reason)).toBe(true);
   });
 });

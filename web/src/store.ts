@@ -31,6 +31,7 @@ import type {
 import type { MutationCategory, PermissionDecisionReason } from '@cebab/shared';
 import {
   BUS_SENTINEL_RECIPIENTS,
+  isUnanalyzableCommand,
   notConnected,
   tailAwaitsAgent,
   type McpServerStatus,
@@ -496,6 +497,35 @@ export type MultiAgentRun = {
    */
   mock?: boolean;
 };
+
+/** Cebab-ygu.46: a run's mutation rows split into genuinely-mutating vs merely-
+ *  unanalysable. `total` is the raw row count; `mutations` counts rows the Bash
+ *  classifier COULD analyse; `unanalyzable` counts the rest (shell / process
+ *  substitution). `mutations + unanalyzable === total` always — no row class is
+ *  dropped, so a command that may genuinely have mutated is never under-counted. */
+export type MutationCounts = { total: number; mutations: number; unanalyzable: number };
+
+/**
+ * Cebab-ygu.46: the single source of the two figures the mutation surfaces
+ * render. Both the activity-bar counter chip and the Session-info disclosure
+ * read from here rather than computing a count inline, so they cannot drift on
+ * what "N mutations" means. A shell-substitution verdict is "could not be
+ * analysed", not "mutates" — counting it as a mutation is the safety pause
+ * crying wolf on its first use.
+ */
+export function summarizeMutationCounts(
+  mutations: readonly MultiAgentMutationView[],
+): MutationCounts {
+  let unanalyzable = 0;
+  for (const m of mutations) {
+    if (isUnanalyzableCommand(m.classifierReason)) unanalyzable += 1;
+  }
+  return {
+    total: mutations.length,
+    unanalyzable,
+    mutations: mutations.length - unanalyzable,
+  };
+}
 
 /** Cluster D Phase 4d: bus auto-retry info (sub-slice of MultiAgentRun).
  *  Wire-mirror of the `auto_retry` ServerMsg minus the redundant
