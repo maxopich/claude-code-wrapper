@@ -107,10 +107,11 @@ export const HIGHEST_SUBCODES: ReadonlySet<string> = new Set([
  * Kept as a separate set instead of folding the tamper reason codes into
  * `HIGHEST_SUBCODES` because the reason code carries WHICH integrity check
  * failed, and that varies: `row_mismatch`, `no_anchor`, `forged_anchor`, and
- * now H14's `tail_truncated` and `tip_mirror_missing`. Listing today's five
- * would silently drop tomorrow's sixth out of the typed-ack requirement —
- * exactly the class of bug this fixes. Matching the kind covers every present
- * and future failure reason by construction.
+ * H14's `tail_truncated` and `tip_mirror_missing`, and now Cebab-lf1u's
+ * `anchor_reseated`. Listing today's six would silently drop tomorrow's
+ * seventh out of the typed-ack requirement — exactly the class of bug this
+ * fixes. Matching the kind covers every present and future failure reason by
+ * construction.
  */
 export const HIGHEST_AUDIT_KINDS: ReadonlySet<string> = new Set(['audit.tamper_detected']);
 
@@ -176,9 +177,23 @@ export type SafetyAuditRow = {
  *                       the mirror file is gone. Half of the two-step erasure
  *                       described in `audit_tip.ts`; on its own it is also
  *                       what a stray `rm ~/.cebab/audit-tip.jsonl` looks like.
+ *   - `anchor_reseated` — Cebab-lf1u. The current top chain-reset anchor sits at
+ *                       a rowid the mirror never committed under, yet the count
+ *                       of markers has not risen above the mirror's high-water
+ *                       commitment. A legitimate migration inserts a NEW marker
+ *                       (the count rises); an attacker re-seating the anchor to a
+ *                       new highest rowid moves an existing one (the count does
+ *                       not), which used to shrink the verified range to nothing
+ *                       and report `{ ok: true, rowsChecked: 0 }`. Now caught.
+ *                       See `checkAnchorNotReseated`.
  */
 export type VerifyChainFailureReason =
-  'row_mismatch' | 'no_anchor' | 'forged_anchor' | 'tail_truncated' | 'tip_mirror_missing';
+  | 'row_mismatch'
+  | 'no_anchor'
+  | 'forged_anchor'
+  | 'tail_truncated'
+  | 'tip_mirror_missing'
+  | 'anchor_reseated';
 
 export type VerifyChainResult =
   | { ok: true; rowsChecked: number }
@@ -329,6 +344,12 @@ export function appendSafetyAudit(input: SafetyAuditInput): { id: string; hash_s
     // a migration's fresh anchor does not inherit the old anchor's count. The
     // rowid, not the id, is the discriminator — a migration may reuse the id.
     anchorRowid: currentAnchorRowid() ?? undefined,
+    // Cebab-lf1u: also commit WHICH anchor this is (its id). A migration inserts
+    // a marker with a NEW id; a bare re-seat relocates an EXISTING one. So an
+    // anchor id that reappears at a rowid the mirror never committed it at is a
+    // relocation. Committing the id rather than a marker count resists an
+    // attacker padding the tally with a junk marker. See `checkAnchorNotReseated`.
+    anchorId: currentAnchorId() ?? undefined,
   });
   if (!isMirrorEstablished()) markMirrorEstablished();
 
@@ -372,6 +393,26 @@ function currentAnchorRowid(): number | null {
       )
       .get(CHAIN_RESET_KIND);
     return row?.rowid ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The `id` of the newest chain-reset anchor — the datum Cebab-lf1u commits to
+ * the mirror so a re-seat (an EXISTING id relocated to a new highest rowid) can
+ * be told from a migration (a NEW id inserted). Mirror-write context, so it
+ * must not throw: a failure yields `null`, which omits the tag on that one line
+ * (the next append re-commits it) and can never manufacture a false alarm.
+ */
+function currentAnchorId(): string | null {
+  try {
+    const row = getDb()
+      .prepare<[string], { id: string }>(
+        `SELECT id FROM safety_audit WHERE kind = ? ORDER BY rowid DESC LIMIT 1`,
+      )
+      .get(CHAIN_RESET_KIND);
+    return row?.id ?? null;
   } catch {
     return null;
   }
@@ -468,7 +509,7 @@ export function verifyChain(): VerifyChainResult {
 
   // H14: the rows that ARE here all verify. That says nothing about rows that
   // are not — which is the whole point of the external mirror.
-  const truncation = checkAgainstTipMirror(rowsChecked, lastMarker.rowid);
+  const truncation = checkAgainstTipMirror(rowsChecked, lastMarker.rowid, lastMarker.id);
   if (truncation) return truncation;
 
   return { ok: true, rowsChecked };
@@ -497,7 +538,11 @@ export function verifyChain(): VerifyChainResult {
  *     the pre-migration commitments name the OLD rowid, so this anchor has no
  *     commitment yet and there is nothing to fail against.
  */
-function checkAgainstTipMirror(rowsChecked: number, anchorRowid: number): VerifyChainResult | null {
+function checkAgainstTipMirror(
+  rowsChecked: number,
+  anchorRowid: number,
+  anchorId: string,
+): VerifyChainResult | null {
   // Existence check first: a mirror that was established and is now gone is the
   // second half of the two-step erasure (`audit_tip.ts`'s header), independent
   // of any per-anchor count. `readLatestAuditTip` answers "is there any usable
@@ -536,8 +581,93 @@ function checkAgainstTipMirror(rowsChecked: number, anchorRowid: number): Verify
   }
 
   // Cebab-5y4t: and whether or not THIS anchor has a commitment, the rows every
-  // PRIOR generation committed to must still be here, unchanged.
-  return checkCommittedRowsSurvive();
+  // PRIOR generation committed to must still be here, unchanged. Run this FIRST
+  // so a re-seat that ALSO erased or rewrote a committed tip reports the more
+  // specific `tail_truncated` / `row_mismatch` (which names the row) rather than
+  // the bare `anchor_reseated`.
+  const survives = checkCommittedRowsSurvive();
+  if (survives) return survives;
+
+  // Cebab-lf1u: a BARE re-seat — the anchor moved to a new highest rowid with
+  // nothing else touched — leaves every committed tip present and hashing
+  // correctly, so `checkCommittedRowsSurvive` says nothing and the digest walk
+  // covered zero rows. Only relevant when no mirror line names this anchor's
+  // rowid (`commitment === null`); a committed rowid was not moved.
+  if (commitment === null) {
+    return checkAnchorNotReseated(anchorRowid, anchorId);
+  }
+  return null;
+}
+
+/**
+ * Cebab-lf1u [security]: was the current top anchor RE-SEATED rather than added
+ * by a migration?
+ *
+ * THE HOLE THIS CLOSES. `verifyChain` walks only rows above the newest
+ * `audit.chain_reset` marker. Re-seating that marker to a new highest rowid
+ * (`UPDATE ... SET rowid`, or an `INSERT OR REPLACE` reusing its id) puts every
+ * real row BELOW it, so `rowsChecked` drops to 0 and — with the committed tips
+ * still present and unchanged — `verifyChain` reported `{ ok: true }`. The rows
+ * below the anchor also stop being digest-checked, so any of them that is not a
+ * committed high-water tip could be edited undetected. Both follow from the same
+ * move, and detecting the move closes both.
+ *
+ * THE DISCRIMINATOR (the residual Cebab-5y4t could not reach). On a snapshot a
+ * re-seat and a legitimate migration look identical: both leave a chain-reset
+ * marker at a new highest rowid with the real rows below it. The distinguishing
+ * fact is one the mirror now records — WHICH anchor it is (`anchorId`). A
+ * migration inserts a marker with a NEW id, never committed before; a re-seat
+ * relocates an EXISTING id to a new rowid. So when the top anchor's id was
+ * committed by some mirror line but NEVER at the rowid it now occupies, that
+ * anchor was moved rather than a fresh one added.
+ *
+ * `commitment === null` (the caller's guard) already establishes that no line
+ * names the current `(anchorId, anchorRowid)` pair; this function only has to
+ * decide whether the id is nonetheless one the mirror committed elsewhere.
+ *
+ * WHY THE ID AND NOT A COUNT. A marker COUNT is attacker-controllable from
+ * below: pad it with a junk `audit.chain_reset` row beneath the anchor and a
+ * "count rose" test reads the re-seat as a migration. The id cannot be forged
+ * up the same way — the relocated anchor keeps its id, and shuffling other
+ * markers into the vacated rowid does not change that the top anchor's id now
+ * sits somewhere it was never committed. Only relocating the anchor BACK to a
+ * committed rowid clears the signal.
+ *
+ * LIMITS, stated because `audit_tip.ts`'s header must stay honest. This helps
+ * only installs whose mirror already holds a line carrying `anchorId`: a legacy
+ * mirror (or a first-ever append) has none, so the check abstains rather than
+ * guess. And it does not beat an attacker who relocates the anchor back onto a
+ * committed rowid, or who never let the mirror commit the id in the first
+ * place — closing those needs a commitment the operator's own account cannot
+ * rewrite, still out of scope for a single-user local tool. It raises the bar;
+ * it does not end the game.
+ *
+ * Guarded on `isMirrorEstablished()` for the same reason its siblings are: a
+ * fresh database beside an older operator's mirror must not be called tampered.
+ */
+function checkAnchorNotReseated(anchorRowid: number, anchorId: string): VerifyChainResult | null {
+  if (!isMirrorEstablished()) return null;
+
+  let idCommittedElsewhere = false;
+  for (const entry of readAuditTipEntries()) {
+    if (entry.anchorId !== anchorId) continue;
+    // The mirror committed this exact anchor at this exact rowid — it did not
+    // move. (Belt-and-braces: the caller's `commitment === null` already implies
+    // no line names this rowid, so this simply cannot be reached for the current
+    // id/rowid pair, but keeping the check makes the invariant local.)
+    if (entry.anchorRowid === anchorRowid) return null;
+    idCommittedElsewhere = true;
+  }
+
+  // The current top anchor's id was committed by the mirror, but only at a
+  // rowid it no longer occupies — an existing anchor relocated, not a fresh one
+  // inserted. A migration would carry a NEW id, absent from every line, and
+  // fall through to the benign return below. `brokenAt` is omitted: no single
+  // row is at fault, the anchor's position is.
+  if (idCommittedElsewhere) {
+    return { ok: false, reason: 'anchor_reseated' };
+  }
+  return null;
 }
 
 /**
@@ -578,12 +708,16 @@ function checkAgainstTipMirror(rowsChecked: number, anchorRowid: number): Verify
  * row still matches itself. No chain walk is needed: each row stores the
  * `hash_prev` it was computed with.
  *
- * WHAT IT STILL DOES NOT CATCH, stated because `audit_tip.ts`'s header is
- * careful about this and must stay honest: a re-seat alone still reports
- * `{ ok: true, rowsChecked: 0 }` when nothing was removed or rewritten, and a
- * row that is neither a committed high-water tip nor above the anchor can still
- * be mutated undetected. Closing that needs the verified range not to depend on
- * an in-DB anchor at all — `Cebab-lf1u`.
+ * WHAT THIS DOES NOT CATCH, and what its sibling now does. This check is about
+ * the SURVIVAL of committed rows, so a re-seat that removed or rewrote nothing
+ * leaves it silent — and a row that is neither a committed high-water tip nor
+ * above the anchor is not one it inspects. Cebab-lf1u closes both from the other
+ * side: `checkAnchorNotReseated` reports `anchor_reseated` on the bare re-seat
+ * itself, so a chain whose anchor was moved never verifies clean regardless of
+ * what was done to the rows now stranded below it. What remains open is an
+ * attacker who ALSO forges the migration (a fresh allowlisted marker, so the
+ * count rises) — that needs a commitment the operator's account cannot rewrite,
+ * out of scope for a single-user local tool.
  *
  * Guarded on `isMirrorEstablished()` for the same reason the missing-mirror
  * branch is: a fresh database beside an older operator's mirror would otherwise
