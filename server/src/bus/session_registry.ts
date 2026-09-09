@@ -131,9 +131,13 @@ export type BusSessionHandle = {
    * Re-deliver the captured prompt of the worker named in this session's
    * persisted pending-retry slot. No-op when the slot is empty (idempotent
    * — a racing second click sees the cleared slot). Implemented by both
-   * chain and orchestrator handles via the shared `setPendingRetry(null)
-   * → deliver` flow; the slot is cleared FIRST so a re-fail can re-assert
-   * a fresh descriptor.
+   * chain and orchestrator handles via the shared `clearPendingRetry(
+   * sessionId, agentName) → deliver` flow; that agent's slot is cleared
+   * FIRST so a re-fail can re-assert a fresh descriptor, and clearing it
+   * promotes the next queued slot. It is deliberately NOT
+   * `setPendingRetry(sessionId, null)`, which reaps the whole session —
+   * that form belongs to stop/teardown only, and using it here wiped every
+   * sibling agent's queued retry (see `chain.ts`'s note at the call site).
    */
   retry: () => Promise<void>;
   /**

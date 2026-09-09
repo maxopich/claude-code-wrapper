@@ -84,8 +84,20 @@ catalogued here yet; `Cebab-ga7s` tracks finishing the inventory. Read a green t
 
 [`busSafetyClaims`](../scripts/busSafetyClaims.test.mjs) is the only one, and it is
 `[security]`-tagged. It reads the bus's real posture out of `server/src/bus/runner.ts`,
-then scans every tracked artifact — source, docs, migrations, workflows — for the three
-superseded claims. It is also the only thing asserting that
+then scans the tree — source, docs, migrations, workflows — for the superseded claims.
+The corpus is a **directory walk**, deliberately not `git ls-files`, so the gate runs
+identically wherever it is invoked; the consequence is that it also reads untracked
+files the walk reaches, and misses tracked ones it does not.
+
+What it matches is exactly two superseded claim families, each with a qualifier escape
+and a file allowlist: the superseded posture claim that a participant runs under
+`bypassPermissions`, and the superseded claim that the pause fires on the first or any
+mutation. It is **not** a check that an arbitrary posture sentence is still true, and it
+cannot become one by accident — a claim outside those two families passes it green, which
+is how a 2026-09-08 review found forty-four documentation drifts sitting inside this
+gate's own corpus. Adding a third family means adding its verbatim wrong sentence and its
+corrected replacement to the anti-vacuity fixtures, so the checker is proven to flag one
+and not the other. It is also the only thing asserting that
 [`safety-and-security.md`](safety-and-security.md) still carries the five single-agent
 posture claims that moved out of the untracked `CLAUDE.md`.
 
@@ -144,8 +156,10 @@ Three of these scan for identifiers their own prose names. `predicateReturns` ma
 `export function is…` with no column anchor, so a doc comment writing that phrase registers
 as a violation. Every cross-package gate therefore strips comments first — and that step
 has three parallel implementations, one per program that cannot import the others:
-`scripts/lib/strip_comments.mjs` (four gate consumers), `server/src/test_support/strip_comments.ts`
-(five), `web/src/sourceScan.ts` (eight). `stripCommentsConformance` pins them
+`scripts/lib/strip_comments.mjs` (five gate consumers plus the conformance test),
+`server/src/test_support/strip_comments.ts` (six), `web/src/sourceScan.ts` (eight).
+These counts are prose and nothing checks them — two of the three were stale by
+2026-09-08; re-derive with `grep -rl` before quoting them. `stripCommentsConformance` pins them
 byte-identical against a fixture table that is the accumulated bug history of the function.
 
 A **fourth** copy was live until 2026-09-04, hand-rolled inside `defaultPortSingleSource`:

@@ -13,8 +13,13 @@ What does NOT belong here is the rule itself. A statement someone acts on — a 
 posture, a constraint on what a component may do — belongs where it cannot be missed:
 in the code at the point of decision, in `SECURITY.md`, or in the module's own JSDoc.
 Reference detail can move; the rules cannot. `scripts/busSafetyClaims.test.mjs` scans
-these pages along with `README.md` and `SECURITY.md`, and fails the build when any of
-them describes a posture the code no longer has.
+these pages along with `README.md` and `SECURITY.md` — but scope it correctly before
+relying on it: it matches **two enumerated claim families**, named in
+[`source-gates.md`](source-gates.md), plus a floor asserting `safety-and-security.md`
+still carries the five single-agent posture claims. It is not a general "is this posture
+sentence still true" gate and cannot be one; a prose claim it does not enumerate passes
+it green. Adding a third family is a deliberate act with its own anti-vacuity fixtures,
+not a side effect of writing a new sentence here.
 
 Code comments follow the same split one level down: the **why** at the point of
 decision, plus JSDoc on exported symbols, stays in the file. A file-header essay about

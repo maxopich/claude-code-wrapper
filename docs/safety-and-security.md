@@ -38,8 +38,14 @@ The per-project Trust toggle controls the initial `permissionMode` AND the
 the initial mode is only Trust's _default_ contribution.
 
 - _Trusted_: `permissionMode: "acceptEdits"`, `settingSources: ['user', 'project', 'local']`.
-  The project's own `.claude/settings*.json` — hooks, env injectors, MCP servers
-  — are layered in.
+  The project's own `.claude/settings*.json` — hooks and env injectors — are
+  layered in. A settings-layer `mcpServers` key is NOT: measured against SDK
+  0.3.201 reading `system/init.mcp_servers`, that key is not loaded at any
+  scope, at project or user level, with or without
+  `enableAllProjectMcpServers` (the table is in `readMcpJsonServers`' header in
+  `repo/project_authority.ts`, and `unloadedMcpServers` deliberately does not
+  surface such a declaration as something Trust would load). The project-scoped
+  MCP mechanism Trust does control is `.mcp.json`, below.
 - _Untrusted_: `permissionMode: "default"`, `settingSources: ['user']`. The
   project's own files do not apply, so a hostile or careless
   `.claude/settings.local.json` in a sibling repo cannot auto-load hooks the
