@@ -163,19 +163,33 @@ type SortKey = {
 };
 
 /**
- * Stable order on `(ts ASC, agent ASC, id ASC)` so two rows minted in the same
- * millisecond do not flip places between page loads.
+ * Stable order on `(ts ASC, agent ASC, stream ASC, rowId ASC)` so two rows
+ * minted in the same millisecond do not flip places between page loads.
  *
- * Identical to the comparator that ran over `LogRow`s before S04 — same
- * fields, same `localeCompare`. `session_log.pagination.test.ts` keeps its own
- * copy inside the pre-S04 oracle rather than importing this one, deliberately:
- * an equivalence test that shared the comparator with the code under test
- * would agree with itself no matter what either one did.
+ * `Cebab-6fax.44`: the tiebreak used to be `a.id.localeCompare(b.id)` on the
+ * DISPLAY string, which collates `event:10` before `event:9` — measured, and
+ * before `event:2` as well. Single-agent is the worst case: `agent` is the
+ * constant `'agent'` there, so the id decides every same-millisecond pair, and
+ * a turn mints several `events` rows inside one millisecond routinely. So the
+ * drawer showed a turn's rows in an order that was neither insertion nor time.
+ *
+ * The fields are already on the key. `stream` first preserves the
+ * event-before-mutation order the old `'e' < 'm'` gave for free; `rowId` is
+ * numeric, which is what the display string was standing in for. Nothing here
+ * collates any more, which also takes this comparator out of the family of
+ * environment-dependent orderings (`localeCompare` reads the runner's locale).
+ *
+ * `session_log.pagination.test.ts` keeps its own copy of this rule inside the
+ * pre-S04 oracle rather than importing this one, deliberately: an equivalence
+ * test that shared the comparator with the code under test would agree with
+ * itself no matter what either one did. That copy is updated with this change
+ * — it was reproducing the defect faithfully, which is why it stayed green.
  */
 function compareSortKeys(a: SortKey, b: SortKey): number {
   if (a.ts !== b.ts) return a.ts - b.ts;
   if (a.agent !== b.agent) return a.agent.localeCompare(b.agent);
-  return a.id.localeCompare(b.id);
+  if (a.stream !== b.stream) return a.stream < b.stream ? -1 : 1;
+  return a.rowId - b.rowId;
 }
 
 /**

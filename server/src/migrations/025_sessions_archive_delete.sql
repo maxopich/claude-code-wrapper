@@ -39,10 +39,27 @@
 ALTER TABLE sessions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE sessions ADD COLUMN deleted_at INTEGER;
 
--- Composite index covering the two filter modes:
---   - default sidebar query (`WHERE archived = 0 AND deleted_at IS NULL`)
---   - "include archived" query (`WHERE deleted_at IS NULL`)
---   - purge cron (`WHERE deleted_at IS NOT NULL AND deleted_at < ?`)
--- archived first because the default picker filter is the hot path.
+-- Composite index on (archived, deleted_at).
+--
+-- Cebab-6fax.44: this comment used to name three queries, and the index serves
+-- none of them. Measured with EXPLAIN QUERY PLAN against a database built from
+-- the shipped migrations:
+--
+--   - default sidebar and "include archived" (repo/sessions.ts) both come out
+--     `SEARCH sessions USING INDEX sessions_project_idx (project_id=?)` —
+--     001_init's (project_id, last_event_at DESC) serves the equality AND the
+--     order, so neither shape reaches this one.
+--   - the purge cron, `WHERE deleted_at IS NOT NULL AND deleted_at < ?
+--     ORDER BY deleted_at ASC` (listSoftDeletedSessionsOlderThan), comes out
+--     `SCAN sessions | USE TEMP B-TREE FOR ORDER BY`: `archived` is the
+--     leading column with no constraint on it, so the index cannot be entered.
+--     Accepted rather than indexed — it is a cron over a table with one row
+--     per session. Pinned in `repo/query_plans.test.ts`'s deliberate-sort
+--     block so the scan is a recorded decision rather than a surprise.
+--
+-- It is NOT dead. `listIdleSessionIds` (`WHERE last_event_at < ? AND
+-- deleted_at IS NULL AND archived = 0`) constrains both columns — SQLite
+-- treats `IS NULL` as an equality — and that is the query it actually serves.
+-- `archived` first is right for that shape.
 CREATE INDEX sessions_archived_deleted_idx
   ON sessions(archived, deleted_at);
