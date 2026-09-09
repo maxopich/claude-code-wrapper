@@ -281,5 +281,85 @@ export function markMirrorEstablished(): void {
   setSetting(MIRROR_ESTABLISHED_KEY, true);
 }
 
-/** Test-only: forget the flag so a case can exercise the first-boot path. */
-export const _testing = { MIRROR_ESTABLISHED_KEY };
+/**
+ * What the operator has explicitly acknowledged about a tamper finding.
+ *
+ * WHY THIS EXISTS (`Cebab-6fax.13` / `.15`). Both tamper detections were
+ * ONE-SHOT: `anchor_reseated` was cleared by the next ordinary append (which
+ * commits the anchor at its new rowid, so the outer `commitment === null` guard
+ * stopped even calling the check), and `tip_mirror_missing` was cleared by the
+ * detector's OWN append regenerating the file. Measured 2026-09-08: one alert,
+ * then a system that positively reports health with the tampering intact.
+ *
+ * Making detection persistent is half the fix; the other half is a way to stop
+ * it, or every boot re-raises an alert nobody can clear and the operator learns
+ * to ignore the channel. That is what this key is: a record of the exact state
+ * an operator looked at and accepted.
+ *
+ * EXACT, not a mute. A re-seat ack names the anchor id AND the rowid it was
+ * acknowledged at, so a SECOND re-seat — same anchor, new position — does not
+ * match and fires again. A mirror-loss ack is cleared the moment mirroring is
+ * re-established, so a second deletion is a fresh finding.
+ *
+ * It lives in `settings`, which the same-uid attacker who did the tampering can
+ * also write. That is not a defence claim and never was: `audit_tip.ts`'s
+ * header already states that a same-uid attacker doing both halves wins, and
+ * the whole subsystem is detection rather than prevention. What this fixes is
+ * the honest case — an operator who is told once, dismisses it, and is then
+ * told nothing ever again.
+ */
+export type TamperAck = {
+  /** Anchor generation the operator accepted, at the position they saw. */
+  anchorReseated?: { anchorId: string; anchorRowid: number };
+};
+
+const TAMPER_ACK_KEY = 'safety_audit.tamper_ack';
+
+export function readTamperAck(): TamperAck {
+  const v = getSetting<TamperAck>(TAMPER_ACK_KEY);
+  return v && typeof v === 'object' ? v : {};
+}
+
+/**
+ * Record that the operator has accepted the CURRENT tamper state.
+ *
+ * Called from the `ack_notification` handler, which already refuses to
+ * acknowledge an `audit.tamper_detected` row without a typed reason — so this
+ * cannot be reached by a stray click. Deliberately takes the state as it stands
+ * NOW rather than reading it out of the audit row's payload: what the operator
+ * is accepting is the thing they are looking at.
+ */
+export function recordTamperAck(next: TamperAck): void {
+  setSetting(TAMPER_ACK_KEY, { ...readTamperAck(), ...next });
+}
+
+/**
+ * Has a mirror loss been observed and not yet acknowledged?
+ *
+ * `Cebab-6fax.15`. A flag rather than "is the file missing right now", because
+ * the file COMES BACK: raising the alert leads to an audit append, and that
+ * append rewrites the mirror. So by the next boot the evidence had erased
+ * itself and `verifyChain` reported health — one alert for a deletion, then
+ * silence. The observation has to outlive the artifact.
+ */
+const MIRROR_LOSS_PENDING_KEY = 'safety_audit.tip_mirror_loss_pending';
+
+export function isMirrorLossPending(): boolean {
+  return getSetting<boolean>(MIRROR_LOSS_PENDING_KEY) === true;
+}
+
+/** Record a loss. Idempotent — a repeat boot with the file still gone is one finding. */
+export function markMirrorLossPending(): void {
+  if (!isMirrorLossPending()) setSetting(MIRROR_LOSS_PENDING_KEY, true);
+}
+
+/**
+ * The operator acknowledged the loss. A LATER deletion sets the flag again, so
+ * this clears one finding rather than muting the check.
+ */
+export function clearMirrorLossPending(): void {
+  if (isMirrorLossPending()) setSetting(MIRROR_LOSS_PENDING_KEY, false);
+}
+
+/** Test-only: forget the flags so a case can exercise the first-boot path. */
+export const _testing = { MIRROR_ESTABLISHED_KEY, TAMPER_ACK_KEY, MIRROR_LOSS_PENDING_KEY };

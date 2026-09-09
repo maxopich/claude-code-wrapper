@@ -140,7 +140,11 @@ import {
 } from '../notifications/safety_audit.js';
 import { getOperatorId } from '../notifications/operator.js';
 import { appendForensics, getLatestForensicsForAgent } from '../repo/controllability_forensics.js';
-import { getSafetyAuditRow } from '../notifications/safety_audit.js';
+import {
+  getSafetyAuditRow,
+  isTamperAuditRow,
+  recordCurrentTamperAck,
+} from '../notifications/safety_audit.js';
 import {
   isControlReasonCode,
   isKickMode,
@@ -4214,6 +4218,19 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       const reason = msg.ackReason?.trim() || null;
       if (row.class === 'safety' && row.audit_row_id) {
         appendSafetyAuditAck(row.audit_row_id, ackedAt, ackedBy, reason);
+        // `Cebab-6fax.13` / `.15`: a tamper finding now PERSISTS across boots
+        // rather than being cleared by the next ordinary append. That is the
+        // fix; this is its other half — without a way to stop it, every boot
+        // re-raises an alert nobody can clear, and the operator learns to
+        // ignore the one channel that must not be ignored.
+        //
+        // Recorded from the state as it stands NOW, not from the audit row's
+        // payload: what the operator is accepting is the thing in front of
+        // them. Keyed exactly (anchor id AND rowid), so a SECOND re-seat does
+        // not match and fires again — an acknowledgement is not a mute. Reached
+        // only through the typed-reason gate above, so a stray click cannot
+        // silence a tamper alarm.
+        if (isTamperAuditRow(row.audit_row_id)) recordCurrentTamperAck();
       }
       markNotificationAcked(msg.id, ackedAt, ackedBy, reason);
       // Cluster A Phase 5: push a fresh snapshot so the bell badge
