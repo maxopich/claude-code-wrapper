@@ -64,6 +64,8 @@ export function refusalMessage(refusal: ManagedFileRefusal, detail?: string): st
   switch (refusal) {
     case 'not_managed':
       return 'Only agents Cebab manages can be edited here. This project lives in your own workspace, so Cebab leaves it alone.';
+    case 'escapes_root':
+      return 'That file is a link that points outside the space Cebab owns, so Cebab will not read or write through it. Replace the link with a real file, or edit the target where it actually lives.';
     case 'unknown_project':
       return 'That agent is no longer in the list.';
     case 'unknown_kind':

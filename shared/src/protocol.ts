@@ -642,6 +642,13 @@ export function isManagedFileKind(v: unknown): v is ManagedFileKind {
 export type ManagedFileRefusal =
   | 'unknown_project'
   | 'not_managed'
+  /** `Cebab-6fax.28`. The project IS managed, but the
+   *  file's own path resolves outside `managedAgentsRoot()` — a symlinked
+   *  `.claude/` directory, or a symlinked target file. Distinct from
+   *  `not_managed`, which is about the PROJECT: telling an operator their
+   *  managed agent "lives in your own workspace" would be a lie that hides a
+   *  containment refusal. */
+  | 'escapes_root'
   | 'unknown_kind'
   | 'too_large'
   | 'unreadable'

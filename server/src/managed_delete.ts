@@ -23,6 +23,7 @@ import path from 'node:path';
 import { config } from './config.js';
 import { emit } from './notifications/dispatcher.js';
 import { isManagedProjectPath, removeManagedDir } from './managed_agent.js';
+import { endMultiAgentSession, listMultiAgentSessionIdsForProject } from './repo/multi_agent.js';
 import { deleteProject, getProject } from './repo/projects.js';
 import { hardDeleteSession, listAllSessionIdsForProject } from './repo/sessions.js';
 import { snapshotInFlight } from './runner/lifecycle.js';
@@ -129,7 +130,27 @@ export async function runManagedDelete(
     }
   }
 
-  // Drop the project row. The remaining cascades (multi_agent_sessions,
+  // `Cebab-6fax.33`: end this project's multi-agent sessions BEFORE the row
+  // goes. There is no `multi_agent_sessions.project_id` — the link is
+  // `multi_agent_participants`, which DOES cascade — so the delete used to
+  // strip the project out of a session's roster and leave the session row
+  // behind, still `running`. That row then counts against the single-active
+  // invariant, and the next boot tries to reconstruct a session whose
+  // participants are gone, fails the guard and marks it crashed: an
+  // operator-visible "session crashed" for a deletion they chose to perform.
+  //
+  // `stopped`, not `crashed`: the operator ended it, deliberately, by deleting
+  // one of its agents. Read the ids first — after `deleteProject` the
+  // participant rows have cascaded and there is nothing left to look up.
+  for (const busSid of listMultiAgentSessionIdsForProject(projectId)) {
+    try {
+      endMultiAgentSession(busSid, 'stopped');
+    } catch (err) {
+      console.error(`[managed_delete] endMultiAgentSession ${busSid} failed`, err);
+    }
+  }
+
+  // Drop the project row. The remaining cascades (multi_agent_participants,
   // hook_trust) go with it.
   deleteProject(projectId);
 

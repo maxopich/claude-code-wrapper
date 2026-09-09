@@ -16,6 +16,11 @@ import { managedAgentsRoot } from './managed_agent.js';
 import { runManagedCopy } from './managed_copy.js';
 import { runManagedDelete } from './managed_delete.js';
 import * as safetyAudit from './notifications/safety_audit.js';
+import {
+  addParticipant,
+  createMultiAgentSession,
+  listMultiAgentSessionIdsForProject,
+} from './repo/multi_agent.js';
 import { getProject, upsertProject } from './repo/projects.js';
 import { createSession } from './repo/sessions.js';
 import { registerQuery } from './runner/lifecycle.js';
@@ -197,5 +202,86 @@ describe('runManagedDelete', () => {
     expect(outcome.removed).toBe(false);
     const result = sent.find((m) => m.type === 'managed_delete_result');
     expect(result?.result).toEqual({ ok: false, error: 'that project no longer exists' });
+  });
+});
+
+describe('[security] deleting a managed agent does not strand its bus sessions (Cebab-6fax.33)', () => {
+  const tmp = withTempDataDir('managed-delete-bus');
+
+  // `deleteProject`'s comment claimed `multi_agent_sessions.project_id` carries
+  // ON DELETE CASCADE. That column does not exist and never has —
+  // `005_multi_agent.sql` defines the table with six columns and none of them
+  // is a project. The link is `multi_agent_participants`, which DOES cascade,
+  // so the delete stripped the project out of a session's roster and left the
+  // session row behind, still `running`. That row counts against the
+  // single-active invariant, and the next boot tries to reconstruct a session
+  // whose participants are gone, fails the guard and marks it crashed: an
+  // operator-visible "session crashed" for a deliberate deletion.
+
+  function sessionStatus(sid: string): string | undefined {
+    return (
+      getDb()
+        .prepare<[string], { status: string }>(
+          'SELECT status FROM multi_agent_sessions WHERE id = ?',
+        )
+        .get(sid)?.status ?? undefined
+    );
+  }
+
+  test('a running session the agent took part in is ended, not left running', async () => {
+    const managedId = await makeManagedAgent(tmp.root(), 'bus-agent');
+    createMultiAgentSession('bus-sid-1', 'orchestrator');
+    addParticipant('bus-sid-1', managedId, 'worker', null);
+    expect(sessionStatus('bus-sid-1')).toBe('running');
+
+    await runManagedDelete(managedId, () => {});
+
+    // The row survives — it is history, and `safety_audit` and the transcript
+    // hang off it — but it is no longer live.
+    expect(sessionStatus('bus-sid-1')).toBe('stopped');
+  });
+
+  test('`stopped`, not `crashed` — the operator did this on purpose', async () => {
+    const managedId = await makeManagedAgent(tmp.root(), 'bus-agent-2');
+    createMultiAgentSession('bus-sid-2', 'chain');
+    addParticipant('bus-sid-2', managedId, 'worker', 0);
+
+    await runManagedDelete(managedId, () => {});
+
+    // Asserted POSITIVELY. `not.toBe('crashed')` was the first draft and it
+    // passed with the fix reverted too, because an untouched row stays
+    // `running`, which is also not `crashed` — a test that could only ever
+    // agree with itself.
+    expect(sessionStatus('bus-sid-2')).toBe('stopped');
+  });
+
+  test('a session the agent had NOTHING to do with is untouched', async () => {
+    // Anti-vacuity: "end every running session" would satisfy both cases above
+    // and would be a much worse bug than the one being fixed.
+    const managedId = await makeManagedAgent(tmp.root(), 'bus-agent-3');
+    const otherId = await makeManagedAgent(tmp.root(), 'other-agent');
+    createMultiAgentSession('bus-sid-mine', 'orchestrator');
+    addParticipant('bus-sid-mine', managedId, 'worker', null);
+    createMultiAgentSession('bus-sid-theirs', 'orchestrator');
+    addParticipant('bus-sid-theirs', otherId, 'worker', null);
+
+    await runManagedDelete(managedId, () => {});
+
+    expect(sessionStatus('bus-sid-mine')).toBe('stopped');
+    expect(sessionStatus('bus-sid-theirs')).toBe('running');
+  });
+
+  test('the ids are read BEFORE the cascade, or there is nothing left to find', async () => {
+    // Pins the ordering that makes the fix work at all: once the project row
+    // goes, `multi_agent_participants` has cascaded and the lookup returns [].
+    const managedId = await makeManagedAgent(tmp.root(), 'bus-agent-4');
+    createMultiAgentSession('bus-sid-4', 'orchestrator');
+    addParticipant('bus-sid-4', managedId, 'worker', null);
+    expect(listMultiAgentSessionIdsForProject(managedId)).toEqual(['bus-sid-4']);
+
+    await runManagedDelete(managedId, () => {});
+
+    expect(listMultiAgentSessionIdsForProject(managedId)).toEqual([]);
+    expect(sessionStatus('bus-sid-4')).toBe('stopped');
   });
 });
