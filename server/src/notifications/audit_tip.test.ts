@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { _resetOperatorIdCache } from './operator.js';
-import { appendSafetyAudit, verifyChain } from './safety_audit.js';
+import { appendSafetyAudit, recordCurrentTamperAck, verifyChain } from './safety_audit.js';
 import {
   appendAuditTip,
   auditTipPath,
@@ -481,5 +481,166 @@ describe('[security] the mirror itself', () => {
     expect(() =>
       appendAuditTip({ ts: 1, rowId: 'x', hashSelf: 'a'.repeat(64), count: 1 }),
     ).not.toThrow();
+  });
+});
+
+describe('[security] tamper detection survives the next append (Cebab-6fax.13, .15)', () => {
+  // BOTH detections were ONE-SHOT, and neither test could see it because both
+  // fixtures stopped before the step that mattered.
+  //
+  //   anchor_reseated  — cleared by the next ordinary append, which commits the
+  //                      anchor at its NEW rowid; `verifyChain`'s outer guard
+  //                      (`commitment === null`) then stopped calling the check
+  //                      at all.
+  //   tip_mirror_missing — cleared by the DETECTOR'S OWN append, which rewrites
+  //                      the file whose absence was the evidence.
+  //
+  // Measured 2026-09-08 by re-running the reader's probes: re-seat → alert,
+  // append once → CLEAN, with the rows below the anchor stranded and editable.
+  // The fixture omitting that one append is `project_fixture_omits_the_bug_input`
+  // exactly: the property held in the only scenario the test built.
+
+  function reseatAnchor(): void {
+    getDb().exec(
+      `UPDATE safety_audit SET rowid = (SELECT MAX(rowid) + 1 FROM safety_audit)
+         WHERE rowid = (SELECT MAX(rowid) FROM safety_audit WHERE kind = 'audit.chain_reset')`,
+    );
+  }
+
+  test('a re-seat is still reported after an ordinary append', () => {
+    appendRows(5);
+    reseatAnchor();
+    expect(verifyChain()).toMatchObject({ ok: false, reason: 'anchor_reseated' });
+
+    // THE STEP THE OLD FIXTURE OMITTED. On a running machine this happens by
+    // itself within minutes — every safety emission appends, and so does the
+    // boot walk. An attacker need do nothing after the re-seat.
+    appendRows(1);
+
+    expect(verifyChain()).toMatchObject({ ok: false, reason: 'anchor_reseated' });
+  });
+
+  test('and after many appends — the mirror is append-only, so the signal is too', () => {
+    appendRows(3);
+    reseatAnchor();
+    appendRows(10);
+    expect(verifyChain()).toMatchObject({ ok: false, reason: 'anchor_reseated' });
+  });
+
+  test('a stranded row stays undetectable-free even after the blessing append', () => {
+    // The consequence, restated as the property that actually matters: the rows
+    // below a re-seated anchor are outside the digest walk, so the only thing
+    // standing between them and an undetected edit is the re-seat report.
+    appendRows(5);
+    reseatAnchor();
+    appendRows(1);
+    getDb()
+      .prepare(
+        `UPDATE safety_audit SET payload_json = '{"tampered":true}'
+           WHERE rowid = (
+             SELECT rowid FROM safety_audit WHERE kind = 'test.event'
+              ORDER BY rowid ASC LIMIT 1 OFFSET 1)`,
+      )
+      .run();
+
+    expect(verifyChain().ok).toBe(false);
+  });
+
+  test('ANTI-VACUITY: an ordinary chain with no re-seat verifies clean', () => {
+    // Without this, "always report anchor_reseated" would pass every case above
+    // and break the product.
+    appendRows(5);
+    expect(verifyChain().ok).toBe(true);
+  });
+
+  test('ANTI-VACUITY: an acknowledged re-seat stays quiet through ordinary use', () => {
+    // The other way "always report" could hide: an ack that only survives until
+    // the next append would look like a working stop and be none.
+    //
+    // (A genuinely NEW migration anchor cannot be simulated here at all —
+    // `KNOWN_CHAIN_RESET_IDS` is a closed set of the ids this build wrote, so a
+    // fabricated one reports `forged_anchor`, correctly. The migration path's
+    // benign-ness is covered by the existing suite's legacy-mirror case.)
+    appendRows(5);
+    reseatAnchor();
+    recordCurrentTamperAck();
+    appendRows(4);
+    expect(verifyChain().ok).toBe(true);
+  });
+
+  test('a deleted mirror is still reported after the append that regenerates it', () => {
+    appendRows(5);
+    fs.rmSync(auditTipPath(), { force: true });
+    expect(verifyChain()).toMatchObject({ ok: false, reason: 'tip_mirror_missing' });
+
+    // Raising the alert itself appends, which rewrites the mirror. Before the
+    // fix this is the point at which the system went back to reporting health.
+    appendRows(1);
+    expect(fs.existsSync(auditTipPath())).toBe(true);
+
+    expect(verifyChain()).toMatchObject({ ok: false, reason: 'tip_mirror_missing' });
+  });
+
+  describe('acknowledgement stops it — and only for the state acknowledged', () => {
+    // Persistence without a stop is alarm fatigue: every boot re-raises
+    // something nobody can clear, and the operator learns to ignore the one
+    // channel that must not be ignored. `recordCurrentTamperAck` is reached
+    // only through the typed-reason gate in the ack handler.
+
+    test('acking a re-seat clears it', () => {
+      appendRows(5);
+      reseatAnchor();
+      expect(verifyChain().ok).toBe(false);
+
+      recordCurrentTamperAck();
+
+      expect(verifyChain().ok).toBe(true);
+    });
+
+    test('but a SECOND re-seat fires again — an ack is not a mute', () => {
+      appendRows(5);
+      reseatAnchor();
+      recordCurrentTamperAck();
+      expect(verifyChain().ok).toBe(true);
+
+      // The anchor moves again. The ack names the position it was accepted at,
+      // so it does not match this one.
+      appendRows(2);
+      reseatAnchor();
+
+      expect(verifyChain()).toMatchObject({ ok: false, reason: 'anchor_reseated' });
+    });
+
+    test('acking a mirror loss clears it; a SECOND deletion is a fresh finding', () => {
+      // The production sequence, in order. The boot walk detects the loss and
+      // emits — and emitting APPENDS, which is what puts the file back. So by
+      // the time the operator sees the notification the artifact is already
+      // restored and only the flag remembers.
+      appendRows(5);
+      fs.rmSync(auditTipPath(), { force: true });
+      expect(verifyChain()).toMatchObject({ ok: false, reason: 'tip_mirror_missing' });
+      appendRows(1);
+      expect(fs.existsSync(auditTipPath())).toBe(true);
+      expect(verifyChain()).toMatchObject({ ok: false, reason: 'tip_mirror_missing' });
+
+      recordCurrentTamperAck();
+      expect(verifyChain().ok).toBe(true);
+
+      fs.rmSync(auditTipPath(), { force: true });
+      expect(verifyChain()).toMatchObject({ ok: false, reason: 'tip_mirror_missing' });
+    });
+
+    test('an ack does NOT pre-clear a loss that is still live', () => {
+      // Acking before an append has restored the file must not silence the
+      // fact that the mirror is, right now, gone. The flag is re-set by the
+      // very next verify, because the condition is still true.
+      appendRows(5);
+      fs.rmSync(auditTipPath(), { force: true });
+      expect(verifyChain()).toMatchObject({ ok: false, reason: 'tip_mirror_missing' });
+
+      recordCurrentTamperAck();
+
+      expect(verifyChain()).toMatchObject({ ok: false, reason: 'tip_mirror_missing' });
+    });
   });
 });

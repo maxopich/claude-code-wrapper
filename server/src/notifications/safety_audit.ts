@@ -4,12 +4,18 @@ import { getDb } from '../db.js';
 import { getOperatorId } from './operator.js';
 import {
   appendAuditTip,
+  clearMirrorLossPending,
   highWaterTipsPerAnchor,
   isMirrorEstablished,
+  isMirrorLossPending,
   markMirrorEstablished,
+  markMirrorLossPending,
   readAuditTipEntries,
   readLatestAuditTip,
   readMaxTipForAnchor,
+  readTamperAck,
+  recordTamperAck,
+  type TamperAck,
 } from './audit_tip.js';
 
 /**
@@ -357,6 +363,42 @@ export function appendSafetyAudit(input: SafetyAuditInput): { id: string; hash_s
 }
 
 /**
+ * Is this audit row a tamper finding — the class whose alert now persists?
+ *
+ * Matched on the KIND, exactly as `requiresTypedAckReason` does, and for the
+ * same reason register H13 records: the reason code carries WHICH check failed
+ * and that set grows, so enumerating today's reasons silently drops tomorrow's.
+ */
+export function isTamperAuditRow(auditRowId: string): boolean {
+  return getSafetyAuditRow(auditRowId)?.kind === 'audit.tamper_detected';
+}
+
+/**
+ * Record the operator's acceptance of the tamper state AS IT STANDS NOW.
+ *
+ * `Cebab-6fax.13` / `.15`. Called from the `ack_notification` handler, behind
+ * the typed-reason gate. It reads the current anchor identity and the mirror's
+ * presence rather than the audit row's payload, because what an operator
+ * acknowledges is the state they were shown — and because a payload written at
+ * detection time could name a state that has since changed, which would let one
+ * ack silence a different, later finding.
+ */
+export function recordCurrentTamperAck(): void {
+  const anchorId = currentAnchorId();
+  const anchorRowid = currentAnchorRowid();
+  const next: TamperAck = {};
+  if (anchorId !== null && anchorRowid !== null) {
+    next.anchorReseated = { anchorId, anchorRowid };
+  }
+  recordTamperAck(next);
+  // The mirror-loss finding is a durable FLAG rather than an ack entry, because
+  // the artifact it is about (the file) comes back on its own. Clearing it here
+  // is the operator saying they have seen that one loss; a later deletion sets
+  // it again.
+  clearMirrorLossPending();
+}
+
+/**
  * Rows strictly after the newest chain-reset anchor — the quantity tail
  * truncation reduces, and what the mirror commits to.
  *
@@ -559,9 +601,24 @@ function checkAgainstTipMirror(
     // the anchor drives `rowsChecked` to 0, which disarmed this branch and made
     // deleting the mirror the free second step of the erasure.
     if (isMirrorEstablished()) {
+      // `Cebab-6fax.15`: RECORD the loss, do not merely report it. Raising this
+      // alert leads to an audit append, and that append rewrites the mirror —
+      // so by the next boot the file existed again, this branch was never
+      // reached, and `verifyChain` reported health with the deletion intact.
+      // One alert, then a system that positively says it is fine. Measured
+      // 2026-09-08. The flag outlives the artifact; the operator's
+      // acknowledgement is what clears it.
+      markMirrorLossPending();
       return { ok: false, reason: 'tip_mirror_missing' };
     }
     return null;
+  }
+
+  // The mirror is present — but was it ever observed missing and not yet
+  // acknowledged? This is the half that makes the detection durable: the file
+  // being back proves nothing, because Cebab's own append is what puts it back.
+  if (isMirrorLossPending()) {
+    return { ok: false, reason: 'tip_mirror_missing' };
   }
 
   // High-water commitment for the CURRENT anchor generation. `null` means the
@@ -591,12 +648,19 @@ function checkAgainstTipMirror(
   // Cebab-lf1u: a BARE re-seat — the anchor moved to a new highest rowid with
   // nothing else touched — leaves every committed tip present and hashing
   // correctly, so `checkCommittedRowsSurvive` says nothing and the digest walk
-  // covered zero rows. Only relevant when no mirror line names this anchor's
-  // rowid (`commitment === null`); a committed rowid was not moved.
-  if (commitment === null) {
-    return checkAnchorNotReseated(anchorRowid, anchorId);
-  }
-  return null;
+  // covered zero rows.
+  //
+  // `Cebab-6fax.13`: this used to run only when `commitment === null`, i.e.
+  // when no mirror line named the anchor's CURRENT rowid — and that guard is
+  // exactly what made the detection one-shot. The first ordinary append after
+  // a re-seat commits the anchor at its new position, `commitment` stops being
+  // null, and this check was never called again: one alert, then a chain that
+  // verifies clean forever with the rows below the anchor stranded and
+  // editable. Measured 2026-09-08 by re-seating, appending once, and watching
+  // `verifyChain` go green. It runs unconditionally now; the check itself
+  // decides, from the append-only mirror, whether this anchor has ever been
+  // committed somewhere it no longer sits.
+  return checkAnchorNotReseated(anchorRowid, anchorId);
 }
 
 /**
@@ -648,26 +712,37 @@ function checkAgainstTipMirror(
 function checkAnchorNotReseated(anchorRowid: number, anchorId: string): VerifyChainResult | null {
   if (!isMirrorEstablished()) return null;
 
-  let idCommittedElsewhere = false;
-  for (const entry of readAuditTipEntries()) {
-    if (entry.anchorId !== anchorId) continue;
-    // The mirror committed this exact anchor at this exact rowid — it did not
-    // move. (Belt-and-braces: the caller's `commitment === null` already implies
-    // no line names this rowid, so this simply cannot be reached for the current
-    // id/rowid pair, but keeping the check makes the invariant local.)
-    if (entry.anchorRowid === anchorRowid) return null;
-    idCommittedElsewhere = true;
-  }
+  // ANY line committing this anchor id at a DIFFERENT rowid is the finding, and
+  // a later line committing it at the current one does NOT cancel that
+  // (`Cebab-6fax.13`). The previous version returned null the moment it saw a
+  // matching rowid, which — together with the caller's old `commitment === null`
+  // guard — is what made the detection one-shot: the first ordinary append after
+  // a re-seat writes exactly such a line. The mirror is append-only, so the
+  // earlier commitment stays, and so does the signal.
+  const committedElsewhere = readAuditTipEntries().some(
+    (entry) => entry.anchorId === anchorId && entry.anchorRowid !== anchorRowid,
+  );
+  if (!committedElsewhere) return null;
 
-  // The current top anchor's id was committed by the mirror, but only at a
-  // rowid it no longer occupies — an existing anchor relocated, not a fresh one
-  // inserted. A migration would carry a NEW id, absent from every line, and
-  // fall through to the benign return below. `brokenAt` is omitted: no single
-  // row is at fault, the anchor's position is.
-  if (idCommittedElsewhere) {
-    return { ok: false, reason: 'anchor_reseated' };
-  }
-  return null;
+  // The operator was shown this exact state — this anchor, at this position —
+  // and accepted it with a typed reason. Keyed to BOTH values on purpose: a
+  // second re-seat moves the anchor again, does not match, and fires. An
+  // acknowledgement is not a mute.
+  const ack = readTamperAck().anchorReseated;
+  if (ack && ack.anchorId === anchorId && ack.anchorRowid === anchorRowid) return null;
+
+  // The current top anchor's id was committed by the mirror at a rowid it no
+  // longer occupies — an existing anchor relocated, not a fresh one inserted. A
+  // migration carries a NEW id, absent from every line, and returns benign
+  // above. `brokenAt` is omitted: no single row is at fault, the anchor's
+  // position is.
+  //
+  // KNOWN FALSE-POSITIVE PATH, stated so nobody debugs it twice: `safety_audit`
+  // has a TEXT primary key, so its rowids are implicit and a hand-run `VACUUM`
+  // renumbers them. Cebab never vacuums, but an operator with `sqlite3` can.
+  // That reports as a re-seat, correctly per the evidence available, and is
+  // what the acknowledgement path is for.
+  return { ok: false, reason: 'anchor_reseated' };
 }
 
 /**
