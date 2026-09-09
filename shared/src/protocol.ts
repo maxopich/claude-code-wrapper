@@ -4287,9 +4287,19 @@ export type ScannedTally = {
 export type ScannedMcpServer = {
   name: string;
   /**
-   * True iff the file declaring this server is in a scope the project
-   * currently loads. A `false` here must never be rendered as if the server
-   * were active — it is declared and inert.
+   * True iff this declaration is one the spawn will actually start.
+   *
+   * NOT "is this file's scope loaded" — that was the definition, and it was
+   * wrong for the commonest misconfiguration there is (`Cebab-6fax.42`). An
+   * `mcpServers` key in a `.claude/settings*.json` layer is read by nothing,
+   * at any scope, with or without `enableAllProjectMcpServers` — measured for
+   * all four rows by `mcp_scope_smoke.ts` Parts 2-3 — so a scope-derived
+   * answer reported the operator's misplaced server as live. `mcpOriginLoads`
+   * in `mcp_origin.ts` owns the rule now; hooks and env injections keep the
+   * scope-derived answer, because those DO load from these same files.
+   *
+   * A `false` here must never be rendered as if the server were active — it is
+   * declared and inert.
    */
   loads: boolean;
   /** Absolute path of the file that declares it, when the reader knows one. */

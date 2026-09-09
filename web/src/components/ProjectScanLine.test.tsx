@@ -94,13 +94,46 @@ describe('ProjectScanLine — declared vs loaded', () => {
     expect(text()).toEqual(['1 MCP server']);
   });
 
-  test('the warning names Trust as the reason, and says the files exist', () => {
+  test('the warning names BOTH reasons a declaration can be unloaded', () => {
     // Copy, deliberately pinned: the reason is the actionable half. A bare
     // "not loaded" tells the operator a number and nothing they can do.
+    //
+    // `Cebab-6fax.42` REWROTE this case rather than deleting it, because the
+    // copy it pinned had become false. It asserted the tooltip names Trust as
+    // THE reason; a settings-layer `mcpServers` key is now correctly counted
+    // as not-loaded, and Trust does not load that at any scope. On a trusted
+    // project the old wording told the operator their project was untrusted
+    // and to trust it — advice that cannot work, about a state that was not
+    // true. Both causes have to be nameable, because the chip cannot tell
+    // which one produced any given count.
     render({ scan: declaredNotLoaded });
-    const warn = chips().find((c) => c.className.includes('is-warn'));
-    expect(warn?.getAttribute('title')).toContain('not trusted');
-    expect(warn?.getAttribute('title')).toContain('exist on disk');
+    const title =
+      chips()
+        .find((c) => c.className.includes('is-warn'))
+        ?.getAttribute('title') ?? '';
+    expect(title).toContain('untrusted');
+    expect(title).toContain('.mcp.json');
+    expect(title).toMatch(/never loads at any scope/);
+  });
+
+  test('the warning does not tell a TRUSTED project to turn Trust on', () => {
+    // The case the old copy got wrong, asserted from the operator's side. A
+    // trusted project reporting "1 not loaded" is exactly the misplaced-key
+    // state, and the one instruction that cannot help is the one it used to
+    // give. This is a claim about what the tooltip must NOT say, so it stays
+    // green under any rewording that keeps the advice honest.
+    render({
+      scan: scan({
+        scopesLoaded: ['user', 'project', 'local'],
+        mcpServers: [{ name: 'misplaced', loads: false, originPath: '/p/.claude/settings.json' }],
+      }),
+    });
+    expect(text()).toEqual(['1 MCP server', '⚠ 1 not loaded']);
+    const title =
+      chips()
+        .find((c) => c.className.includes('is-warn'))
+        ?.getAttribute('title') ?? '';
+    expect(title).not.toMatch(/Trust the project to load them/);
   });
 
   test('the not-loaded count spans all three kinds, not just MCP servers', () => {

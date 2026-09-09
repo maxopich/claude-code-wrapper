@@ -39,13 +39,34 @@ the initial mode is only Trust's _default_ contribution.
 
 - _Trusted_: `permissionMode: "acceptEdits"`, `settingSources: ['user', 'project', 'local']`.
   The project's own `.claude/settings*.json` — hooks and env injectors — are
-  layered in. A settings-layer `mcpServers` key is NOT: measured against SDK
-  0.3.201 reading `system/init.mcp_servers`, that key is not loaded at any
-  scope, at project or user level, with or without
-  `enableAllProjectMcpServers` (the table is in `readMcpJsonServers`' header in
-  `repo/project_authority.ts`, and `unloadedMcpServers` deliberately does not
-  surface such a declaration as something Trust would load). The project-scoped
-  MCP mechanism Trust does control is `.mcp.json`, below.
+  layered in. A settings-layer `mcpServers` key is NOT: reading
+  `system/init.mcp_servers`, that key is not loaded at any scope — project,
+  project-local or user — with or without `enableAllProjectMcpServers`. The
+  table is in `readMcpJsonServers`' header in `repo/project_authority.ts`, and
+  `unloadedMcpServers` deliberately does not surface such a declaration as
+  something Trust would load. The project-scoped MCP mechanism Trust does
+  control is `.mcp.json`, below.
+
+  **Nothing prompts for one of these, and that is the measured posture, not an
+  omission** (`Cebab-6fax.42`). The MCP TOFU gate, the probe refusal and the
+  sidebar's scan line all skip a settings-layer declaration, via the one shared
+  predicate `mcpOriginLoads` (`shared/src/mcp_origin.ts`). Before that they did
+  the opposite: the gate parked the spawn to ask the operator to approve a
+  server the CLI never starts, and "Allow" wrote a durable `mcp_trust` row
+  anchored to a file nothing reads — a consent record for a capability that was
+  never granted, because it could not be. The sidebar meanwhile counted the same
+  declaration as LOADS.
+
+  Retiring a live gate is only safe against a measurement, so the table stopped
+  being a remembered one first. `mcp_scope_smoke.ts` Parts 2-3 write each file
+  into a temp project and read the resulting `system/init`, with a control
+  declaration in the same spawn — because a directory the CLI never read
+  produces the same empty column as a key it ignores. The user-scope row was
+  believed unmeasurable and is not: `CLAUDE_CONFIG_DIR` relocates the whole user
+  scope, and this probe breaks at `system/init` before the CLI contacts the API,
+  so it never needs the credentials a redirect hides. Re-run it on an SDK bump;
+  a row that moves is a gate that has to come back.
+
 - _Untrusted_: `permissionMode: "default"`, `settingSources: ['user']`. The
   project's own files do not apply, so a hostile or careless
   `.claude/settings.local.json` in a sibling repo cannot auto-load hooks the

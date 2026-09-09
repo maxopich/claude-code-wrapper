@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { ServerMsg, McpServerView } from '@cebab/shared/protocol';
+import { mcpOriginLoads } from '@cebab/shared';
 import { abandonPendingGates, MAX_PENDING_GATES } from '../gate_abandon.js';
 import { listForServer, previousDeclaration, recordTrustDecision } from './mcp_trust.js';
 import { appendSafetyAudit } from '../notifications/safety_audit.js';
@@ -162,6 +163,13 @@ export async function awaitMcpTrustDecisions(input: AwaitGateInput): Promise<Gat
   for (const server of input.servers) {
     // Cebab-injected (e.g. cebab_bus) is always trusted — Cebab pins it.
     if (server.scope === 'cebab-injected') continue;
+    // `Cebab-6fax.42`: a settings-layer `mcpServers` key starts no server, so
+    // parking the spawn to ask about one is a consent prompt for a capability
+    // the operator cannot be granting. Measured for all four rows by
+    // `mcp_scope_smoke.ts` Parts 2-3; the row stays VISIBLE in the authority
+    // panel marked not-loaded, which is the signal that actually helps —
+    // "you put this server in a file the CLI does not read".
+    if (!mcpOriginLoads(server.scope)) continue;
     // No origin → no anchor for a decision row. Treat as silent.
     if (!server.originPath) continue;
 
@@ -367,9 +375,11 @@ export function refuseUnapprovedForProbe(
 ): string[] {
   const refused: string[] = [];
   for (const server of servers) {
-    // Both skips mirror `awaitMcpTrustDecisions`: Cebab pins its own injected
-    // servers, and a row with no origin has no anchor for a decision.
+    // All three skips mirror `awaitMcpTrustDecisions`: Cebab pins its own
+    // injected servers, a settings-layer declaration starts nothing to refuse,
+    // and a row with no origin has no anchor for a decision.
     if (server.scope === 'cebab-injected') continue;
+    if (!mcpOriginLoads(server.scope)) continue;
     if (!server.originPath) continue;
     if (server.trust === 'trusted') continue;
     refused.push(server.name);

@@ -1545,13 +1545,18 @@ describe('detectEnvInjections — non-Anthropic credentials (H05)', () => {
 // ---------------------------------------------------------------------------
 // Cebab-x1n.6.22: the gate has to watch the file the CLI actually reads.
 //
-// MEASURED against @anthropic-ai/claude-agent-sdk 0.3.201 with a real MCP
-// stdio server, reading `system/init.mcp_servers`:
+// The measured table lives in `readMcpJsonServers`' header and is re-run by
+// `mcp_scope_smoke.ts`; it is NOT restated here, and that is the point of this
+// note. It used to be — four rows copied into this comment, above a describe
+// block that exercises `.mcp.json` and nothing else. The copy read as evidence
+// for all four rows while measuring one of them, which is how three "NOT
+// loaded" rows survived thirty-one SDK releases on a single hand-run session
+// (`Cebab-6fax.42`). A comment cannot measure anything; the smoke can, and it
+// now runs every row with a positive control in the same spawn.
 //
-//   <proj>/.claude/settings.json    → mcpServers → NOT loaded
-//   ...+ enableAllProjectMcpServers → NOT loaded
-//   ~/.claude/settings.json         → mcpServers → NOT loaded
-//   <proj>/.mcp.json                             → LOADED, 'connected'
+// What THIS block measures: that a `.mcp.json` declaration reaches the
+// authority view with `scope: 'mcp-json'`, which is the input `mcpOriginLoads`
+// keys the gate on.
 //
 // So before `readMcpJsonServers` the TOFU gate could only prompt about
 // declarations that never run, while every server that DOES run reached the

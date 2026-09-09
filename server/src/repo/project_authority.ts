@@ -201,14 +201,30 @@ function readSettingsFile(p: string): RawSettings | null {
  * CLI actually loads MCP servers from.
  *
  * WHY THIS EXISTS. Everything else in this module attributes MCP servers from
- * `mcpServers` blocks in `.claude/settings*.json`. Measured against SDK
- * 0.3.201 with a real MCP stdio server, reading `system/init.mcp_servers`,
- * that key is **not loaded at any scope**:
+ * `mcpServers` blocks in `.claude/settings*.json`. That key is **not loaded at
+ * any scope**, reading `system/init.mcp_servers`:
  *
- *   <proj>/.claude/settings.json      → mcpServers  → NOT loaded
- *   ...the same + enableAllProjectMcpServers: true  → NOT loaded
- *   ~/.claude/settings.json           → mcpServers  → NOT loaded
- *   <proj>/.mcp.json                                → LOADED, 'connected'
+ *   <proj>/.claude/settings.json        → mcpServers  → NOT loaded
+ *   ...the same + enableAllProjectMcpServers: true    → NOT loaded
+ *   <proj>/.claude/settings.local.json  → mcpServers  → NOT loaded
+ *   ~/.claude/settings.json             → mcpServers  → NOT loaded
+ *   <proj>/.mcp.json                                  → LOADED, 'connected'
+ *
+ * RE-MEASURED 2026-09-09 on SDK 0.3.251 / CLI 2.1.212 by `mcp_scope_smoke.ts`
+ * Parts 2-3, which is what makes this table a measurement rather than a
+ * remembered one. It had been four hand-run rows from a single 0.3.201 session,
+ * restated verbatim in a test that only ever asserted `.mcp.json` behaviour —
+ * so the sentence and its "test" agreed with each other and neither ran the
+ * case. Two things changed on the re-run: `settings.local.json` was never in
+ * the table at all (the `'local'` scope was assumed to behave like `'project'`),
+ * and the user-scope row was believed unmeasurable. It is not — `CLAUDE_CONFIG_DIR`
+ * relocates the whole user scope, and the probe breaks at `system/init` so it
+ * never needs the credentials a redirect hides. Every row now runs with a
+ * positive control in the same spawn.
+ *
+ * `mcpOriginLoads` (`@cebab/shared`) is the predicate this table justifies, and
+ * the reason it is worth keeping honest: the TOFU gate, the probe refusal and
+ * the sidebar's scan line all skip these rows on its authority (`Cebab-6fax.42`).
  *
  * `~/.claude.json` was missing from that table and is now measured too — see
  * `readClaudeJsonServers`. Both of its blocks load, so `.mcp.json` was never
