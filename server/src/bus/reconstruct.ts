@@ -190,7 +190,8 @@ export type NotReconstructable =
   | 'no-iteration' // pre-006 row, no iteration id
   | 'no-agent-sessions' // pre-009 row, no persisted --resume map
   | 'no-participants' // every participant project was deleted
-  | 'participant-unresolved'; // a participant row lost its bus_agent_name
+  | 'participant-unresolved' // a participant row lost its bus_agent_name
+  | 'participant-missing'; // an agent that ran has no participant row any more
 
 export type ReconstructGuard = { ok: true } | { ok: false; reason: NotReconstructable };
 
@@ -234,6 +235,37 @@ export function checkReconstructable(row: MultiAgentSessionRow): ReconstructGuar
   if (workers.length === 0) return { ok: false, reason: 'no-participants' };
   if (workers.some((w) => !w.bus_agent_name)) {
     return { ok: false, reason: 'participant-unresolved' };
+  }
+  // `Cebab-6fax.41`: only TOTAL loss used to fail. `listResolvedParticipants`
+  // is an INNER JOIN onto `projects`, and `multi_agent_participants.project_id`
+  // cascades on delete, so losing one participant's project silently returns a
+  // SHORTER roster — two workers out of three passed every check above, and the
+  // operator continued a run quietly missing an agent, with the orchestrator's
+  // rebuilt roster prompt listing whoever was left.
+  //
+  // There is no orphaned row to notice the gap with, so the comparison has to
+  // come from a table that does NOT cascade with the project.
+  // `multi_agent_agent_sessions` is that table: one row per agent that
+  // completed a hop, keyed by slug and never touched by a project delete. An
+  // agent that ran and can no longer be resolved is the missing participant.
+  //
+  // Two details or it misfires. The ORCHESTRATOR has a checkpoint and is never
+  // in `workers`, so it is excluded. And the comparison is against
+  // `bus_agent_name`, which is the same namespace `upsertAgentSession` writes
+  // from (both routers pass the runner's agent slug).
+  //
+  // What this closes in practice is the OPERATOR route rather than the sweep:
+  // `managed_delete` already ends every session a deleted project took part in,
+  // and the auto-resume sweep only looks at `running` rows. But the Iterations
+  // list offers Resume on any row `canReconstruct` accepts, whatever its
+  // status, so the stopped row kept its button and the narrowed run came back
+  // on a click.
+  const resolvedSlugs = new Set(workers.map((w) => w.bus_agent_name));
+  const ranButUnresolved = listAgentCheckpoints(row.id)
+    .map((r) => r.agent_name)
+    .filter((name) => name !== ORCHESTRATOR_AGENT_NAME && !resolvedSlugs.has(name));
+  if (ranButUnresolved.length > 0) {
+    return { ok: false, reason: 'participant-missing' };
   }
   return { ok: true };
 }
