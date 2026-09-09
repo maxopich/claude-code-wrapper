@@ -345,3 +345,80 @@ describe('[security] file modes and the audit row', () => {
     expect(fs.readFileSync(p, 'utf8')).toBe('{"before":true}');
   });
 });
+
+describe('[security] a symlink cannot carry an edit outside the managed root (Cebab-6fax.28)', () => {
+  const tmp = withTempDataDir('managed-file-symlink');
+
+  // CLAUDE.md's first rule for this subsystem: Cebab owns every byte under
+  // `managedAgentsRoot()` and none outside it. The closed `MANAGED_EDITABLE`
+  // set removes traversal from the INPUT, which is why there is no sanitiser
+  // here to get wrong — but the resolved path still runs through a tree the
+  // operator (and every bus agent, which runs as their uid) can symlink. The
+  // copy engine already refuses escaping links by a stated rule; the editor
+  // did not check at all, so the two disagreed about the same tree.
+
+  test('a symlinked `.claude` directory is refused, for read and for write', () => {
+    const { id, dir } = makeManagedProject('agent-linked-dir');
+    const outside = path.join(tmp.root(), 'outside-claude');
+    fs.mkdirSync(outside, { recursive: true });
+    fs.writeFileSync(path.join(outside, 'settings.json'), '{"original":true}');
+    fs.symlinkSync(outside, path.join(dir, '.claude'), 'dir');
+
+    expect(readManagedFile(id, 'settings')).toEqual({ ok: false, refusal: 'escapes_root' });
+    expect(writeManagedFile(id, 'settings', '{"pwned":true}', 0, sink)).toEqual({
+      ok: false,
+      refusal: 'escapes_root',
+    });
+    // And nothing was written on the way to refusing — the refusal happens in
+    // `resolveManagedFile`, before the audit append and before the mkdir.
+    expect(fs.readFileSync(path.join(outside, 'settings.json'), 'utf8')).toBe('{"original":true}');
+  });
+
+  test('a symlinked TARGET FILE is refused even when it points inside the root', () => {
+    // Writing through a link is not what "edit this agent's config" means, and
+    // a link that resolves inside today can be re-pointed between the check
+    // and the write. `lstat`, never `stat` — `stat` follows the link and
+    // answers about the destination, which is the question that cannot see it.
+    const { id, dir } = makeManagedProject('agent-linked-file');
+    const sibling = path.join(managedAgentsRoot(), 'agent-linked-file-sibling');
+    fs.mkdirSync(sibling, { recursive: true });
+    fs.writeFileSync(path.join(sibling, 'real.md'), 'target');
+    fs.symlinkSync(path.join(sibling, 'real.md'), path.join(dir, 'CLAUDE.md'));
+
+    expect(readManagedFile(id, 'claude_md')).toEqual({ ok: false, refusal: 'escapes_root' });
+    expect(fs.readFileSync(path.join(sibling, 'real.md'), 'utf8')).toBe('target');
+  });
+
+  test('CONTROL: an ordinary managed agent still reads and writes', () => {
+    // Anti-vacuity for the whole describe. A containment check that refused
+    // everything would satisfy both cases above and break the feature; this is
+    // the case that says the rule is narrow.
+    const { id, dir } = makeManagedProject('agent-plain');
+    expect(writeManagedFile(id, 'claude_md', '# hello', 0, sink).ok).toBe(true);
+    expect(fs.readFileSync(path.join(dir, 'CLAUDE.md'), 'utf8')).toBe('# hello');
+    const r = readManagedFile(id, 'claude_md');
+    expect(r.ok).toBe(true);
+  });
+
+  test('CONTROL: a first write still creates `.claude/` when it is absent', () => {
+    // The ancestor walk exists because the file usually does NOT exist yet —
+    // an agent copied from a project with no `.claude/`. If the check resolved
+    // `absPath` directly it would fall back to its own unresolved input, wave
+    // the escape through, AND this ordinary case would still pass, so the two
+    // must be tested together.
+    const { id, dir } = makeManagedProject('agent-no-claude-dir');
+    expect(fs.existsSync(path.join(dir, '.claude'))).toBe(false);
+    expect(writeManagedFile(id, 'settings', '{}', 0, sink).ok).toBe(true);
+    expect(fs.readFileSync(path.join(dir, '.claude', 'settings.json'), 'utf8')).toBe('{}');
+  });
+
+  test('the escape refusal is DISTINCT from `not_managed`', () => {
+    // They mean different things to the operator: `not_managed` says "this
+    // project is yours, Cebab leaves it alone", which would be a lie told over
+    // a containment refusal on an agent Cebab does own.
+    const { id, dir } = makeManagedProject('agent-distinct');
+    fs.symlinkSync(tmp.root(), path.join(dir, '.claude'), 'dir');
+    const r = resolveManagedFile(id, 'settings');
+    expect(r).toEqual({ ok: false, refusal: 'escapes_root' });
+  });
+});

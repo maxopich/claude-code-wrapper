@@ -336,9 +336,16 @@ export function registerManagedProject(
  * Delete a project row outright (Cebab-m1f) and report whether a row went.
  *
  * The FK cascades do the dependent work: `sessions.project_id`,
- * `multi_agent_sessions.project_id` and `hook_trust.project_id` all carry
+ * `multi_agent_participants.project_id` and `hook_trust.project_id` all carry
  * `ON DELETE CASCADE`, so their rows (and, through `sessions`, the `events`
  * that hang off them) go with the project in one statement.
+ *
+ * NOT `multi_agent_sessions` — that table has no `project_id` and never has
+ * (`005_multi_agent.sql` defines six columns, none of them a project), which
+ * this comment claimed for a year (`Cebab-6fax.33`). The link is the
+ * PARTICIPANT row, so a cascade removes the project from a session's roster
+ * and leaves the session behind, still `running`, with a hole. The caller ends
+ * those sessions first — see `listMultiAgentSessionIdsForProject`.
  *
  * Only the managed-delete path calls this. The caller (`runManagedDelete`)
  * FIRST hard-deletes each single-agent session so the soft-FK dependents that

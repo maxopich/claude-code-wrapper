@@ -457,6 +457,35 @@ export function getLastRunForTemplate(templateId: string): MultiAgentSessionRow 
     .get(templateId);
 }
 
+/**
+ * Ids of every multi-agent session this project takes part in, whatever its
+ * status.
+ *
+ * `Cebab-6fax.33`. There is no `multi_agent_sessions.project_id` — the link is
+ * `multi_agent_participants`, whose `project_id` DOES cascade — so deleting a
+ * project silently removes it from a session's roster and leaves the session
+ * row behind, still `running`, with a hole where a participant was. The
+ * comment on `deleteProject` claimed a `multi_agent_sessions.project_id`
+ * cascade that does not exist and never has (`005_multi_agent.sql` is the
+ * table's only definition; it has six columns and none of them is a project).
+ *
+ * The consequence is not academic: the single-active invariant counts a
+ * `running` row, and the next boot tries to reconstruct one whose participants
+ * are gone, fails the guard, and marks it crashed — an operator-visible
+ * "session crashed" for a deletion they performed deliberately.
+ *
+ * Read BEFORE the project row goes; afterwards the participant rows have
+ * cascaded away and this returns nothing.
+ */
+export function listMultiAgentSessionIdsForProject(projectId: number): string[] {
+  return getDb()
+    .prepare<[number], { session_id: string }>(
+      `SELECT DISTINCT session_id FROM multi_agent_participants WHERE project_id = ?`,
+    )
+    .all(projectId)
+    .map((r) => r.session_id);
+}
+
 export function endMultiAgentSession(sessionId: string, status: MultiAgentStatus): void {
   getDb()
     .prepare(`UPDATE multi_agent_sessions SET status = ?, ended_at = ? WHERE id = ?`)

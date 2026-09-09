@@ -41,9 +41,10 @@ import { pathLooksSensitive } from '@cebab/shared';
 // enforces it). A server-side copy would be a second definition of the closed
 // set that decides which path this module writes to.
 import type { ManagedFileKind, ManagedFileRefusal, ServerMsg } from '@cebab/shared/protocol';
-import { isManagedProjectPath } from './managed_agent.js';
+import { isManagedProjectPath, managedAgentsRoot } from './managed_agent.js';
 import { emit } from './notifications/dispatcher.js';
 import { getProject } from './repo/projects.js';
+import { canonical, isInside } from './path_containment.js';
 import { readFileBounded, writeFileAtomicBounded } from './safe_fs.js';
 
 /**
@@ -115,15 +116,80 @@ export function resolveManagedFile(
   const relPath = relPosix.split('/').join(path.sep);
   if (!relPathIsContained(relPath)) return { ok: false, refusal: 'unknown_kind' };
 
+  const absPath = path.join(project.path, relPath);
+  if (targetEscapesManagedRoot(absPath)) return { ok: false, refusal: 'escapes_root' };
+
   return {
     ok: true,
     file: {
-      absPath: path.join(project.path, relPath),
+      absPath,
       relPath,
       projectPath: project.path,
       projectName: project.name,
     },
   };
+}
+
+/**
+ * [security] Would reading or writing `absPath` touch a byte outside
+ * `managedAgentsRoot()`?
+ *
+ * `Cebab-6fax.28`. CLAUDE.md's first rule for this subsystem is that Cebab owns
+ * every byte under `managedAgentsRoot()` and none outside it. The closed
+ * `MANAGED_EDITABLE` set removes traversal from the INPUT — there is no
+ * attacker-supplied path to sanitise — but the resolved path still runs through
+ * a tree the operator (or anything running as them, which on this machine
+ * includes every bus agent) can have symlinked. A `.claude` directory linked
+ * elsewhere, or a `settings.json` that is itself a link, and Cebab's own
+ * audited write lands outside the space it claims to own. The copy engine
+ * already refuses escaping links by a stated rule; the editor did not check at
+ * all, so the two disagreed about the same tree.
+ *
+ * TWO CHECKS, because they fail differently:
+ *
+ *   1. The TARGET is a symlink. Refused whatever it points at — writing
+ *      through a link is not what "edit this agent's config" means, and a link
+ *      that resolves inside today can be re-pointed between the check and the
+ *      write. `lstat`, never `stat`: `stat` follows the link and answers about
+ *      the destination, which is the question that cannot see this.
+ *   2. The nearest EXISTING ancestor, canonicalised, is not inside the root.
+ *      The file itself usually does not exist yet — `.claude/` may be absent on
+ *      an agent copied from a project that had none — so resolving `absPath`
+ *      directly would fall back to its own unresolved input and wave the
+ *      escape through. `canonical()`'s header says exactly this: a containment
+ *      check must resolve something that exists.
+ *
+ * CANONICAL ONLY — no raw-path fallback, and that is the whole difference from
+ * `isManagedProjectPath`. That predicate ORs in an unresolved comparison so a
+ * DELETED managed agent still reads as managed; here the same OR is an escape
+ * hatch that defeats the check it is part of. Measured while writing this:
+ * with the fallback, a `.claude` symlinked outside the root resolved to the
+ * outside path (correctly refused by the canonical arm) and was then waved
+ * through by the raw arm, because the LINK's own path is of course inside the
+ * root. The ancestor walk above already guarantees `dir` exists, so realpath
+ * cannot fail and no fallback is needed.
+ */
+export function targetEscapesManagedRoot(absPath: string): boolean {
+  try {
+    if (fs.lstatSync(absPath).isSymbolicLink()) return true;
+  } catch {
+    // Does not exist yet — the ordinary case for a first edit. Fall through to
+    // the ancestor check, which is the half that answers for the directory.
+  }
+
+  let dir = path.dirname(path.resolve(absPath));
+  for (;;) {
+    if (fs.existsSync(dir)) break;
+    const parent = path.dirname(dir);
+    // Reached the filesystem root without finding anything that exists: there
+    // is nothing to resolve, so refuse rather than guess.
+    if (parent === dir) return true;
+    dir = parent;
+  }
+
+  const rootReal = canonical(path.resolve(managedAgentsRoot()));
+  const dirReal = canonical(dir);
+  return !(rootReal === dirReal || isInside(rootReal, dirReal));
 }
 
 export type ManagedFileRead = {
