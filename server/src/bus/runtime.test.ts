@@ -709,3 +709,39 @@ describe('busIterationDir', () => {
     expect(sub.endsWith(path.join('iterations', '007', 'reviewer'))).toBe(true);
   });
 });
+
+describe('the roster prompt describes where the user request actually is (Cebab-6fax.4)', () => {
+  // MEASURED LIVE 2026-09-08 (session 2b87882c). The prompt told the
+  // orchestrator that "the user's first prompt arrives as your next turn after
+  // this one". It does not: `startOrchestratorSession` delivers
+  // `${rosterText}\n\n${initialPrompt}` — one turn, concatenated, unlabelled.
+  // An orchestrator that believed the instruction would either wait for a turn
+  // that never comes or read the tail of its own briefing as the task.
+  //
+  // This test asserts the PROMPT and the DELIVERY agree, which is the property
+  // that broke. It deliberately does not pin the exact sentence — the wording
+  // is free to improve; what must not drift is the claim it makes.
+  const roster = renderRosterPrompt({
+    workers: [
+      { agentName: 'coder', projectName: 'Coder' },
+      { agentName: 'reviewer', projectName: 'Reviewer' },
+    ],
+    executeMode: false,
+    hopBudget: 30,
+  });
+
+  test('it does not claim the prompt arrives in a later turn', () => {
+    expect(roster).not.toMatch(/arrives as your next turn/i);
+  });
+
+  test('it says the request is in this same message', () => {
+    expect(roster.toLowerCase()).toContain('end of this message');
+  });
+
+  test('ANTI-VACUITY: the roster prompt is non-empty and does describe Step 2', () => {
+    // Without this, a `renderRosterPrompt` that returned '' would satisfy the
+    // negative assertion above forever.
+    expect(roster.length).toBeGreaterThan(200);
+    expect(roster).toContain('Step 2');
+  });
+});

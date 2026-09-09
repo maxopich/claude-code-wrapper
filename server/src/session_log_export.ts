@@ -14,7 +14,16 @@
  *      allow-list (`isAllowedHost`), and a `?token=` matching the per-launch
  *      WS auth token.
  *   2. `format=raw` ADDITIONALLY requires `X-Cebab-Acknowledge-Raw:
- *      I-understand`. The UI sets it only behind a typed confirmation.
+ *      I-understand`. NO UI PATH SENDS IT (`Cebab-6fax.8`). This used to say
+ *      "the UI sets it only behind a typed confirmation", which describes a
+ *      confirmation dialog that does not exist; `web/src/exports.ts` says so
+ *      itself twenty lines into its own header ("no UI path passes
+ *      `format: 'raw'` today"), so the two files disagreed about the same
+ *      button. The client CAN send it — the plumbing and its tests are there —
+ *      and nothing calls that path, which makes the complete trace reachable
+ *      today only from a hand-built request carrying the token. Keep the gate;
+ *      it is what a future export button would need. Just do not read it as
+ *      evidence that one exists.
  *   3. BE-1: the `safety_audit` row is appended BEFORE the body lands. If the
  *      append fails the stream never starts — if the intent cannot be
  *      recorded, the data does not ship.

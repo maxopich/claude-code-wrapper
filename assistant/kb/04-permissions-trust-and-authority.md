@@ -67,7 +67,12 @@ Empty sections distinguish "nothing has looked yet" from "looked and found none,
 
 For user-scope MCP servers (see the exception above), Cebab asks you to make a trust decision the first time the server would be used, rather than at project-trust time. Approve it and it becomes usable; the decision is remembered so you are not asked again. This is the mechanism that keeps a home-directory MCP declaration from silently acting the moment you open any project, trusted or not.
 
-For MCP servers declared inside a project (project `.mcp.json` or `.claude/settings*.json`), the gate is Trust itself: those load only when the project is trusted, and the Authority panel's MCP section shows whether they loaded and connected.
+For MCP servers declared inside a project, two corrections to the obvious reading:
+
+- **Only `.mcp.json` is a loading location.** An `mcpServers` block inside a project's `.claude/settings*.json` never loads, at any scope, trusted or not. Trusting the project does not turn it on; moving the declaration to `.mcp.json` does.
+- **Trust is not the only gate.** Trust decides whether the project's `.mcp.json` is read at all; TOFU then fires on the servers it finds, the same as for user-scope ones. So a project-declared server can need two separate approvals — flipping Trust, and the trust decision itself.
+
+The Authority panel's MCP section shows whether each one loaded and connected.
 
 ## Related pages
 

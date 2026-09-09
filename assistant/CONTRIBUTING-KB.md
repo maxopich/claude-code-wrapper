@@ -2,10 +2,18 @@
 
 This page is for **repo contributors**, not for the help assistant. It lives at
 `assistant/CONTRIBUTING-KB.md`, deliberately **outside** `assistant/kb/`, so it
-is neither injected into the assistant's prompt nor readable by the assistant at
-runtime (its `cwd` is `assistant/kb/`, and it has only read-only Read/Glob/Grep
-tools scoped there). Keep contributor-facing notes here; keep user-facing answers
-in `kb/`.
+is not injected into the assistant's prompt. Keep contributor-facing notes here;
+keep user-facing answers in `kb/`.
+
+Being outside `kb/` is **not** a confinement boundary, and this page used to
+imply it was (`Cebab-6fax.6`): it said the assistant's read tools were "scoped
+there". Nothing scopes paths. The assistant runs with `cwd` set to
+`assistant/kb/` and a read-only tool set, which makes reading elsewhere
+_inconvenient and gated_, not impossible — an absolute path is still an
+ordinary Read, answered by the permission gate. Two things follow. Do not put
+anything in this file that would matter if the assistant read it. And know that
+the gate the confinement rests on is currently unanswerable from the assistant
+widget, so such a read parks the turn rather than prompting (`Cebab-6fax.35`).
 
 ## What the knowledge base is
 

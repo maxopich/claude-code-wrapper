@@ -2,7 +2,7 @@ import { createRequire } from 'node:module';
 import fs from 'node:fs';
 import path from 'node:path';
 import { describe, expect, test } from 'vitest';
-import { getScrubbedEnvVars, SCRUBBED_ENV_VAR_NAMES } from './claude.js';
+import { getScrubbedEnvVars, SCRUBBED_ENV_POSTURES, SCRUBBED_ENV_VAR_NAMES } from './claude.js';
 
 // Cluster A Phase 3 (E1, UX-5): the WS layer's env_scrubbed emission on
 // every attach (`ws/server.ts` onConnection) must report the NAMES of the
@@ -194,5 +194,42 @@ describe('[security] the scrub list is derived from the CLI, not from a copy of 
     for (const name of backendSwitchesFromBundle()) {
       expect(getScrubbedEnvVars({ [name]: '1' })).toEqual([name]);
     }
+  });
+});
+
+describe('[security] every scrubbed name has its own posture label (Cebab-6fax.8)', () => {
+  // `SCRUBBED_ENV_POSTURES`' header claimed "CI catches the missing key via
+  // the resolver's typecheck". It could not: the map is
+  // `Record<string, string>` and its only read site falls back to a generic
+  // 'credential-class env injection' label. So a name added to the scrub list
+  // without a posture produced a vaguer authority panel — at runtime, silently,
+  // for as long as nobody looked. The claim is now this test.
+  //
+  // It matters more than a label: the posture string is what tells an operator
+  // WHY a variable is stripped ("Bedrock backend (bearer token re-routes off
+  // Anthropic API)" versus "WIF auth"). A generic fallback on a newly added
+  // name is exactly the case where the operator has never seen it before.
+
+  test('no scrubbed name is missing a posture', () => {
+    const missing = SCRUBBED_ENV_VAR_NAMES.filter((n) => SCRUBBED_ENV_POSTURES[n] === undefined);
+    expect(
+      missing,
+      'A name in SCRUBBED_ENV_VAR_NAMES has no entry in SCRUBBED_ENV_POSTURES, ' +
+        'so the authority panel will label it with the generic fallback. Add a ' +
+        'posture string saying what that variable would re-route or override.',
+    ).toEqual([]);
+  });
+
+  test('no posture describes a name that is not scrubbed', () => {
+    // The other direction: a stale posture for a name dropped from the list is
+    // dead weight that reads as coverage.
+    const names = new Set(SCRUBBED_ENV_VAR_NAMES);
+    expect(Object.keys(SCRUBBED_ENV_POSTURES).filter((k) => !names.has(k))).toEqual([]);
+  });
+
+  test('ANTI-VACUITY: both lists are non-trivially populated', () => {
+    // Two empty collections satisfy both assertions above.
+    expect(SCRUBBED_ENV_VAR_NAMES.length).toBeGreaterThan(5);
+    expect(Object.keys(SCRUBBED_ENV_POSTURES).length).toBeGreaterThan(5);
   });
 });

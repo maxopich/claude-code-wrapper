@@ -479,10 +479,21 @@ export async function copyTree(
         try {
           await secureMkdirAsync(dest);
         } catch {
-          // A directory the copy could not create (ENOSPC, EACCES, or an
-          // ENOTDIR/ENOENT because its own parent failed just above). Reported,
-          // not fatal — see below. Its children arrive next in the walk and,
-          // finding no parent, each report their own `copy_failed` in turn.
+          // A directory the copy could not create — ENOSPC or EACCES in
+          // practice. Reported, not fatal; see below.
+          //
+          // `Cebab-6fax.8`: this used to add "or an ENOTDIR/ENOENT because its
+          // own parent failed just above", and that a failed directory's
+          // children would then "each report their own `copy_failed` in turn".
+          // `secureMkdirAsync` passes `recursive: true`, so a missing parent is
+          // CREATED rather than causing an ENOENT — the cascade described here
+          // cannot happen for that reason. What actually follows depends on the
+          // cause: a whole-filesystem condition (ENOSPC) does fail the children
+          // too, while a per-directory one can leave a later child succeeding
+          // and silently re-creating the parent this branch just reported as
+          // skipped. The skip list is therefore a record of what Cebab could
+          // not do at that moment, not a claim about what is absent from the
+          // tree afterwards. `Cebab-4zkc` is the adjacent bead.
           result.skips.push({ rel: entry.rel, reason: 'copy_failed' });
           break;
         }

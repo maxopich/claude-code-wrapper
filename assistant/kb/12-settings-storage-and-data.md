@@ -18,8 +18,10 @@ The workspace folder is the directory Cebab scans for projects. Every direct
 subdirectory of it becomes a project in the sidebar. Set it in Settings (or from
 the first-run **Choose a folder** prompt), using an absolute path or a
 `~`-prefixed one. The value is stored in `~/.cebab/cebab.sqlite` and takes
-precedence over the `WORKSPACE_ROOT` environment variable, which stays as a
-fallback for fresh installs and scripted launches.
+precedence over the `CEBAB_WORKSPACE_ROOT` environment variable, which stays as
+a fallback for fresh installs and scripted launches. The bare `WORKSPACE_ROOT`
+still works as a deprecated alias, and Cebab prints a warning naming the
+prefixed replacement every time it reads one.
 
 If no workspace is set, Settings tells you where runs and logs land in the
 meantime, and warns if the path you typed does not resolve. A project that isn't
@@ -42,7 +44,8 @@ inside a single hop or a single-agent send. When it is reached, the underlying
 SDK ends the turn with an `error_max_turns` result. The resolver precedence is:
 a per-turn override from the composer (single-agent only; see the max-turns input
 described in `03-chat-and-composer.md`) beats this saved default, which beats the
-`MAX_TURNS` environment variable, which beats the built-in fallback. A multi-agent
+`CEBAB_MAX_TURNS` environment variable, which beats the built-in fallback (the
+bare `MAX_TURNS` is a deprecated alias and warns on every boot). A multi-agent
 session has no per-turn override — it re-reads this default at each session start
 or resume. Changes take effect on your next send, or on the next multi-agent
 session start.

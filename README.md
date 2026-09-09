@@ -212,6 +212,14 @@ flips `permissionMode` only — `settingSources` is fixed when the run starts.
 
 ## Built-in help
 
+> **Not reachable on `main` yet.** The knowledge base, the server-side turn path and
+> the widget all exist, but nothing mints or emits the assistant's project id, so the
+> dock renders null and the run path cannot fire (`Cebab-dyb`). The per-turn state
+> snapshot described below is composed by a function no live path calls (`Cebab-03a`).
+> This section describes the design as built, not a feature you can open today; it is
+> here rather than deleted because the pieces are in the tree and a reader who finds
+> them needs to know why they do nothing.
+
 There's a help assistant in the app — a floating chat widget that answers questions
 about Cebab itself. It reads a knowledge base shipped in the repo under
 [`assistant/kb/`](assistant/kb/) (fifteen pages, indexed by `00-index.md`) plus a

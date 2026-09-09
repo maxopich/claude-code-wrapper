@@ -191,9 +191,15 @@ export const SCRUBBED_ENV_VAR_NAMES: ReadonlyArray<string> = [
  * scan so the AuthorityPanel can render "Subscription auth" / "Bedrock
  * backend" labels rather than just the env-var name.
  *
- * Pinned next to `SCRUBBED_ENV_VAR_NAMES` so a future addition to that
- * list forces a matching posture string (CI catches the missing key via
- * the resolver's typecheck — `detectEnvInjections` looks up by name).
+ * Pinned next to `SCRUBBED_ENV_VAR_NAMES` so a future addition to that list
+ * forces a matching posture string. `Cebab-6fax.8`: this used to claim CI
+ * caught a missing key "via the resolver's typecheck". It did not and could
+ * not — the map is a `Record<string, string>` and the one read site
+ * (`project_authority.ts`) has a `?? 'credential-class env injection'`
+ * fallback, so a missing key was a silently vaguer posture label, at runtime,
+ * forever. `claude.env_scrubbed.test.ts` asserts the parity now, which is the
+ * same answer that file already gives for the list itself: where a checker
+ * cannot be a type, make it a test rather than a sentence.
  *
  * NAMES only — never values. BE-B12 [security] invariant.
  */

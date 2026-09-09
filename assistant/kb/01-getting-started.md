@@ -25,6 +25,36 @@ If `claude` is not installed or not logged in, Cebab has nothing to run and
 messages will fail. Sort this out first. See 14-troubleshooting.md if launches
 or messages do not behave.
 
+## Installing Cebab
+
+From the Cebab project folder, one command does everything:
+
+```sh
+npm run bootstrap
+```
+
+It installs the dependencies, builds the native `better-sqlite3` binding, and
+sets up the git hooks. It is the same command on macOS, Linux and Windows.
+
+There is an older two-step form, and it is worth knowing why the second step
+exists:
+
+```sh
+npm install
+npm run setup
+```
+
+`.npmrc` sets `ignore-scripts=true`, which is a deliberate supply-chain choice:
+no dependency gets to run an install script on your machine just by being
+installed. `better-sqlite3` genuinely needs one — it compiles a native binding —
+so `npm run setup` rebuilds exactly that one package, and nothing else. Skipping
+it leaves the database layer unable to load, which shows up as a server that
+will not start.
+
+You need Node 24 or newer. `package.json` declares that floor and `.npmrc` sets
+`engine-strict=true`, so an install that would run on an unsupported Node
+refuses instead of failing later in a way that looks like a code problem.
+
 ## First launch
 
 From the Cebab project folder, start everything with one command:
@@ -92,15 +122,15 @@ around the interface or iterate on how things look, Cebab has a **mock mode**
 that replays pre-recorded transcripts instead of calling `claude` for real, so
 it burns no quota.
 
-The simplest cross-platform way to turn it on is to set `MOCK=1` in a `.env`
+The simplest cross-platform way to turn it on is to set `CEBAB_MOCK=1` in a `.env`
 file at the project root, then start Cebab as usual. On macOS and Linux you can
 also run it inline for a single launch:
 
 ```sh
-MOCK=1 npm run dev:server
+CEBAB_MOCK=1 npm run dev:server
 ```
 
-On Windows PowerShell the inline form does not set the variable — put `MOCK=1`
+On Windows PowerShell the inline form does not set the variable — put `CEBAB_MOCK=1`
 in your `.env` instead. Mock mode is meant for exploring the UI, not for getting
 real work done, since the replies are canned recordings.
 
