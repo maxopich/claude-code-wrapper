@@ -5788,16 +5788,32 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       return;
     }
     case 'resume_multi_agent': {
-      // Single-active invariant — same posture as start_multi_agent.
-      if (conn.multiAgent) {
+      // Single-active invariant, PROCESS-WIDE. The comment here used to say
+      // "same posture as start_multi_agent" over a `if (conn.multiAgent)`
+      // guard, and that was the pre-B02 posture start_multi_agent had already
+      // moved off: per CONNECTION, so a second browser window — which has no
+      // `conn.multiAgent` of its own — sailed through it and brought a second
+      // session live in this process. `describeLiveSessionConflict`'s own
+      // header describes what happens next (the resume sweep reports the older
+      // one `crashed` while its AgentRunner keeps delivering turns), and this
+      // verb is a second door into exactly that state (`Cebab-6fax.41`).
+      //
+      // The claim, not just the check, for the B18 reason: `resumeMultiAgent-
+      // Target` awaits before it registers anything, so two windows could
+      // otherwise both pass a check and both reconstruct. Released in the
+      // `finally`, and by `ws.on('close')` if this connection dies first.
+      const resumeClaimId = randomUUID();
+      if (!claimSessionStart(resumeClaimId)) {
         send(conn.ws, {
           type: 'wrapper_error',
           sessionId: msg.sessionId,
           kind: 'process_crashed',
-          message: 'Another multi-agent session is already running; stop it first.',
+          message:
+            describeLiveSessionConflict() ?? 'another multi-agent session is already starting.',
         });
         return;
       }
+      conn.multiAgentStartClaim = resumeClaimId;
       try {
         const result = await resumeMultiAgentTarget(msg.sessionId, {
           ...resumeCallbacks(conn),
@@ -5828,6 +5844,12 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
           kind: 'process_crashed',
           message: 'Failed to resume this session.',
         });
+      } finally {
+        // Same handoff as the start path: by here the session is either in the
+        // registry, where the process-wide check takes over, or the resume
+        // failed. Either way the slot is free.
+        releaseSessionStart(resumeClaimId);
+        conn.multiAgentStartClaim = null;
       }
       return;
     }

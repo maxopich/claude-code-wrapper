@@ -178,6 +178,43 @@ describe('defangBusDelimiters', () => {
     expect(out).toBe(`<${ZWSP}/project_claude_md><${ZWSP}project_claude_md>`);
   });
 
+  test('[security] no delimiter contains a regex metacharacter', () => {
+    // `defangBusDelimiters` builds a matcher from each constant with no
+    // escaping, so this is the precondition that keeps all three EXACT. A `.`
+    // or `?` added to a delimiter later would silently turn its pass into a
+    // wildcard, breaking text the defanger was never aimed at — with no error
+    // anywhere. Asserted rather than escaped-around on purpose: an escape
+    // helper absorbs that edit, this refuses it.
+    for (const d of [BUS_MESSAGE_TAG_STEM, PROJECT_RULES_OPEN, PROJECT_RULES_CLOSE]) {
+      expect(d, `${d} would not be matched literally`).not.toMatch(/[.*+?^${}()|[\]\\]/);
+    }
+  });
+
+  test('[security] every delimiter folds case, not just the stem', () => {
+    // The asymmetry this pins: the stem was matched with `gi` while the two
+    // project-rules delimiters were a `split`/`join` on the exact literal, so
+    // an upper-cased `<PROJECT_CLAUDE_MD>` walked through undefanged — and it
+    // is that pair which frames the block the reader has been told to treat as
+    // authoritative. One case per delimiter, so a future edit that reverts any
+    // ONE of the three passes reddens here rather than the other two covering
+    // for it.
+    for (const d of [BUS_MESSAGE_TAG_STEM, PROJECT_RULES_OPEN, PROJECT_RULES_CLOSE]) {
+      const shouted = d.toUpperCase();
+      const out = defangBusDelimiters(`before ${shouted} after`);
+      expect(out).not.toContain(shouted);
+      expect(out).toContain(`${shouted[0]}${ZWSP}${shouted.slice(1)}`);
+    }
+  });
+
+  test('[security] mixed case is broken too, and the original casing survives', () => {
+    // Not merely upper-case: the realistic forgery is whatever the model
+    // emitted. `breakRun` is handed the matched text, so the operator's view
+    // of what was said is unchanged apart from the inserted break.
+    const out = defangBusDelimiters('</Project_Claude_Md>');
+    expect(out).toBe(`<${ZWSP}/Project_Claude_Md>`);
+    expect(out.split(ZWSP).join('')).toBe('</Project_Claude_Md>');
+  });
+
   test('is idempotent enough to be safe if it ever ran twice', () => {
     // Not a supported call pattern, but a double-defang must not corrupt the
     // text or produce a delimiter that reads as intact again.

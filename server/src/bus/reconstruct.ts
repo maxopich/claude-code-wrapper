@@ -38,7 +38,7 @@
 import fs from 'node:fs';
 import {
   appendMultiAgentEvent,
-  listAgentSessions,
+  listAgentCheckpoints,
   listMultiAgentEvents,
   listResolvedParticipants,
   recordSessionHops,
@@ -224,7 +224,12 @@ export function checkReconstructable(row: MultiAgentSessionRow): ReconstructGuar
   if (!row.session_folder) return { ok: false, reason: 'no-session-folder' };
   if (!fs.existsSync(row.session_folder)) return { ok: false, reason: 'folder-missing' };
   if (!row.iteration_id) return { ok: false, reason: 'no-iteration' };
-  if (listAgentSessions(row.id).length === 0) return { ok: false, reason: 'no-agent-sessions' };
+  // `listAgentCheckpoints`, not `listAgentSessions`: the table also holds
+  // cost-only rows with an empty `cli_session_id`, and one of those satisfied
+  // this count while carrying nothing to resume from (`Cebab-6fax.41`).
+  if (listAgentCheckpoints(row.id).length === 0) {
+    return { ok: false, reason: 'no-agent-sessions' };
+  }
   const workers = listResolvedParticipants(row.id).filter((r) => r.role === 'worker');
   if (workers.length === 0) return { ok: false, reason: 'no-participants' };
   if (workers.some((w) => !w.bus_agent_name)) {
@@ -307,8 +312,10 @@ export function reconstructOrchestratorSession(
   const paths = sessionPathsFromFolder(folder);
 
   try {
-    // Idempotent regen so the orchestrator's cwd (CLAUDE.md + comm.md) is
-    // valid before its first resumed turn.
+    // The orchestrator's cwd must exist before its first resumed turn. This
+    // creates the directory and nothing else — despite what this comment used
+    // to say, there is no CLAUDE.md or comm.md to regenerate; both were dead
+    // under `settingSources: ['user']` and were removed.
     ensureOrchestratorWorkspace(paths.orchestratorWorkspace);
   } catch (err) {
     console.error(`[reconstruct] ensureOrchestratorWorkspace failed for ${row.id}`, err);
@@ -324,7 +331,7 @@ export function reconstructOrchestratorSession(
       projectName: r.project_name,
     }));
 
-  const seededSessions = listAgentSessions(row.id).map((r) => ({
+  const seededSessions = listAgentCheckpoints(row.id).map((r) => ({
     agentName: r.agent_name,
     cliSessionId: r.cli_session_id,
   }));
@@ -631,7 +638,7 @@ export function reconstructChainSession(
       projectName: r.project_name,
     }));
 
-  const seededSessions = listAgentSessions(row.id).map((r) => ({
+  const seededSessions = listAgentCheckpoints(row.id).map((r) => ({
     agentName: r.agent_name,
     cliSessionId: r.cli_session_id,
   }));
