@@ -182,6 +182,82 @@ describe('ManagedCopyModal — running and finishing', () => {
     expect(copyBtn()).toBeUndefined();
   });
 
+  test('a successful copy that skipped things says so, and lists them', () => {
+    // `Cebab-6fax.43`: the result's skips reached this component intact and
+    // were never rendered — only the preflight's were. So a copy that left
+    // things out reported unqualified success.
+    render(
+      state({
+        status: 'done',
+        result: {
+          ok: true,
+          managedProjectId: 7,
+          name: 'Cebab (2)',
+          files: 12,
+          bytes: 1,
+          symlinks: 0,
+          skips: [
+            { rel: 'node_modules/.bin/x', reason: 'symlink_escapes' },
+            { rel: 'sock', reason: 'not_regular' },
+          ],
+          skipsTruncated: 3,
+        },
+      }),
+    );
+    expect(container.querySelector('[data-testid="managed-copy-result-skips"]')).not.toBeNull();
+    expect(container.textContent).toContain('node_modules/.bin/x');
+    expect(container.textContent).toContain('sock');
+    // The count in the sentence includes the truncated tail: 2 listed + 3 more.
+    expect(container.textContent).toContain('5 items were not copied');
+    expect(container.textContent).toContain('…and 3 more');
+  });
+
+  test('the zero-file case an unreadable source root produces is legible', () => {
+    // The measured shape: an unreadable or vanished root yields ONE
+    // `unreadable_dir` skip at rel '' and zero files, and the copy still
+    // registers the project. "Copied 0 files" was the whole report.
+    render(
+      state({
+        status: 'done',
+        result: {
+          ok: true,
+          managedProjectId: 8,
+          name: 'Empty (1)',
+          files: 0,
+          bytes: 0,
+          symlinks: 0,
+          skips: [{ rel: '', reason: 'unreadable_dir' }],
+          skipsTruncated: 0,
+        },
+      }),
+    );
+    expect(container.textContent).toContain('Copied 0 files');
+    expect(container.textContent).toContain('1 items were not copied');
+    expect(container.textContent).toContain('directory could not be read');
+  });
+
+  test('a clean copy shows no skip list at all', () => {
+    // The other direction: the shared list renders nothing when there is
+    // nothing to say, so the ordinary case gains no noise.
+    render(
+      state({
+        status: 'done',
+        result: {
+          ok: true,
+          managedProjectId: 9,
+          name: 'Clean (1)',
+          files: 340,
+          bytes: 1,
+          symlinks: 0,
+          skips: [],
+          skipsTruncated: 0,
+        },
+      }),
+    );
+    expect(container.querySelector('[data-testid="managed-copy-result-skips"]')).toBeNull();
+    expect(container.textContent).not.toContain('were not copied');
+  });
+
   test('failure shows the server error rather than a generic apology', () => {
     render(state({ status: 'done', result: { ok: false, error: 'the copy failed partway' } }));
     expect(container.textContent).toContain('the copy failed partway');

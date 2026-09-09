@@ -108,8 +108,16 @@ export async function runManagedDelete(
   try {
     await removeManagedDir(project.path);
   } catch (err: unknown) {
+    // `Cebab-6fax.43`: "nothing was removed" was only half true. The DB half
+    // is — this returns before any row work — but `removeManagedDir` is
+    // `fs.rm({ recursive: true, force: true })`, and `force` swallows ENOENT
+    // only: an EACCES or EBUSY partway through leaves everything already
+    // unlinked gone. So the message promised an intact tree it cannot
+    // guarantee. Say what is actually guaranteed instead, and that a retry is
+    // the right next move.
     return fail(
-      `could not remove the agent's files (${String(err)}); nothing was removed from Cebab.`,
+      `could not remove all of the agent's files (${String(err)}); some may already be gone. ` +
+        `Its sessions and history are untouched — retry the delete.`,
     );
   }
 

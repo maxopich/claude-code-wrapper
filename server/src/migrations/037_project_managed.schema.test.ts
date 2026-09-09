@@ -43,6 +43,27 @@ describe('037_project_managed', () => {
     expect(row.managed_copied_at).toBe(null);
   });
 
+  test('a failed provenance write leaves no half-registered project (Cebab-6fax.43)', () => {
+    // The two statements were independent. Since `#564` the caller reacts to a
+    // throw here by DELETING the copied tree, so an INSERT that landed
+    // followed by an UPDATE that threw left a `projects` row pointing at a
+    // directory that had just been removed — and that row lives under
+    // `managedAgentsRoot()`, which exempts it from the workspace
+    // missing-sweep, so it would sit in the sidebar until deleted by hand.
+    //
+    // The UPDATE is made to fail by handing it a value better-sqlite3 refuses
+    // to bind. That is a real failing statement in the real transaction, not a
+    // stub of one — the cast is only how a typed signature is bypassed.
+    const target = path.join(managedAgentsRoot(), 'rollback');
+    fs.mkdirSync(target, { recursive: true });
+    expect(() => registerManagedProject('rollback', target, {} as unknown as string, 1)).toThrow();
+
+    const rows = getDb()
+      .prepare<[string], { n: number }>('SELECT COUNT(*) AS n FROM projects WHERE path = ?')
+      .get(target);
+    expect(rows?.n).toBe(0);
+  });
+
   test('registerManagedProject stores provenance and returns the fresh row', () => {
     const target = path.join(managedAgentsRoot(), 'copied');
     fs.mkdirSync(target, { recursive: true });

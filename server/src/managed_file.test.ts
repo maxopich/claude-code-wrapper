@@ -265,22 +265,51 @@ describe('writing', () => {
 describe('[security] file modes and the audit row', () => {
   withTempDataDir('managed-file-audit');
 
-  test.runIf(process.platform !== 'win32')(
-    'credential-bearing kinds land at 0600, CLAUDE.md does not',
-    () => {
-      // `Cebab-ws0.11` gave these files 0600 at copy time. An edit that
-      // relaxed the mode would undo that silently, on the file that holds the
-      // token. Skipped on Windows, which has no POSIX mode bits to assert.
-      const { id, dir } = makeManagedProject('agent-modes');
-      writeManagedFile(id, 'mcp', '{}', 0, sink);
-      writeManagedFile(id, 'settings', '{}', 0, sink);
-      writeManagedFile(id, 'claude_md', 'hi', 0, sink);
-      const mode = (p: string): number => fs.statSync(p).mode & 0o777;
-      expect(mode(path.join(dir, '.mcp.json'))).toBe(0o600);
-      expect(mode(path.join(dir, '.claude', 'settings.json'))).toBe(0o600);
-      expect(mode(path.join(dir, 'CLAUDE.md'))).not.toBe(0o600);
-    },
-  );
+  test.runIf(process.platform !== 'win32')('every editable kind lands owner-only', () => {
+    // `Cebab-ws0.11` gave these files 0600 at copy time, and the editor must
+    // not relax that. Skipped on Windows, which has no POSIX mode bits.
+    //
+    // `Cebab-6fax.43`: the third assertion used to be
+    // `expect(mode(CLAUDE.md)).not.toBe(0o600)`. It was written as an
+    // anti-vacuity control for the two above it — proof that the mode argument
+    // reaches the file at all rather than every file coincidentally landing
+    // 0600 — and it pinned the defect as a side effect: `copyTree` gives every
+    // non-sensitive file `entry.mode & 0o700`, so writing CLAUDE.md at 0644
+    // under the ordinary umask made it group- and world-readable, which is the
+    // relaxation the comment forbids.
+    //
+    // Rewritten, not deleted, because the anti-vacuity role is still needed —
+    // it moves to the positive control below, which shows the mode argument
+    // changing a file's bits rather than agreeing with what was already there.
+    const { id, dir } = makeManagedProject('agent-modes');
+    writeManagedFile(id, 'mcp', '{}', 0, sink);
+    writeManagedFile(id, 'settings', '{}', 0, sink);
+    writeManagedFile(id, 'claude_md', 'hi', 0, sink);
+    const mode = (p: string): number => fs.statSync(p).mode & 0o777;
+    expect(mode(path.join(dir, '.mcp.json'))).toBe(0o600);
+    expect(mode(path.join(dir, '.claude', 'settings.json'))).toBe(0o600);
+    expect(mode(path.join(dir, 'CLAUDE.md'))).toBe(0o600);
+    // Nothing is group- or world-readable, stated as the property rather than
+    // as three equalities.
+    for (const rel of ['.mcp.json', path.join('.claude', 'settings.json'), 'CLAUDE.md']) {
+      expect(mode(path.join(dir, rel)) & 0o077).toBe(0);
+    }
+  });
+
+  test.runIf(process.platform !== 'win32')('and the mode argument is what puts them there', () => {
+    // The positive control the old `not.toBe(0o600)` was providing: start from
+    // a file that is deliberately world-readable and show the write TIGHTENS
+    // it. Without this, every assertion above would still pass if the mode
+    // argument were ignored and the umask happened to produce 0600.
+    const { id, dir } = makeManagedProject('agent-mode-control');
+    const target = path.join(dir, 'CLAUDE.md');
+    fs.writeFileSync(target, 'before');
+    fs.chmodSync(target, 0o644);
+    expect(fs.statSync(target).mode & 0o777).toBe(0o644);
+
+    writeManagedFile(id, 'claude_md', 'after', fs.statSync(target).mtimeMs, sink);
+    expect(fs.statSync(target).mode & 0o777).toBe(0o600);
+  });
 
   test('one audit row per write, naming the file and whether it existed', () => {
     const { id } = makeManagedProject('agent-audit');

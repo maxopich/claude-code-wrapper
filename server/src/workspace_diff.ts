@@ -50,11 +50,42 @@ const EMPTY_DIFF: WorkspaceDiff = {
  * machine. Renames count as 1 change instead.
  */
 export async function computeWorkspaceDiff(projectPath: string): Promise<WorkspaceDiff> {
+  // `Cebab-6fax.43`: git finds the NEAREST enclosing repository, which for a
+  // directory that is not one of its own is somebody else's. A managed agent
+  // is exactly that case — `.git` is excluded from the copy, and the data dir
+  // carries a bare-`*` .gitignore — so running `git status` from
+  // `<repo>/.cebab/agents/foo` reported the OUTER repo's dirty files, with
+  // paths that do not exist in the agent, and the modal read
+  // `fullDiffAvailable: true` off it.
+  //
+  // Measured: from such a directory, `git check-ignore -q .` exits 0 (this
+  // directory is ignored by the enclosing repo), 1 when it is not, and 128
+  // when there is no repo at all — which the catch below already handles. Exit
+  // 0 is the answer we want: whatever repo git found, it is not describing
+  // this directory.
+  try {
+    await execFileAsync('git', ['check-ignore', '-q', '.'], {
+      cwd: projectPath,
+      timeout: GIT_TIMEOUT_MS,
+      env: { ...process.env, GIT_DIR: undefined, GIT_WORK_TREE: undefined },
+    });
+    // Exit 0 — ignored by the enclosing repo. `fullDiffAvailable: false` is
+    // what the modal reads as "we could not enumerate, require typed
+    // confirmation", which is the honest answer here.
+    return EMPTY_DIFF;
+  } catch {
+    // Exit 1 (not ignored) and exit 128 (not a repo) both land here; the
+    // status call below distinguishes them, since 128 fails there too.
+  }
+
   let stdout: string;
   try {
     const res = await execFileAsync(
       'git',
-      ['status', '--porcelain=v1', '-z', '--no-renames', '--untracked-files=all'],
+      // `-- .` scopes the status to this directory. Without it a project that
+      // is a SUBDIRECTORY of a larger repo — the common monorepo shape, not
+      // only the managed case above — reported every change in the whole repo.
+      ['status', '--porcelain=v1', '-z', '--no-renames', '--untracked-files=all', '--', '.'],
       {
         cwd: projectPath,
         // 1 MiB output cap — porcelain entries are small (~100B each) so

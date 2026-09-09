@@ -41,6 +41,7 @@ import { pathLooksSensitive } from '@cebab/shared';
 // enforces it). A server-side copy would be a second definition of the closed
 // set that decides which path this module writes to.
 import type { ManagedFileKind, ManagedFileRefusal, ServerMsg } from '@cebab/shared/protocol';
+import { FILE_MODE } from './data_perms.js';
 import { isManagedProjectPath, managedAgentsRoot } from './managed_agent.js';
 import { emit } from './notifications/dispatcher.js';
 import { getProject } from './repo/projects.js';
@@ -323,9 +324,18 @@ export function writeManagedFile(
     return { ok: false, refusal: 'write_failed' };
   }
 
-  // `0600` for the credential-bearing kinds, matching what `Cebab-ws0.11` gave
-  // them at copy time — an edit must not relax the mode the copy tightened.
-  const mode = pathLooksSensitive(relPath) ? 0o600 : 0o644;
+  // `Cebab-6fax.43`: 0600 for EVERY editable kind, not only the
+  // credential-bearing ones.
+  //
+  // The rule this states — "an edit must not relax the mode the copy
+  // tightened" — was applied to two of the three files and not the third.
+  // `copyTree` gives every non-sensitive file `entry.mode & 0o700`, i.e.
+  // owner-only; writing CLAUDE.md at 0644 under the ordinary umask 022 landed
+  // it group- and world-readable, which is a relaxation of exactly the kind
+  // the comment forbids. None of the three kinds is executable, and 0600 is
+  // the data directory's stated file policy, so `FILE_MODE` is the whole
+  // answer and `pathLooksSensitive` is no longer needed to pick a mode.
+  const mode = FILE_MODE;
   const w = writeFileAtomicBounded(absPath, bytes, { maxBytes: MAX_MANAGED_FILE_BYTES, mode });
   if (!w.ok)
     return { ok: false, refusal: w.refusal === 'too_large' ? 'too_large' : 'write_failed' };
