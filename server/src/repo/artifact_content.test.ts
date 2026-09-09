@@ -263,3 +263,79 @@ describe('readArtifactContent — error outcomes', () => {
     expect(out.error).toBe('read_failed');
   });
 });
+
+describe('[security] an armoured multi-line secret does not ship its body (Cebab-6fax.31)', () => {
+  // MEASURED 2026-09-08. A PEM private key pasted into a previewable file had
+  // its BEGIN and END lines masked and its base64 BODY — which IS the key —
+  // shipped verbatim, while this module's header claimed parity with the log
+  // view. Per-line redaction is structurally unable to see a secret whose body
+  // matches no pattern of its own; the same shape as `Cebab-ygu.47`, where a
+  // secret chopped across two stream deltas survived the per-line pass. That
+  // fix changed the corpus; this one changes the unit, from a line to a block.
+  //
+  // The key material is assembled at RUNTIME rather than written out, so the
+  // repo's secret scanner has nothing to find
+  // (`project_secret_shaped_test_data`).
+  const B = '-----BEGIN' + ' RSA PRIVATE KEY-----';
+  const E = '-----END' + ' RSA PRIVATE KEY-----';
+  const BODY_A = 'MIIEow' + 'IBAAKCAQEA3Zx8kQvHt' + 'nQ1cWq9m2ZJ4pLbVdRs';
+  const BODY_B = 'TfYh2K' + 'LmN8pQrStUvWxYz0123' + '456789abcdefghijklm';
+
+  test('the body between the delimiters is masked, not just the delimiters', () => {
+    const src = ['# my config', B, BODY_A, BODY_B, E, 'port = 8080'].join('\n');
+    const { redacted } = redactArtifactContent('/tmp/app.conf', src);
+    expect(redacted).not.toContain(BODY_A);
+    expect(redacted).not.toContain(BODY_B);
+  });
+
+  test('the rest of the file stays readable — this is not a whole-body blank', () => {
+    // The Tier 1 whole-file rule exists for files whose PATH says "secret".
+    // A config that merely embeds one must still be previewable, or operators
+    // turn the preview off.
+    const src = ['# my config', B, BODY_A, E, 'port = 8080'].join('\n');
+    const { redacted } = redactArtifactContent('/tmp/app.conf', src);
+    expect(redacted).toContain('# my config');
+    expect(redacted).toContain('port = 8080');
+  });
+
+  test('a block with no END is masked to EOF', () => {
+    // The file was truncated at the read cap, or the key is malformed. Either
+    // way the tail is still key material.
+    const src = ['intro', B, BODY_A, BODY_B].join('\n');
+    const { redacted } = redactArtifactContent('/tmp/app.conf', src);
+    expect(redacted).toContain('intro');
+    expect(redacted).not.toContain(BODY_A);
+    expect(redacted).not.toContain(BODY_B);
+  });
+
+  test('the masked range is reported in `fields`', () => {
+    const src = ['intro', B, BODY_A, E].join('\n');
+    const { fields } = redactArtifactContent('/tmp/app.conf', src);
+    expect(fields).toContain('block:2-4');
+  });
+
+  test('two blocks in one file are both masked', () => {
+    const src = [B, BODY_A, E, 'middle', B, BODY_B, E].join('\n');
+    const { redacted } = redactArtifactContent('/tmp/app.conf', src);
+    expect(redacted).not.toContain(BODY_A);
+    expect(redacted).not.toContain(BODY_B);
+    expect(redacted).toContain('middle');
+  });
+
+  test('ANTI-VACUITY: an ordinary file with base64-looking content is untouched', () => {
+    // The reason the rule is delimiter-shaped rather than a "looks like a key
+    // blob" heuristic: a broad matcher would blank minified JS, lockfile
+    // integrity hashes and every data URI in the tree, and a preview that
+    // blanks ordinary files gets switched off.
+    const src = ['const sri = "sha512-' + BODY_A + '";', 'export default sri;'].join('\n');
+    const { redacted, fields } = redactArtifactContent('/tmp/app.js', src);
+    expect(redacted).toBe(src);
+    expect(fields).toEqual([]);
+  });
+
+  test('ANTI-VACUITY: a PUBLIC key block is not treated as private', () => {
+    const pub = '-----BEGIN' + ' PUBLIC KEY-----';
+    const src = [pub, BODY_A, '-----END' + ' PUBLIC KEY-----'].join('\n');
+    expect(redactArtifactContent('/tmp/app.conf', src).redacted).toBe(src);
+  });
+});

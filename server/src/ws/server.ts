@@ -4076,6 +4076,19 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
         return;
       }
       setProjectTrusted(msg.projectId, msg.trusted);
+      // [security] Cebab-6fax.26: the cached `system/init` snapshot for this
+      // project was taken under the OTHER scope set, because Trust IS the
+      // scope set. Keeping it makes the authority panel present a measurement
+      // of the posture the operator just changed away from — and label it
+      // live, since `fromProbe` is true of it. That is the exact lie
+      // `Cebab-ws0.7` fixed for a timed-out probe, reached by a different
+      // route, and it lands at the moment the operator is most likely to look.
+      //
+      // Dropping the entry rather than re-probing: the resolver already
+      // degrades gracefully to the file-scan half, and the selection probe (or
+      // the panel's own request) will spawn when something actually needs a
+      // live read. Re-probing here would spend a process on every toggle.
+      conn.authorityCache.delete(msg.projectId);
       const rows = await syncWorkspaceProjects();
       sendProjects(conn, rows);
       return;

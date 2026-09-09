@@ -41,7 +41,9 @@ import {
   listAgentSessions,
   listMultiAgentEvents,
   listResolvedParticipants,
+  recordSessionHops,
   setAwaitingContinue,
+  type MultiAgentEventRow,
   type MultiAgentLifecycle,
   type MultiAgentSessionRow,
 } from '../repo/multi_agent.js';
@@ -109,6 +111,38 @@ export function resolveInitialHopsCount(
 }
 
 /**
+ * Write the seed the router was just given back onto the session row, when the
+ * row had none.
+ *
+ * `Cebab-6fax.37`, and it is `Cebab-v85`'s own goal — ONE answer to "how many
+ * hops has this run taken" — finished for the rows that predate it. A pre-v85
+ * row has `hops_used = NULL`; `resolveInitialHopsCount` falls back to the
+ * event-row count and hands the router that, while `currentHopsUsed` (the wire
+ * value the client renders) reads the column and reports 0. Measured
+ * 2026-09-08 on a session left awaiting Continue since 2026-08-21: the UI said
+ * `0 / 30` while the brake would have refused the very first hop.
+ *
+ * Persisting the resolved seed collapses the two back into one. It is written
+ * only when the column was NULL: a row that already carries a counter is the
+ * authoritative answer and must not be overwritten with a derived one.
+ *
+ * Best-effort — a failure here costs the pre-v85 discrepancy this fixes, which
+ * is not worth failing a reconstruction over.
+ */
+function persistResolvedHopSeed(
+  sessionId: string,
+  persisted: number | null | undefined,
+  resolved: number,
+): void {
+  if (typeof persisted === 'number' && Number.isFinite(persisted)) return;
+  try {
+    recordSessionHops(sessionId, resolved);
+  } catch (err) {
+    console.warn(`[reconstruct] could not persist the hop seed for ${sessionId}`, err);
+  }
+}
+
+/**
  * Persisted, operator-facing notice prepended to the replayed scrollback
  * when a session is recovered. Spells out the conservative contract +
  * the one real hazard (an interrupted turn's side effects are not undone).
@@ -121,6 +155,32 @@ export const RECOVERY_BANNER = [
   'last completed step — any file writes or commands from that interrupted',
   'step are NOT rolled back. Review the transcript above before continuing.',
 ].join('\n');
+
+/**
+ * Is the session's last event already an unanswered recovery banner?
+ *
+ * `Cebab-6fax.37`. `reconstruct` appends `RECOVERY_BANNER` on EVERY rebuild,
+ * and a rebuild happens on every server start for every row still `running`.
+ * Nothing continues a session nobody comes back to, so the banners accumulate
+ * without bound: measured 2026-09-08 on a QA session left awaiting Continue
+ * since 2026-08-21 — 12 identical banners among 30 event rows, one per
+ * restart, and the scrollback opens on a stack of them.
+ *
+ * Worse than cosmetic, because the rows are events: `resolveInitialHopsCount`
+ * falls back to `allEvents.length` for a pre-`v85` row with no persisted
+ * counter, so each restart also inflated the hop seed the budget brake then
+ * enforced on.
+ *
+ * "Unanswered" is the whole condition — the banner is re-appended the moment
+ * anything else has happened since, so a session that WAS continued and then
+ * restarted again gets a fresh notice where it belongs. Same self-limiting
+ * shape as the stranded-run note in `quiescence.ts`: no flag, no state, the
+ * tail answers the question.
+ */
+export function tailIsRecoveryBanner(events: readonly MultiAgentEventRow[]): boolean {
+  const last = events[events.length - 1];
+  return last !== undefined && last.source === CEBAB_SOURCE && last.text === RECOVERY_BANNER;
+}
 
 /** Why a row cannot be reconstructed. All reasons fall back to `crashed`. */
 export type NotReconstructable =
@@ -290,6 +350,7 @@ export function reconstructOrchestratorSession(
   // PERSISTED counter, not the event-row count — see `resolveInitialHopsCount`
   // for why those two differ and why the fallback is the larger of them.
   const initialHopsCount = resolveInitialHopsCount(row.hops_used, allEvents.length);
+  persistResolvedHopSeed(row.id, row.hops_used, initialHopsCount);
 
   const participantAgentNames = [ORCHESTRATOR_AGENT_NAME, ...workers.map((w) => w.agentName)];
   try {
@@ -457,11 +518,17 @@ export function reconstructOrchestratorSession(
   }
 
   // Persist the banner so it replays in scrollback and survives further
-  // reconnects (same persistence path as every other bus event).
-  try {
-    appendMultiAgentEvent(row.id, CEBAB_SOURCE, USER_RECIPIENT, 'intro', RECOVERY_BANNER);
-  } catch (err) {
-    console.error(`[reconstruct] banner append failed for ${row.id}`, err);
+  // reconnects (same persistence path as every other bus event) — but NOT
+  // when the tail is already an unanswered one. See `tailIsRecoveryBanner`
+  // (`Cebab-6fax.37`): a session nobody continues is rebuilt on every server
+  // start, and the banners were accumulating one per restart, inflating the
+  // hop seed along with the scrollback.
+  if (!tailIsRecoveryBanner(allEvents)) {
+    try {
+      appendMultiAgentEvent(row.id, CEBAB_SOURCE, USER_RECIPIENT, 'intro', RECOVERY_BANNER);
+    } catch (err) {
+      console.error(`[reconstruct] banner append failed for ${row.id}`, err);
+    }
   }
 
   // Cluster A Phase 6 (D2): typed `session_reconstructed` ServerMsg + a
@@ -584,6 +651,7 @@ export function reconstructChainSession(
   // re-open the gate to 30 more. `Cebab-v85`: the seed is the PERSISTED
   // counter, not the event-row count — see `resolveInitialHopsCount`.
   const initialHopsCount = resolveInitialHopsCount(row.hops_used, allEvents.length);
+  persistResolvedHopSeed(row.id, row.hops_used, initialHopsCount);
 
   try {
     prepareIterationDir(iterationId, [...participantNameSet], paths);
@@ -628,11 +696,17 @@ export function reconstructChainSession(
   }
 
   // Persist the banner so it replays in scrollback and survives further
-  // reconnects (same persistence path as every other bus event).
-  try {
-    appendMultiAgentEvent(row.id, CEBAB_SOURCE, USER_RECIPIENT, 'intro', RECOVERY_BANNER);
-  } catch (err) {
-    console.error(`[reconstruct] banner append failed for ${row.id}`, err);
+  // reconnects (same persistence path as every other bus event) — but NOT
+  // when the tail is already an unanswered one. See `tailIsRecoveryBanner`
+  // (`Cebab-6fax.37`): a session nobody continues is rebuilt on every server
+  // start, and the banners were accumulating one per restart, inflating the
+  // hop seed along with the scrollback.
+  if (!tailIsRecoveryBanner(allEvents)) {
+    try {
+      appendMultiAgentEvent(row.id, CEBAB_SOURCE, USER_RECIPIENT, 'intro', RECOVERY_BANNER);
+    } catch (err) {
+      console.error(`[reconstruct] banner append failed for ${row.id}`, err);
+    }
   }
 
   // Typed `session_reconstructed` ServerMsg + a success toast — identical to

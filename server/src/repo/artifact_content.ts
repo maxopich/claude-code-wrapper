@@ -66,6 +66,21 @@ export type ArtifactContentResult = {
 };
 
 /**
+ * The opening and closing delimiters of an ARMOURED secret — one whose body
+ * sits between two markers and matches no inline pattern of its own.
+ *
+ * Kept deliberately narrow and delimiter-shaped rather than trying to
+ * recognise base64: a broad "looks like a key blob" heuristic would mask
+ * minified JS, lockfile integrity hashes and every data URI in the tree, and a
+ * preview that blanks ordinary files gets turned off. The label is matched
+ * loosely (`PRIVATE KEY`, `PGP PRIVATE KEY BLOCK`, `OPENSSH PRIVATE KEY`) and
+ * the END line is matched on the envelope alone, so a mismatched pair still
+ * terminates the block rather than running to EOF.
+ */
+const ARMOURED_BEGIN = /-----BEGIN [A-Z0-9 ]*PRIVATE KEY( BLOCK)?-----/;
+const ARMOURED_END = /-----END [A-Z0-9 ]*-----/;
+
+/**
  * Redact a file body using the same policy the per-session log view applies.
  *
  * Two tiers, in order:
@@ -77,7 +92,18 @@ export type ArtifactContentResult = {
  *      site probed it instead: redact a sentinel and see whether the sibling
  *      came back masked. `Cebab-ws0.11` exported it for a second caller, which
  *      makes the probe unnecessary here too.
- *   2. **Per-line** — otherwise mask only the individual lines that carry an
+ *   2. **Armoured block** — a secret with a BEGIN/END envelope spans lines, so
+ *      a per-line pass structurally cannot see it: the delimiters match a
+ *      pattern and the base64 body between them does not. Measured
+ *      2026-09-08 (`Cebab-6fax.31`): a PEM private key had its BEGIN and END
+ *      lines masked and its BODY — which IS the key — shipped verbatim, while
+ *      the header claimed parity with the log view. This is the same shape as
+ *      `Cebab-ygu.47`, where per-line redaction of the session log could not
+ *      see a secret chopped across two stream deltas; that fix changed the
+ *      CORPUS rather than the patterns, and this one changes the UNIT — from a
+ *      line to the block. Whole blocks are masked, END-to-EOF when the END is
+ *      missing (a truncated file must not leak the tail of a key).
+ *   3. **Per-line** — otherwise mask only the individual lines that carry an
  *      obvious inline credential (AWS key, `sk-…`, JWT, bearer / authorization
  *      header — `redactSensitive`'s value patterns). Masking line-by-line keeps
  *      an otherwise-readable file readable instead of blanking the whole body
@@ -97,11 +123,28 @@ export function redactArtifactContent(
     }
   }
 
-  // Tier 2 — per-line inline-secret mask.
+  // Tier 2 — armoured multi-line blocks, masked as whole ranges.
   const lines = content.split('\n');
-  const fields: string[] = [];
-  let anyMasked = false;
+  const blockMasked = new Set<number>();
+  const blockFields: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    if (!ARMOURED_BEGIN.test(lines[i]!)) continue;
+    let end = i;
+    while (end < lines.length && !ARMOURED_END.test(lines[end]!)) end++;
+    // No END: mask to EOF. A truncated or malformed file is exactly where the
+    // body is still readable, so stopping at the last line is the safe
+    // direction — the alternative leaks the rest of the key.
+    if (end >= lines.length) end = lines.length - 1;
+    for (let j = i; j <= end; j++) blockMasked.add(j);
+    if (blockFields.length < MAX_REDACTED_FIELDS) blockFields.push(`block:${i + 1}-${end + 1}`);
+    i = end;
+  }
+
+  // Tier 3 — per-line inline-secret mask.
+  const fields: string[] = [...blockFields];
+  let anyMasked = blockMasked.size > 0;
   const out = lines.map((line, i) => {
+    if (blockMasked.has(i)) return REDACTED_TOKEN;
     const { redacted } = redactSensitive(line);
     if (redacted !== line) {
       anyMasked = true;
