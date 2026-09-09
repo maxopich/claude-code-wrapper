@@ -8,6 +8,7 @@ import { closeDb, getDb } from '../db.js';
 import { countUnackedBySession } from '../notifications/inbox.js';
 import { upsertProject } from './projects.js';
 import {
+  addAgentCost,
   addParticipant,
   appendMultiAgentEvent,
   appendMultiAgentMutation,
@@ -26,6 +27,8 @@ import {
   getMultiAgentSession,
   getPendingRetry,
   listPendingRetries,
+  listAgentCheckpoints,
+  listAgentSessions,
   listMultiAgentEvents,
   listMultiAgentEventsForAgent,
   listMultiAgentMutations,
@@ -42,6 +45,7 @@ import {
   setPendingRetry,
   setProjectBusInstalled,
   unarchiveMultiAgentSession,
+  upsertAgentSession,
 } from './multi_agent.js';
 
 // Isolation scaffolding: each test gets its own ~/.cebab dir so DB writes
@@ -1259,5 +1263,61 @@ describe('[copy] the Clear deletes exactly what the operator is told it deletes'
 
   test('controllability_forensics is not deleted at all', () => {
     expect(clearBody()).not.toContain('DELETE FROM controllability_forensics');
+  });
+});
+
+describe('listAgentCheckpoints excludes cost-only rows (Cebab-6fax.41)', () => {
+  // `addAgentCost` and `upsertAgentSession` write the same table for different
+  // reasons. The cost write comes FIRST on every agent's first hop — the
+  // runner bills above the session-id branch deliberately, so a hop that
+  // returned no session id is still charged — and it INSERTs a row whose
+  // `cli_session_id` is the empty string. That row is a cost record, never a
+  // resume target, and three readers used to treat it as one.
+  test('a billed agent with no checkpoint appears in one view and not the other', () => {
+    createMultiAgentSession('s1', 'orchestrator', 'i');
+    addAgentCost('s1', 'coder', 0.5);
+
+    expect(listAgentSessions('s1').map((r) => r.agent_name)).toEqual(['coder']);
+    expect(listAgentSessions('s1')[0]!.cost_usd).toBeCloseTo(0.5);
+    expect(listAgentCheckpoints('s1')).toEqual([]);
+  });
+
+  test('the same agent appears in both once it checkpoints', () => {
+    // The other direction — a filter that returned nothing would pass the
+    // case above and be useless.
+    createMultiAgentSession('s1', 'orchestrator', 'i');
+    addAgentCost('s1', 'coder', 0.5);
+    upsertAgentSession('s1', 'coder', 'cli-1');
+
+    expect(listAgentCheckpoints('s1').map((r) => r.cli_session_id)).toEqual(['cli-1']);
+    // And the cost survived the upsert — the two writes share a row.
+    expect(listAgentCheckpoints('s1')[0]!.cost_usd).toBeCloseTo(0.5);
+  });
+
+  test('computeRecoveryContext no longer reads a cost write as a checkpoint', () => {
+    // The consequence that is easiest to miss: `updated_at` is stamped by the
+    // cost write too, so a placeholder row made an agent look freshly
+    // checkpointed and dropped it out of the interrupted list — exactly the
+    // agent whose work was cut short.
+    createMultiAgentSession('s1', 'orchestrator', 'i');
+    getDb()
+      .prepare(
+        `INSERT INTO multi_agent_events (session_id, ts, source, destination, kind, text)
+         VALUES ('s1', 100, 'coder', 'orchestrator', 'reply', 'partial')`,
+      )
+      .run();
+    // Cost recorded AFTER the agent's last event, with no checkpoint ever.
+    getDb()
+      .prepare(
+        `INSERT INTO multi_agent_agent_sessions
+           (session_id, agent_name, cli_session_id, updated_at, cost_usd)
+         VALUES ('s1', 'coder', '', 200, 0.5)`,
+      )
+      .run();
+
+    const ctx = computeRecoveryContext('s1');
+    expect(ctx).not.toBeNull();
+    expect(ctx!.interruptedAgents.map((a) => a.agentName)).toEqual(['coder']);
+    expect(ctx!.interruptedAgents[0]!.lastCheckpointTs).toBeNull();
   });
 });

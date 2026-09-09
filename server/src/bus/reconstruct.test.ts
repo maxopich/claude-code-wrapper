@@ -18,6 +18,7 @@ import {
 import { attemptResumeMultiAgent } from './resume.js';
 import { getLiveSession, hasLiveSession, unregisterLiveSession } from './session_registry.js';
 import {
+  addAgentCost,
   addParticipant,
   appendMultiAgentEvent,
   createMultiAgentSession,
@@ -280,6 +281,40 @@ describe('checkReconstructable guard matrix (every failure → caller marks cras
     // NOTE: no upsertAgentSession — this is the migration cutover boundary.
     const row = getMultiAgentSession(SID)!;
     expect(checkReconstructable(row)).toEqual({ ok: false, reason: 'no-agent-sessions' });
+  });
+
+  test('a cost-only row is not a checkpoint, so the guard still refuses', () => {
+    // `Cebab-6fax.41`. `addAgentCost` shares `multi_agent_agent_sessions` and
+    // INSERTs `cli_session_id = ''` when a hop's cost lands before any
+    // checkpoint — which is the ordering on every agent's first hop, because
+    // `runOneAttempt` bills above the session-id branch on purpose. The guard
+    // counted rows, so this row said "recoverable" while carrying nothing to
+    // resume from, and the seed would have handed AgentRunner an empty
+    // `--resume` id.
+    const workspace = path.join(tmpRoot, 'workspace');
+    const sessionFolder = path.join(workspace, `.cebab-session-${SID}`);
+    fs.mkdirSync(sessionFolder, { recursive: true });
+    const coder = upsertProject('Coder', path.join(workspace, 'coder'));
+    setProjectBusInstalled(coder.id, true, 'coder');
+    createMultiAgentSession(SID, 'orchestrator', 'iter-1', sessionFolder, 'persistent');
+    addParticipant(SID, coder.id, 'worker', null);
+    addAgentCost(SID, 'coder', 0.42);
+
+    const row = getMultiAgentSession(SID)!;
+    expect(checkReconstructable(row)).toEqual({ ok: false, reason: 'no-agent-sessions' });
+    expect(reconstructOrchestratorSession(row, cbs())).toBe(false);
+  });
+
+  test('and a real checkpoint beside a cost-only row still reconstructs', () => {
+    // The other direction: the filter must not refuse a session that has a
+    // genuine checkpoint, or every run with a billed-but-uncheckpointed agent
+    // would become unrecoverable.
+    seedReconstructable();
+    addAgentCost(SID, 'reviewer', 0.17); // billed, never checkpointed
+    const row = getMultiAgentSession(SID)!;
+    expect(checkReconstructable(row)).toEqual({ ok: true });
+    expect(reconstructOrchestratorSession(row, cbs())).toBe(true);
+    expect(hasLiveSession(SID)).toBe(true);
   });
 
   test('all participant projects deleted', () => {

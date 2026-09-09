@@ -97,12 +97,12 @@ function breakRun(run: string): string {
 /**
  * Break Cebab's structural delimiters inside untrusted text.
  *
- * Covers the fence's tag stem (case-insensitively, so `</BUS_MESSAGE_x>` is
- * caught too) and both project-rules delimiters. The three targets are
- * independent — `<project_claude_md>` is not a substring of
- * `</project_claude_md>`, since the latter's second character is `/` — so the
- * order of the passes does not matter and no pass can double-break another's
- * output.
+ * Covers the fence's tag stem and both project-rules delimiters, all three
+ * case-INSENSITIVELY, so `</BUS_MESSAGE_x>` and `<PROJECT_CLAUDE_MD>` are
+ * caught alike. The three targets are independent — `<project_claude_md>` is
+ * not a substring of `</project_claude_md>`, since the latter's second
+ * character is `/` — so the order of the passes does not matter and no pass
+ * can double-break another's output.
  *
  * Exported for the tests and for `readProjectClaudeMd`; relay callers want
  * `fenceRelayedMessage`.
@@ -111,12 +111,31 @@ export function defangBusDelimiters(text: string): string {
   // Constructed per call rather than hoisted: a module-level `/g` regex
   // carries `lastIndex` state, and while `String.replace` resets it, a shared
   // mutable matcher is not worth the reasoning.
+  //
+  // The case-insensitivity is uniform, and that symmetry is the fix. The stem
+  // always folded case; the two project-rules delimiters were a `split`/`join`
+  // on the exact literal, so `<PROJECT_CLAUDE_MD>` walked through undefanged
+  // while `<BUS_MESSAGE_…>` was broken — and it is the project-rules pair that
+  // frames the block the reader has been told to treat as authoritative, i.e.
+  // the one worth forging. A model reading the delivered prompt does not
+  // case-fold selectively; a fence that holds in one case and not the other is
+  // a fence with a way in.
+  //
+  // `breakRun` is handed the MATCHED text, so the original casing survives the
+  // break. The operator's copy is untouched either way: the persisted event,
+  // the archived `prompt.md` and the web chat all carry the original bytes.
+  //
+  // Written out rather than looped over the three constants, for two reasons
+  // that point the same way. `security/detect-non-literal-regexp` accepts a
+  // `const` identifier whose initializer is a string literal and rejects a loop
+  // variable, so the unrolled form is the one that needs no exemption. And
+  // none of the three delimiters may contain a regex metacharacter, or these
+  // stop being exact matchers — a property `message_fence.test.ts` asserts
+  // directly, which is a louder guard than an escape helper that would absorb
+  // the change silently.
   let out = text.replace(new RegExp(BUS_MESSAGE_TAG_STEM, 'gi'), breakRun);
-  for (const d of [PROJECT_RULES_OPEN, PROJECT_RULES_CLOSE]) {
-    // Split/join on the literal — no escaping question, and exact by
-    // construction.
-    out = out.split(d).join(breakRun(d));
-  }
+  out = out.replace(new RegExp(PROJECT_RULES_OPEN, 'gi'), breakRun);
+  out = out.replace(new RegExp(PROJECT_RULES_CLOSE, 'gi'), breakRun);
   return out;
 }
 

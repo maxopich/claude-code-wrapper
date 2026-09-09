@@ -52,27 +52,6 @@ export function busRoot(): string {
   return path.join(config.dataDir, 'bus');
 }
 
-/**
- * Relative path of the per-project bus protocol doc, used as-is in the
- * `@import` line in each project's CLAUDE.md. Project-relative (not
- * absolute) so claude-code's startup external-import trust modal never
- * triggers — see the file header for the why.
- */
-export const PROJECT_COMM_MD_REL = '.cebab/comm.md';
-
-/** Per-project `.cebab/` dir — holds the bus protocol doc and any future
- *  per-project bus state. Hidden dot-prefixed so it doesn't clutter the
- *  project root in Finder. */
-export function projectCebabDir(projectPath: string): string {
-  return path.join(projectPath, '.cebab');
-}
-
-/** Per-project bus protocol doc. The `@import` line in CLAUDE.md points
- *  here via the relative `PROJECT_COMM_MD_REL` constant. */
-export function projectCommMdPath(projectPath: string): string {
-  return path.join(projectCebabDir(projectPath), 'comm.md');
-}
-
 export function busIterationsDir(): string {
   return path.join(busRoot(), 'iterations');
 }
@@ -104,8 +83,12 @@ export type SessionPaths = {
   /** Absolute path to the session folder. Also stored on the DB row's
    *  `session_folder` column so resume can rebuild this object. */
   folder: string;
-  /** `<folder>/orchestrator/` — where the orchestrator's CLAUDE.md +
-   *  `.cebab/comm.md` live for THIS session. */
+  /** `<folder>/orchestrator/` — the orchestrator's `cwd`, and nothing else.
+   *  Cebab writes no file into it: the orchestrator runs
+   *  `settingSources: ['user']`, so a workspace `CLAUDE.md` / `comm.md` /
+   *  `settings.json` would never load, and the generated pair that used to
+   *  live here was removed as dead. Its whole protocol is the per-turn
+   *  `renderRosterPrompt`. */
   orchestratorWorkspace: string;
   /** `<folder>/iterations/<NNN>/[<agent>]` — iteration artifact dir
    *  (chain hops, orchestrator transcripts, final.md). */

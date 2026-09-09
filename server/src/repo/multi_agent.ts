@@ -1600,11 +1600,22 @@ export function upsertAgentSession(
  *
  * Both writes happen in one transaction: the session total is by definition
  * the sum of the per-agent rows, and a crash between the two would leave a
- * number that disagrees with its own breakdown. The per-agent INSERT carries a
- * placeholder `cli_session_id` only for the case where cost arrives before the
- * checkpoint has ever been written for this agent; the normal ordering in
- * `runOneAttempt` writes the session id first, so the UPDATE branch is what
- * runs in practice and the placeholder never survives.
+ * number that disagrees with its own breakdown.
+ *
+ * The per-agent INSERT carries a placeholder `cli_session_id`, and this comment
+ * used to call that a corner case — "the normal ordering in `runOneAttempt`
+ * writes the session id first, so the UPDATE branch is what runs in practice".
+ * That is backwards (`Cebab-6fax.41`). `runOneAttempt` bills the hop
+ * DELIBERATELY above the session-id branch, with its own comment saying why:
+ * "a result without a session id still cost money". So on every agent's FIRST
+ * hop this INSERT is what runs, and the placeholder is normally overwritten
+ * microseconds later by `upsertAgentSession` — but only when the result
+ * carried a session id, which is precisely the case the ordering exists to
+ * allow for.
+ *
+ * A placeholder left standing is a row that is not a checkpoint, so readers
+ * that want checkpoints must use `listAgentCheckpoints` rather than
+ * `listAgentSessions`. See its header for what each wrong answer costs.
  *
  * A non-finite or negative delta is dropped rather than persisted — cost is
  * monotonic, and an agent-influenced NaN reaching a SUM would poison every
@@ -1629,14 +1640,42 @@ export function addAgentCost(sessionId: string, agentName: string, costUsd: numb
   tx(sessionId, agentName, costUsd);
 }
 
-/** Every persisted (agent_name → cli_session_id) for a session, used to
- *  seed `AgentRunner.sessions` on reconstruction. */
+/** Every per-agent row for a session. This is the COST view: it includes rows
+ *  `addAgentCost` created that carry no checkpoint. Readers that want a
+ *  checkpoint want `listAgentCheckpoints`. */
 export function listAgentSessions(sessionId: string): MultiAgentAgentSessionRow[] {
   return getDb()
     .prepare<[string], MultiAgentAgentSessionRow>(
       'SELECT * FROM multi_agent_agent_sessions WHERE session_id = ?',
     )
     .all(sessionId);
+}
+
+/**
+ * Every agent row that actually carries a `--resume` checkpoint — the set an
+ * R-B rebuild can rewind to, which is NOT the same set as
+ * `listAgentSessions`.
+ *
+ * `addAgentCost` shares this table and INSERTs `cli_session_id = ''` when an
+ * agent's cost lands before any checkpoint, which (see its header) is the
+ * ordering on every agent's first hop. The placeholder is normally overwritten
+ * at once; when the result carried no session id it survives, and then every
+ * reader that treats a row as a checkpoint gets a wrong answer from it:
+ *
+ *  - `checkReconstructable` counts rows, so it reports a session recoverable
+ *    on the strength of a row with nothing to resume from;
+ *  - both reconstruct seeds hand `AgentRunner` an empty `cliSessionId`, i.e. a
+ *    resume target that does not exist;
+ *  - `computeRecoveryContext` reads `updated_at` as the moment that agent last
+ *    checkpointed, so a cost write masquerades as a checkpoint and the agent
+ *    drops out of the "interrupted" list the recovery disclosure shows.
+ *
+ * One filter here rather than three at the readers: the readers each phrase the
+ * question differently (a count, a map, a max), and only this module knows the
+ * table has two kinds of row in it.
+ */
+export function listAgentCheckpoints(sessionId: string): MultiAgentAgentSessionRow[] {
+  return listAgentSessions(sessionId).filter((r) => r.cli_session_id !== '');
 }
 
 /**
@@ -1695,7 +1734,7 @@ export function computeRecoveryContext(sessionId: string): RecoveryContextView |
     )
     .all(sessionId);
 
-  const checkpoints = listAgentSessions(sessionId);
+  const checkpoints = listAgentCheckpoints(sessionId);
   const checkpointBy = new Map<string, number>(
     checkpoints.map((c) => [c.agent_name, c.updated_at]),
   );
