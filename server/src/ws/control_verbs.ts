@@ -135,9 +135,19 @@ export type ExecuteMuteInput = {
       }
     | undefined;
   /**
-   * Mode of the live session for `chain_mute_unsupported` detection. Null
-   * means there is no live session at all (unknown id, recently torn
-   * down) — handler short-circuits with `participant_not_found`.
+   * Mode of the LIVE session, for `chain_mute_unsupported` detection. Null
+   * means there is no live session in the in-process registry — an unknown id,
+   * or one recently torn down.
+   *
+   * NULL DOES NOT SHORT-CIRCUIT (`Cebab-6fax.8`). This said the handler
+   * answers `participant_not_found` for a null mode; it does not. The
+   * existence guard below reads the DB ROW (`getMultiAgentSession`), and an
+   * ENDED session still has one — so a control verb aimed at a completed or
+   * stopped session passes the guard, finds its participants, and proceeds.
+   * What null actually does is skip the chain check, so a chain session that
+   * has ended accepts a mute the same verb would refuse while it was live.
+   * Recorded rather than changed: refusing verbs on an ended session is a
+   * behaviour decision, not a comment fix.
    */
   sessionMode: 'orchestrator' | 'chain' | null;
   /** Test seams. */

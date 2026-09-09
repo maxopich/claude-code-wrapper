@@ -120,7 +120,7 @@ function assertNotRealDataDir(): void {
         `which would migrate and mutate your real database.\n` +
         `Fix: use withTempDataDir() from server/src/test_support/temp_data_dir.ts, or set ` +
         `config.dataDir to a temp directory in beforeEach.\n` +
-        `If you are seeing this on EVERY test, test/setup-data-dir.mjs is no longer wired ` +
+        `If you are seeing this on EVERY test, ./vitest.setup.mjs is no longer wired ` +
         `into vitest.config.ts's setupFiles.`,
     );
   }

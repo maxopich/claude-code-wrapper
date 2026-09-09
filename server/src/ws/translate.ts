@@ -344,8 +344,15 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
         errors: r.errors,
         // Cluster F Phase A1b (UI-A1): forward the SDK's num_turns so the
         // client's turn-counter chip + MaxTurnsResultCard have ground truth.
-        // The synthetic-command short-circuit above already returns null
-        // when num_turns === 0, so we never ship a misleading "0 turns" here.
+        //
+        // `Cebab-6fax.8`: this used to claim the short-circuit above "already
+        // returns null when num_turns === 0, so we never ship a misleading
+        // '0 turns' here". Register S15 made that false in the same edit that
+        // fixed a worse bug: the gate is now `subtype === 'success' &&
+        // num_turns === 0`, deliberately, because an ERROR at zero turns is
+        // the one thing that must not be dropped. So a `numTurns: 0` DOES
+        // reach the client — on error subtypes, which is exactly when it is
+        // the truth rather than a misleading zero.
         ...(typeof r.num_turns === 'number' && Number.isFinite(r.num_turns)
           ? { numTurns: r.num_turns }
           : {}),

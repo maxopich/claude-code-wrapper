@@ -213,8 +213,12 @@ export function notifyFromServerMsg(msg: ServerMsg, ctx: NotifyContext): void {
     case 'wrapper_error': {
       // UI-14: a wrapper_error not pinned to a chat session pushes an error
       // toast. Session-scoped wrapper_errors are already rendered as a
-      // session-status banner by store.ts:1290+ — we'd double-show if we
-      // toasted those too. Phase 3 introduces a `kind` discriminant on the
+      // session-status banner by store.ts's own `wrapper_error` branch — we'd
+      // double-show if we
+      // toasted those too. (`Cebab-6fax.8`: the citation used to be
+      // "store.ts:1290+", which by 2026-09 pointed at unrelated code —
+      // `project_register_line_numbers_stale`: locate by content, not by line
+      // number.) Phase 3 introduces a `kind` discriminant on the
       // wire and the dispatch becomes more precise; for Phase 2 we only
       // intervene when there's no sessionId.
       const m = msg as { sessionId?: string; message?: string };

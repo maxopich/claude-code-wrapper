@@ -580,9 +580,18 @@ export function recordTrustDecision(input: TrustDecisionInput): McpTrustRow {
  * binarySha) tuple. Implements the spec §4.4 decision table.
  *
  * `hash_changed` fires only when a `trusted_pinned_hash` row exists for
- * the same name+origin but with a DIFFERENT sha. A `trusted` (unpinned)
- * row doesn't care about sha changes — that's the whole point of the
- * unpinned variant.
+ * the same name+origin but with a DIFFERENT sha.
+ *
+ * IT DOES NOT FOLLOW THAT AN UNPINNED ROW IGNORES SHA CHANGES
+ * (`Cebab-6fax.8`). This header used to say so — "that's the whole point of
+ * the unpinned variant" — and the code has never behaved that way: the exact
+ * lookup below keys on `binary_sha = ?`, so a `trusted` row recorded at one
+ * sha simply does not MATCH a different candidate sha. The lookup misses, the
+ * later probes decide, and the operator is prompted again (as
+ * `identity_changed` or `first_seen`) rather than waved through. What the
+ * unpinned variant actually buys is the ABSENCE of a `hash_changed` verdict —
+ * a different prompt, not no prompt. Stated because the wrong reading is the
+ * dangerous one: it invites someone to "fix" the miss by widening the query.
  *
  * No `hash_changed` if the candidate sha is null (unresolvable target).
  * In that case the spec's contract says we fall back to `first_seen`

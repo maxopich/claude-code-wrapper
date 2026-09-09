@@ -64,7 +64,7 @@ Cebab uses your existing Claude subscription credentials, and those expire. When
 
 Cebab has a **mock mode** that replays recorded fixtures instead of spawning the real `claude` CLI — useful for UI work with zero quota use, but it means you are **not talking to a real model**. If responses look canned or identical every time, check whether mock mode is on.
 
-- Mock mode is controlled by the `MOCK` setting. `MOCK=1` before `npm run dev:server` turns it on for POSIX shells (macOS, Linux, Git Bash).
-- **On PowerShell that inline form does nothing** — the variable isn't set. Put `MOCK=1` in your `.env` instead (the server reads it on every start). To run _real_ claude, make sure `MOCK` is not set to `1` anywhere, including `.env`.
+- Mock mode is controlled by the `CEBAB_MOCK` setting. `CEBAB_MOCK=1` before `npm run dev:server` turns it on for POSIX shells (macOS, Linux, Git Bash). The bare `MOCK` is a deprecated alias that still works and prints a warning naming its replacement.
+- **On PowerShell that inline form does nothing** — the variable isn't set. Put `CEBAB_MOCK=1` in your `.env` instead (the server reads it on every start). To run _real_ claude, make sure neither `CEBAB_MOCK` nor `MOCK` is set to `1` anywhere, including `.env`.
 
 If you _want_ real responses and nothing streams at all, confirm `claude` is **installed and logged in** — Cebab requires it. Check with `claude auth status`; if it reports expired or logged-out credentials, follow 11-recovery-and-errors.md.

@@ -406,7 +406,7 @@ export function renderRosterPrompt(opts: {
     ``,
     `    bus_send(destination="${firstAgentSafe}", kind="intro", text="You are part of a multi-agent conversation. Other participants: ${otherAgents}. Reply only to me (orchestrator). Before we start: please send me a brief (2-3 sentence) reply describing your role, areas of expertise, and the kinds of tasks you're best at. I'll use this to route user prompts to whoever fits best.")`,
     ``,
-    `Step 2: wait for each worker's \`reply\` with their self-description before routing the first user prompt. The user's first prompt arrives as your next turn after this one — but route it only after you've collected capability replies from every participant. Use those descriptions to inform routing.`,
+    `Step 2: wait for each worker's \`reply\` with their self-description before routing the first user prompt. The user's first prompt is at the END OF THIS MESSAGE, after this briefing — everything below the blank line that follows these instructions is the user's request, not part of them. Route it only after you've collected capability replies from every participant, and use those descriptions to inform routing.`,
     ``,
     `You are a pure router — delegation only:`,
     ``,

@@ -2437,9 +2437,19 @@ export function startWsServer(server: HttpServer): WebSocketServer {
       }
       // F4: per-launch auth token. A bus worker's tool calls are all
       //     auto-approved (no human gate on Bash), so it can spoof
-      //     Origin/Host from a Node WS client trivially, and the only real
-      //     defense against a worker→WS hijack is requiring a secret it
-      //     can't read (mode 0600 on ~/.cebab/auth-token).
+      //     Origin/Host from a Node WS client trivially.
+      //
+      //     WHAT THIS TOKEN IS AND IS NOT (`Cebab-6fax.8`). This comment used
+      //     to call it "a secret [the worker] can't read", which is the
+      //     inverse of the threat model `auth.ts` and SECURITY.md state: mode
+      //     0600 keeps OTHER LOCAL USERS out, and a bus worker runs as the
+      //     operator's own uid, so it can read `~/.cebab/auth-token` off disk
+      //     whenever it likes. SECURITY.md lists the same-uid agent→operator
+      //     escalation as an accepted out-of-scope limitation for exactly this
+      //     reason. What the token actually defends is the browser boundary:
+      //     other local users, and cross-site WebSocket hijacking from a page
+      //     the operator visits. Against the agents Cebab itself runs it is
+      //     detection and hygiene, never confinement.
       const u = new URL(req.url ?? '/', 'http://x');
       if (!verifyToken(u.searchParams.get('token'))) {
         console.warn('[ws] reject: bad token');
@@ -2862,7 +2872,13 @@ export function describeChainFailure(reason: string, brokenAt?: string): string 
     case 'tip_mirror_missing':
       return 'The out-of-database record of the audit chain tip is gone, so deletions from the log can no longer be detected. It was present before.';
     case 'anchor_reseated':
-      return 'The safety audit log’s chain-reset anchor was moved to sit above existing rows without a migration adding it. That excludes those rows from verification; Cebab recorded the marker count outside the database and it did not grow.';
+      // `Cebab-6fax.8`: this used to say Cebab "recorded the marker count
+      // outside the database and it did not grow" — the discriminator #560
+      // deliberately REJECTED. A count can be padded with a junk row; the
+      // mirror commits the anchor's ID instead, so the signal is that THIS
+      // anchor was seen before at a different rowid. An operator told to
+      // reason about a tally would be checking something the fix does not use.
+      return 'The safety audit log’s chain-reset anchor was moved to sit above existing rows without a migration adding it. That excludes those rows from verification. Cebab knows because it records each anchor’s identity outside the database, and this one was committed earlier at a different position — an existing anchor was relocated, not a new one inserted.';
     default:
       return `Row ${brokenAt} no longer matches its recorded hash.`;
   }
