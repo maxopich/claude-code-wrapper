@@ -2465,13 +2465,26 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // Transition the Multi-Agent tab into "running" mode. Clear any prior
       // run that the operator hadn't dismissed yet — a new Start is a
       // deliberate signal that we're moving on.
+      //
+      // The tab switch is deliberately NOT unconditional. This message is not
+      // only a start: the server re-emits it verbatim on every R-A re-attach,
+      // so a WS reconnect (a laptop waking, a blip) used to yank an operator
+      // reading a single-agent chat over to the bus tab, with no action of
+      // theirs behind it. A re-attach of the run the client is already
+      // tracking leaves the view alone; a genuinely new session id still
+      // switches, which is the case the auto-switch exists for.
+      const reattachingCurrent = state.multiAgent.active?.sessionId === msg.sessionId;
       return {
         ...state,
         multiAgent: {
           ...state.multiAgent,
           // Auto-switch to the matching tab so the operator sees the
           // scrollback even if the start was triggered from elsewhere.
-          view: msg.mode === 'chain' ? 'chained-chat' : 'multi-agent',
+          view: reattachingCurrent
+            ? state.multiAgent.view
+            : msg.mode === 'chain'
+              ? 'chained-chat'
+              : 'multi-agent',
           active: {
             sessionId: msg.sessionId,
             mode: msg.mode,
@@ -2611,12 +2624,19 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
     case 'multi_agent_ended': {
       const active = state.multiAgent.active;
       if (!active || active.sessionId !== msg.sessionId) return state;
+      // `autoRetry` is dropped rather than nulled — it is an optional
+      // sub-field, so the same rest-destructure `ma_clear_auto_retry` uses.
+      // Its banner counts down to a retry that will never fire once the
+      // session has ended, which is the same defect as a lingering
+      // pendingRetry descriptor one field down.
+      const { autoRetry: _endedAutoRetry, ...withoutAutoRetry } = active;
+      void _endedAutoRetry;
       return {
         ...state,
         multiAgent: {
           ...state.multiAgent,
           active: {
-            ...active,
+            ...withoutAutoRetry,
             status: msg.reason,
             iterationId: msg.iterationId,
             activity: null,
@@ -2628,6 +2648,16 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             // Item #5: same reasoning for the pause banners; a held worker is
             // no longer releasable once the session has ended.
             pendingMutations: [],
+            // Same reasoning again, for the two banner slots this case used to
+            // leave standing. `awaitingContinue` gates `UserPromptInput` and
+            // draws the Continue banner an R-B reconstruct sets; stopping such
+            // a session left the banner and its dead button on a `stopped`
+            // row — the case is not hypothetical, it is what an operator sees
+            // after stopping a session that came back read-only. And the
+            // `recoveryContext` two lines down, already cleared here as
+            // "banner-bound", is the disclosure INSIDE that same banner, so
+            // the two had drifted apart.
+            awaitingContinue: false,
             // Interactive AskUserQuestion: a stopped/crashed session can't be
             // answered either — drop any parked question.
             pendingQuestion: null,
@@ -2658,17 +2688,39 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
     }
 
     case 'multi_agent_mutation': {
-      // Item #5: live mutation row arrived. Append to the session's list,
-      // deduped by id. Server may resend on R-A reconnect (the initial batch
-      // travels on `multi_agent_started.mutations`), so the dedupe matters.
+      // Item #5: live mutation row arrived. Keyed by id, REPLACING any row
+      // already held under that id rather than ignoring the later copy.
+      //
+      // Every mutation reaches the wire at least twice under one id, by
+      // design: `onMutationHook` emits it provisionally the moment the row is
+      // persisted (`confirmedAt: null`), and `onToolResultHook` re-emits the
+      // same id once the SDK delivers the tool result — a third time when the
+      // artifact classifier flips `promoted`. The orchestrator's own comment
+      // at that re-emit says it exists "so the wire-reducer (dedupe-by-id,
+      // replace) surfaces the confirmation"; this reducer dropped it instead,
+      // so no live row ever carried `confirmedAt` or `promoted`.
+      //
+      // That was not cosmetic. `groupArtifacts` and `WorkingFiles` both skip
+      // rows with `confirmedAt === null`, and the Artifacts disclosure is
+      // gated on the group count, so both surfaces stayed empty for the whole
+      // life of a run and only filled in after a re-attach replayed the batch
+      // from the DB. Measured live 2026-09-08: 16 messages, 8 distinct ids,
+      // every rendered row provisional.
+      //
+      // Replace in place: `mutations` is ts-ascending and a confirmation must
+      // not re-sort the lane.
       const active = state.multiAgent.active;
       if (!active || active.sessionId !== msg.sessionId) return state;
-      if (active.mutations.some((m) => m.id === msg.mutation.id)) return state;
+      const at = active.mutations.findIndex((m) => m.id === msg.mutation.id);
+      const mutations =
+        at === -1
+          ? [...active.mutations, msg.mutation]
+          : active.mutations.map((m, i) => (i === at ? msg.mutation : m));
       return {
         ...state,
         multiAgent: {
           ...state.multiAgent,
-          active: { ...active, mutations: [...active.mutations, msg.mutation] },
+          active: { ...active, mutations },
         },
       };
     }
