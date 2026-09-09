@@ -16,7 +16,7 @@
 import { spawn, spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DEV_WEB_PORT, withDeclaredWebOrigins } from './dev-origins.mjs';
+import { DEV_WEB_PORT, readEnvFileOrigins, withDeclaredWebOrigins } from './dev-origins.mjs';
 import { resolveDevBins } from './dev-bins.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -48,7 +48,13 @@ const targets = [
     // one caller entitled to declare that origin to the API. `origin.ts` no
     // longer hardcodes :5173 — nothing else on the machine gets to claim it.
     // Only the server child; declaring it to Vite would mean nothing.
-    env: withDeclaredWebOrigins(process.env),
+    //
+    // The `.env` value is read and merged in HERE rather than left to the
+    // child's `--env-file-if-exists` (`Cebab-6fax.29`): an explicitly-passed
+    // variable beats the env file, measured, so setting this key at all used
+    // to SHADOW whatever the operator had declared in `.env` — the mechanism
+    // `dev-origins.mjs`'s own header tells them to use.
+    env: withDeclaredWebOrigins(process.env, readEnvFileOrigins(path.join(root, '.env'))),
   },
   { name: 'web', cwd: path.join(root, 'web'), args: [viteBin] },
 ];

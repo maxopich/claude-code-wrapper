@@ -804,6 +804,14 @@ function AppShell({
           dispatch({ type: 'ws_open' });
           ws?.send({ type: 'get_settings' });
           ws?.send({ type: 'list_projects' });
+          // Cebab-6fax.36: the CACHED model catalogue. No `refresh`, so this
+          // is a DB read and costs no process — the catalogue is captured for
+          // free by every authority probe, and until this line the only
+          // request the client ever sent carried `refresh: true`. So the
+          // picker showed "No model list captured yet" while the entries sat
+          // in `settings.model_catalogue`, and the operator had to spend a
+          // spawn to see a list already on disk. Refresh stays the spawn path.
+          ws?.send({ type: 'get_model_catalogue' });
           // UX-11: only toast "Reconnected" after the FIRST open. The first
           // open is just initial-connection — no banner needed; subsequent
           // opens follow a disconnect and are reconnect events worth

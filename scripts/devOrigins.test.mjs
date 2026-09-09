@@ -44,9 +44,10 @@
  * fails instead of reporting success (`project_gates_pass_vacuously`).
  */
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 
 // Strips `//` and block comments so this file's own explanations — and
 // origin.ts's, which names :5173 several times in prose — cannot trip a scan
@@ -55,7 +56,12 @@ import { describe, expect, test } from 'vitest';
 // (Cebab-1px); `scripts/stripCommentsConformance.test.mjs` now pins all three
 // copies to the same behaviour.
 import { stripComments } from './lib/strip_comments.mjs';
-import { DEV_WEB_ORIGINS, DEV_WEB_PORT, withDeclaredWebOrigins } from './dev-origins.mjs';
+import {
+  DEV_WEB_ORIGINS,
+  DEV_WEB_PORT,
+  readEnvFileOrigins,
+  withDeclaredWebOrigins,
+} from './dev-origins.mjs';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -152,7 +158,20 @@ describe('[security] the launcher owns the port it declares', () => {
 
   test('dev.mjs declares the origin to the API child', () => {
     expect(devScript).toMatch(/from '\.\/dev-origins\.mjs'/);
-    expect(devScript).toMatch(/env:\s*withDeclaredWebOrigins\(process\.env\)/);
+    expect(devScript).toMatch(/env:\s*withDeclaredWebOrigins\(process\.env,/);
+  });
+
+  // `Cebab-6fax.29`. The child is launched with BOTH an explicit `env` and
+  // `--env-file-if-exists=../.env`, and the explicit one wins (measured:
+  // `CEBAB_TEST_VAL=x node --env-file-if-exists=f -e ...` prints `x`). So
+  // setting this key at all shadowed whatever the operator had put in `.env`
+  // — the very mechanism `dev-origins.mjs`'s header tells them to use for the
+  // two-terminal workflow. The launcher has to read the file itself.
+  test('dev.mjs feeds the .env declarations in, rather than shadowing them', () => {
+    expect(devScript).toMatch(/readEnvFileOrigins\(/);
+    expect(devScript).toMatch(
+      /env:\s*withDeclaredWebOrigins\(\s*process\.env,\s*readEnvFileOrigins\(/,
+    );
   });
 
   test('dev.mjs declares it to exactly one child, and spawn honours the default', () => {
@@ -168,5 +187,97 @@ describe('[security] the launcher owns the port it declares', () => {
   test('both dev targets are still present', () => {
     expect(devScript).toMatch(/name:\s*'server'/);
     expect(devScript).toMatch(/name:\s*'web'/);
+  });
+});
+
+describe('[security] readEnvFileOrigins — the .env half of the declaration', () => {
+  // Behavioural, not source-scanning: this parser decides whether an
+  // operator's own allow-list survives `npm run dev`, and its failure mode is
+  // silent (an origin quietly absent, so the browser is refused and the
+  // operator suspects the origin gate itself).
+  let dir;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-devorigins-'));
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  const write = (body) => {
+    const p = path.join(dir, '.env');
+    fs.writeFileSync(p, body);
+    return p;
+  };
+
+  test('a missing file is empty, not an error', () => {
+    // `npm run dev` on a fresh clone has no `.env` at all; throwing here would
+    // break the launcher for everyone to serve the one operator who has one.
+    expect(readEnvFileOrigins(path.join(dir, 'nope.env'))).toEqual([]);
+  });
+
+  test('a file without the key is empty', () => {
+    expect(readEnvFileOrigins(write('CEBAB_MOCK=1\n'))).toEqual([]);
+  });
+
+  test('a single origin is read', () => {
+    expect(readEnvFileOrigins(write('CEBAB_ALLOWED_ORIGINS=http://127.0.0.1:8080\n'))).toEqual([
+      'http://127.0.0.1:8080',
+    ]);
+  });
+
+  test('a comma list is split and trimmed', () => {
+    expect(
+      readEnvFileOrigins(write('CEBAB_ALLOWED_ORIGINS=http://a.test:1, http://b.test:2\n')),
+    ).toEqual(['http://a.test:1', 'http://b.test:2']);
+  });
+
+  test('quotes and an `export` prefix are tolerated — operators write both', () => {
+    expect(readEnvFileOrigins(write('export CEBAB_ALLOWED_ORIGINS="http://a.test:1"\n'))).toEqual([
+      'http://a.test:1',
+    ]);
+    expect(readEnvFileOrigins(write("CEBAB_ALLOWED_ORIGINS='http://b.test:2'\n"))).toEqual([
+      'http://b.test:2',
+    ]);
+  });
+
+  test('a commented-out line is NOT read — the whole point of commenting it', () => {
+    expect(readEnvFileOrigins(write('# CEBAB_ALLOWED_ORIGINS=http://evil.test\n'))).toEqual([]);
+  });
+
+  test('a longer key that merely starts the same is not mistaken for it', () => {
+    expect(readEnvFileOrigins(write('CEBAB_ALLOWED_ORIGINS_EXTRA=http://evil.test\n'))).toEqual([]);
+  });
+
+  test('the last assignment wins, as a shell or dotenv parser would', () => {
+    expect(
+      readEnvFileOrigins(
+        write(
+          'CEBAB_ALLOWED_ORIGINS=http://first.test\nCEBAB_ALLOWED_ORIGINS=http://second.test\n',
+        ),
+      ),
+    ).toEqual(['http://second.test']);
+  });
+
+  test('the merged env keeps the .env origin AND the dev origins', () => {
+    // The end-to-end shape of the fix. Before it, `existing` was empty (the
+    // parent env has no such key) and the operator's origin never appeared.
+    const declared = readEnvFileOrigins(write('CEBAB_ALLOWED_ORIGINS=http://mine.test:9000\n'));
+    const env = withDeclaredWebOrigins({}, declared);
+    const list = env.CEBAB_ALLOWED_ORIGINS.split(',');
+    expect(list).toContain('http://mine.test:9000');
+    for (const o of DEV_WEB_ORIGINS) expect(list).toContain(o);
+  });
+
+  test('an ambient value still wins its place, and duplicates still collapse', () => {
+    const env = withDeclaredWebOrigins({ CEBAB_ALLOWED_ORIGINS: 'http://ambient.test' }, [
+      'http://ambient.test',
+      'http://file.test',
+    ]);
+    expect(env.CEBAB_ALLOWED_ORIGINS.split(',')).toEqual([
+      'http://ambient.test',
+      'http://file.test',
+      ...DEV_WEB_ORIGINS,
+    ]);
   });
 });

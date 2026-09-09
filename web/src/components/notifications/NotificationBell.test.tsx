@@ -205,3 +205,131 @@ describe('NotificationBell — click opens panel + requests fresh snapshot', () 
     expect(container.querySelector('.notif-inbox-popover')).toBeNull();
   });
 });
+
+describe('[security] a safety-class row cannot be acked without a reason (Cebab-6fax.30)', () => {
+  // THE DEFECT. `requiresTypedAckReason` in `ws/server.ts` refuses an
+  // `ack_notification` for the highest safety sub-codes unless `ackReason` is
+  // a non-empty string. Every ack path in the client called `onAck(row.id)`
+  // and the prop was typed `(id: string) => void`, so the notifications that
+  // exist BECAUSE they must not be dismissed silently were the only ones an
+  // operator could not dismiss at all — and the refusal rendered as a generic
+  // "Server error" (the dispatch catch hard-codes `process_crashed`).
+  //
+  // The prompt fires on the whole `safety` class, wider than the server's
+  // rule, because the envelope does not carry the audit KIND half of that
+  // predicate. Supplying a reason where none was required is accepted and
+  // recorded, which is the harmless direction.
+  function openInboxWith(rows: NotificationEnvelope[], onAck: (id: string, r?: string) => void) {
+    const handlerRef = { current: null as ((m: ServerMsg) => void) | null };
+    act(() => {
+      root.render(
+        <InboxProvider send={() => {}} handlerRef={handlerRef}>
+          <NotificationBell onAck={onAck} />
+        </InboxProvider>,
+      );
+    });
+    act(() => {
+      pushSnapshot(handlerRef.current, rows, rows.length);
+    });
+    act(() => {
+      container.querySelector<HTMLButtonElement>('.notif-bell')?.click();
+    });
+    act(() => {
+      pushSnapshot(handlerRef.current, rows, rows.length);
+    });
+  }
+
+  const safetyRow = makeEnvelope({
+    id: 'safety-1',
+    class: 'safety',
+    severity: 'danger',
+    title: 'Audit chain anchor re-seated',
+    reasonCode: 'anchor_reseated',
+  });
+
+  test('control: a NON-safety row still acks in one click, with no reason', () => {
+    // Anti-vacuity for the whole describe: if the prompt fired for everything,
+    // "safety rows prompt" would say nothing about the class check.
+    const onAck = vi.fn();
+    openInboxWith([makeEnvelope({ id: 'ops-1', class: 'operational' })], onAck);
+
+    const ack = container.querySelector<HTMLButtonElement>('.notif-inbox-row-ack');
+    expect(ack?.textContent).toBe('Mark read');
+    act(() => {
+      ack?.click();
+    });
+    expect(onAck).toHaveBeenCalledWith('ops-1');
+    expect(container.querySelector('.notif-inbox-row-reason')).toBeNull();
+  });
+
+  test('a safety row asks for a reason instead of acking immediately', () => {
+    const onAck = vi.fn();
+    openInboxWith([safetyRow], onAck);
+
+    act(() => {
+      container.querySelector<HTMLButtonElement>('.notif-inbox-row-ack')?.click();
+    });
+
+    // The click opened the field and sent NOTHING — the old behaviour would
+    // have fired an ack the server was about to refuse.
+    expect(onAck).not.toHaveBeenCalled();
+    expect(container.querySelector('.notif-inbox-row-reason')).not.toBeNull();
+  });
+
+  test('an empty reason cannot be submitted', () => {
+    const onAck = vi.fn();
+    openInboxWith([safetyRow], onAck);
+    act(() => {
+      container.querySelector<HTMLButtonElement>('.notif-inbox-row-ack')?.click();
+    });
+
+    const submit = container.querySelector<HTMLButtonElement>(
+      '.notif-inbox-row-reason .notif-inbox-row-ack',
+    );
+    expect(submit?.disabled).toBe(true);
+    act(() => {
+      submit?.click();
+    });
+    expect(onAck).not.toHaveBeenCalled();
+  });
+
+  test('a typed reason reaches onAck as the second argument, trimmed', () => {
+    const onAck = vi.fn();
+    openInboxWith([safetyRow], onAck);
+    act(() => {
+      container.querySelector<HTMLButtonElement>('.notif-inbox-row-ack')?.click();
+    });
+
+    const input = container.querySelector<HTMLInputElement>('.notif-inbox-row-reason-input')!;
+    act(() => {
+      // React tracks the value on the DOM node, so setting `.value` directly
+      // is ignored — go through the native setter it patches.
+      const setter = Object.getOwnPropertyDescriptor(
+        window.HTMLInputElement.prototype,
+        'value',
+      )!.set!;
+      setter.call(input, '  re-seat was mine  ');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    act(() => {
+      container
+        .querySelector<HTMLFormElement>('.notif-inbox-row-reason')
+        ?.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    });
+
+    expect(onAck).toHaveBeenCalledWith('safety-1', 're-seat was mine');
+  });
+
+  test('Cancel closes the field without acking', () => {
+    const onAck = vi.fn();
+    openInboxWith([safetyRow], onAck);
+    act(() => {
+      container.querySelector<HTMLButtonElement>('.notif-inbox-row-ack')?.click();
+    });
+    act(() => {
+      container.querySelector<HTMLButtonElement>('.notif-inbox-row-reason-cancel')?.click();
+    });
+    expect(onAck).not.toHaveBeenCalled();
+    expect(container.querySelector('.notif-inbox-row-reason')).toBeNull();
+  });
+});

@@ -34,7 +34,7 @@ export type NotificationBellProps = {
    * sticky-dismiss path; the inbox's "Mark read" button reuses it.
    * Optional in tests.
    */
-  onAck?: (id: string) => void;
+  onAck?: (id: string, ackReason?: string) => void;
 };
 
 export function NotificationBell({ onAck }: NotificationBellProps = {}) {
