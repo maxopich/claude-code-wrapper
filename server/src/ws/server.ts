@@ -30,6 +30,7 @@ import {
   isNonWorkspaceProject,
 } from '../assistant/identity.js';
 import { applyProjectStartPermissionMode } from '../project_start_mode.js';
+import { applySessionPermissionMode } from '../session_permission_mode.js';
 import { preflightManagedCopy, runManagedCopy } from '../managed_copy.js';
 import { runManagedDelete } from '../managed_delete.js';
 import { observeProjectHooks } from '../repo/hook_trust.js';
@@ -4801,11 +4802,29 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       if (sessRow) assertWorkspaceProject(sessRow.project_id);
       const f = conn.inFlight.get(msg.sessionId);
       if (!f) return;
+      // `Cebab-6fax.40`: audit BEFORE anything moves, and refuse the flip if
+      // the chain will not take the row. Ordered ahead of the runner call on
+      // purpose — a record written after the SDK has already widened the
+      // posture is a record of something that had already happened.
+      const applied = applySessionPermissionMode({
+        sessionId: msg.sessionId,
+        projectId: f.projectId,
+        from: f.permissionMode,
+        to: msg.mode,
+        send: (m) => send(conn.ws, m),
+      });
+      if (!applied.ok) {
+        send(conn.ws, {
+          type: 'wrapper_error',
+          sessionId: msg.sessionId,
+          kind: 'process_crashed',
+          message: `could not record the authority change (${applied.error}); permission mode unchanged.`,
+        });
+        return;
+      }
       try {
         await f.runner.setPermissionMode?.(msg.mode);
         f.permissionMode = msg.mode;
-        // Persist so the next turn (and replay) seed from this preference.
-        setSessionPermissionMode(msg.sessionId, msg.mode);
         send(conn.ws, {
           type: 'permission_mode_changed',
           sessionId: msg.sessionId,
@@ -6957,23 +6976,6 @@ async function runOneTurn(
         },
   );
 
-  conn.inFlight.set(sessionId, { ac, projectId: project.id, runner, permissionMode });
-  // Persist the seed so subsequent runOneTurn calls (this same session) and
-  // replay see it. This also covers brand-new sessions where the row was just
-  // INSERTed with permission_mode = NULL.
-  setSessionPermissionMode(sessionId, permissionMode);
-  send(conn.ws, {
-    type: 'session_running',
-    projectId: project.id,
-    sessionId,
-    running: true,
-  });
-  send(conn.ws, {
-    type: 'permission_mode_changed',
-    sessionId,
-    mode: permissionMode,
-  });
-
   // Cluster D Phase 4b: `held` reflects "the turn ended due to a hard
   // rate-limit and the captured prompt is still in `conn.capturedPrompts`
   // waiting for a `retry_rate_limited`". The finally block reads it to
@@ -7004,7 +7006,46 @@ async function runOneTurn(
     );
   };
 
+  conn.inFlight.set(sessionId, { ac, projectId: project.id, runner, permissionMode });
+
+  // `Cebab-6fax.40`: the try starts HERE, not below the three statements that
+  // used to sit between the registration and it.
+  //
+  // Not the await-before-try shape two sibling beads describe — there is no
+  // await in this window. The throwers are synchronous:
+  // `setSessionPermissionMode` is a better-sqlite3 UPDATE (SQLITE_BUSY,
+  // READONLY, IOERR) and the two `ws.send` calls below it. A throw there
+  // escaped to `handleClientMsg(...).catch(...)`, which logs and sends a
+  // SESSIONLESS wrapper_error — so the process survived and the leak was
+  // permanent.
+  //
+  // Permanent, and worse than a stray Map entry: `describeConcurrentSingleTurn`
+  // consults the PROCESS-WIDE registry, so the leaked `registerQuery` made
+  // this session id unstartable for the life of the server, across reconnects,
+  // while `active_runs` showed a phantom run and the client never got
+  // `session_running: false`. The CLI is already spawned by this point, so a
+  // real turn was spent unread as well.
+  //
+  // Everything the `finally` below undoes — the query, the lifecycle
+  // registration, the inFlight entry, the permission drain, the logger — is
+  // now established before it, and the two `send`s are inside, so a failed
+  // send is classified by the same `catch` as any other turn failure.
   try {
+    // Persist the seed so subsequent runOneTurn calls (this same session) and
+    // replay see it. This also covers brand-new sessions where the row was just
+    // INSERTed with permission_mode = NULL.
+    setSessionPermissionMode(sessionId, permissionMode);
+    send(conn.ws, {
+      type: 'session_running',
+      projectId: project.id,
+      sessionId,
+      running: true,
+    });
+    send(conn.ws, {
+      type: 'permission_mode_changed',
+      sessionId,
+      mode: permissionMode,
+    });
     for await (const sdkMsg of runner) {
       await persistMessage(sessionId, sdkMsg, onLogFailure);
       // Cluster F Phase A1b (UI-A1): `out` is `let` (was `const`) so the

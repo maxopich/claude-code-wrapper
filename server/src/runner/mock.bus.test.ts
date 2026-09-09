@@ -304,3 +304,69 @@ describe('runMock — canUseTool', () => {
     expect(toolResults(messages)).toHaveLength(1);
   });
 });
+
+describe('runMock — close() cuts a sleep short (Cebab-6fax.40)', () => {
+  // `config.mockIntervalMs` is 0 in this file's beforeEach, which is exactly
+  // the value that would hide this: the sleep resolves on the next tick either
+  // way. Each case sets a long interval for itself and restores nothing —
+  // the afterEach above puts the original back.
+
+  /** Resolves true if `p` settles within `ms`, false if it is still pending. */
+  async function settlesWithin(p: Promise<unknown>, ms: number): Promise<boolean> {
+    const pending = Symbol('pending');
+    const raced = await Promise.race([
+      p.then(() => 'settled'),
+      new Promise((r) => setTimeout(() => r(pending), ms)),
+    ]);
+    return raced !== pending;
+  }
+
+  test('a close() landing mid-sleep does not wait out the interval', async () => {
+    // The shape matters, and getting it wrong makes the case vacuous. After
+    // awaiting one message the generator is parked at its `yield`, NOT inside
+    // `sleep` — so a close() there resolves immediately whether or not the
+    // sleep is abortable, and the test would pass against the defect.
+    //
+    // The second `.next()` is issued WITHOUT awaiting: the generator then runs
+    // past the cancelled check and the tool-block loop and parks in `sleep`.
+    // Only then does close() have a sleeping generator to interrupt.
+    config.mockIntervalMs = 10_000;
+    const runner = runMock(chainRun());
+    const it = runner[Symbol.asyncIterator]();
+
+    await it.next(); // first message; generator now parked at the yield
+    const pending = it.next(); // runs into the sleep; deliberately not awaited
+    await new Promise((r) => setTimeout(r, 20)); // let it reach the sleep
+    runner.close();
+
+    expect(await settlesWithin(pending, 500)).toBe(true);
+  });
+
+  test('and interrupt() does the same', async () => {
+    config.mockIntervalMs = 10_000;
+    const runner = runMock(chainRun());
+    const it = runner[Symbol.asyncIterator]();
+
+    await it.next();
+    const pending = it.next();
+    await new Promise((r) => setTimeout(r, 20));
+    await runner.interrupt();
+
+    expect(await settlesWithin(pending, 500)).toBe(true);
+  });
+
+  test('an uncancelled sleep still waits — the control', async () => {
+    // Without this, a `sleep` that resolved immediately for any reason would
+    // pass both cases above and the pacing would be gone.
+    config.mockIntervalMs = 10_000;
+    const runner = runMock(chainRun());
+    const it = runner[Symbol.asyncIterator]();
+
+    await it.next();
+    const pending = it.next();
+
+    expect(await settlesWithin(pending, 300)).toBe(false);
+    runner.close();
+    await pending;
+  });
+});
