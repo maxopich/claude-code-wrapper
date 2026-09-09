@@ -4070,6 +4070,37 @@ export type McpServerView = {
     args?: string[];
     /** NAMES only — the spec's BE-B12 [security] invariant: never values. */
     envKeys?: string[];
+    /**
+     * `Cebab-6fax.25`: an http/sse server's endpoint, and the NAMES of the
+     * headers it sends. A stdio server has neither.
+     *
+     * The TOFU identity used to be name + origin + command + args + binary sha,
+     * all of which an http declaration leaves empty — so the URL could be
+     * re-pointed at a different host, and headers added or removed, under an
+     * approved name with no re-prompt. TOFU is, by CLAUDE.md's own statement,
+     * "the only brake" on user-scope MCP servers; a brake whose identity omits
+     * where the traffic goes is not measuring the thing that can change.
+     *
+     * Header VALUES are deliberately absent, here and from the identity digest
+     * — see `identityDigest`.
+     */
+    url?: string;
+    headerNames?: string[];
+    /**
+     * sha256 over the parts of a declaration that the command/args identity
+     * cannot see: the url, the header names, and the env names. Present only
+     * when a declaration HAS such parts, which is what keeps every existing
+     * stdio server's identity byte-identical and stops this fix re-prompting
+     * for servers it does not apply to.
+     *
+     * NAMES AND ENDPOINT, NOT VALUES, and that is a judgement rather than an
+     * omission. Hashing a bearer token's value would re-prompt on every
+     * rotation — daily noise that trains the operator to approve without
+     * reading, which is the failure mode `Cebab-6fax.27` is about on the
+     * env-injection gate. What changes meaningfully is WHICH endpoint is
+     * called and WHICH credentials are attached; that is what this covers.
+     */
+    identityDigest?: string;
   };
   trust:
     | 'trusted'

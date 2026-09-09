@@ -407,6 +407,12 @@ function applyDecision(args: {
         // was named. The row this writes is the baseline every later spawn is
         // compared against.
         scriptShas: args.server.scriptShas ?? null,
+        // `Cebab-6fax.25`: record the SAME identity the lookup will ask for.
+        // Omitted when the declaration has no url / headers / env, which keeps
+        // an ordinary stdio server's row byte-identical to before.
+        ...(args.server.config?.identityDigest !== undefined
+          ? { identityDigest: args.server.config.identityDigest }
+          : {}),
         decision: 'trusted',
       });
       args.outcome.approvals += 1;
@@ -419,6 +425,12 @@ function applyDecision(args: {
         args: args.server.config?.args ?? [],
         binarySha: args.decision.binarySha,
         scriptShas: args.server.scriptShas ?? null,
+        // `Cebab-6fax.25`: record the SAME identity the lookup will ask for.
+        // Omitted when the declaration has no url / headers / env, which keeps
+        // an ordinary stdio server's row byte-identical to before.
+        ...(args.server.config?.identityDigest !== undefined
+          ? { identityDigest: args.server.config.identityDigest }
+          : {}),
         decision: 'trusted_pinned_hash',
       });
       args.outcome.approvals += 1;
@@ -440,6 +452,12 @@ function applyDecision(args: {
         args: args.server.config?.args ?? [],
         binarySha: args.server.binarySha ?? null,
         scriptShas: args.server.scriptShas ?? null,
+        // `Cebab-6fax.25`: record the SAME identity the lookup will ask for.
+        // Omitted when the declaration has no url / headers / env, which keeps
+        // an ordinary stdio server's row byte-identical to before.
+        ...(args.server.config?.identityDigest !== undefined
+          ? { identityDigest: args.server.config.identityDigest }
+          : {}),
         decision: 'denied_remember',
       });
       args.outcome.persistedDenials += 1;

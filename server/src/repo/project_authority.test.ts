@@ -499,6 +499,86 @@ describe('resolveProjectAuthority (BE-B3) — merge cached init + file scans', (
     });
   });
 
+  describe('[security] an http/sse declaration carries an identity (Cebab-6fax.25)', () => {
+    function writeRemote(extra: Record<string, unknown>): void {
+      fs.writeFileSync(
+        path.join(projectPath, '.mcp.json'),
+        JSON.stringify({ mcpServers: { weather: { type: 'http', ...extra } } }),
+      );
+    }
+
+    function serverView(name: string) {
+      setProjectTrusted(projectId, true);
+      const out = resolveProjectAuthority({ projectId, mode: 'cache' })!;
+      return out.mcpServers.find((m) => m.name === name);
+    }
+
+    test('the url and the header NAMES reach the view; values do not', () => {
+      // BE-B12: names only on the wire, never values — and a bearer token is
+      // exactly the value that must not travel.
+      writeRemote({
+        url: 'https://weather.example/mcp',
+        headers: { Authorization: 'Bearer sk-do-not-ship-this', 'X-Trace': '1' },
+      });
+      const view = serverView('weather')!;
+      expect(view.config?.url).toBe('https://weather.example/mcp');
+      expect(view.config?.headerNames).toEqual(['Authorization', 'X-Trace']);
+      expect(JSON.stringify(view)).not.toContain('sk-do-not-ship-this');
+    });
+
+    test('re-pointing the url changes the identity digest', () => {
+      // The finding itself: before this, both of these reduced to
+      // command='' args=[] and shared one TOFU identity.
+      writeRemote({ url: 'https://weather.example/mcp' });
+      const before = serverView('weather')!.config?.identityDigest;
+      writeRemote({ url: 'https://attacker.example/mcp' });
+      const after = serverView('weather')!.config?.identityDigest;
+      expect(before).toBeDefined();
+      expect(after).not.toBe(before);
+    });
+
+    test('adding a header changes it; changing a header VALUE does not', () => {
+      // The deliberate line. WHICH credentials are attached is identity; the
+      // token itself rotates, and re-prompting on a rotation is daily noise
+      // that trains the operator to approve without reading.
+      writeRemote({ url: 'https://weather.example/mcp', headers: { Authorization: 'Bearer a' } });
+      const base = serverView('weather')!.config?.identityDigest;
+
+      writeRemote({ url: 'https://weather.example/mcp', headers: { Authorization: 'Bearer b' } });
+      expect(serverView('weather')!.config?.identityDigest).toBe(base);
+
+      writeRemote({
+        url: 'https://weather.example/mcp',
+        headers: { Authorization: 'Bearer a', 'X-New': '1' },
+      });
+      expect(serverView('weather')!.config?.identityDigest).not.toBe(base);
+    });
+
+    test('an env block gives a stdio server a digest too', () => {
+      // The other half of the bead: `env` could change under an approved name.
+      fs.writeFileSync(
+        path.join(projectPath, '.mcp.json'),
+        JSON.stringify({
+          mcpServers: { kitchen: { command: '/bin/kitchen', env: { API_BASE: 'x' } } },
+        }),
+      );
+      expect(serverView('kitchen')?.config?.identityDigest).toBeDefined();
+    });
+
+    test('ANTI-VACUITY: a plain stdio server gets NO digest', () => {
+      // What keeps this from being a flag day. If the digest were always
+      // present, every already-trusted server in the tree would re-prompt on
+      // upgrade — and a wall of prompts is approved wholesale, unread.
+      fs.writeFileSync(
+        path.join(projectPath, '.mcp.json'),
+        JSON.stringify({ mcpServers: { kitchen: { command: '/bin/kitchen', args: ['--x'] } } }),
+      );
+      const view = serverView('kitchen')!;
+      expect(view.config?.identityDigest).toBeUndefined();
+      expect(view.config?.command).toBe('/bin/kitchen');
+    });
+  });
+
   test('cache miss (no latestSessionStarted): tools/agents/skills empty but scans populated', () => {
     // Pre-flight inspection of a project that hasn't started a session
     // in this connection still surfaces declared MCP servers, env
