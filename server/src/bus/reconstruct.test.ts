@@ -24,6 +24,7 @@ import {
   createMultiAgentSession,
   getMultiAgentSession,
   listMultiAgentEvents,
+  listResolvedParticipants,
   recordSessionHops,
   upsertAgentSession,
   setProjectBusInstalled,
@@ -35,7 +36,7 @@ import {
   setParticipantPause,
 } from '../repo/per_agent_control.js';
 import { appendSafetyAudit } from '../notifications/safety_audit.js';
-import { upsertProject } from '../repo/projects.js';
+import { findProjectByPath, upsertProject } from '../repo/projects.js';
 import { __resetRegistryForTesting, getPauseExpiryRegistry } from '../ws/pause_expiry.js';
 import { auditKindsInWriteOrder } from '../test_support/audit_order.js';
 
@@ -315,6 +316,39 @@ describe('checkReconstructable guard matrix (every failure → caller marks cras
     expect(checkReconstructable(row)).toEqual({ ok: true });
     expect(reconstructOrchestratorSession(row, cbs())).toBe(true);
     expect(hasLiveSession(SID)).toBe(true);
+  });
+
+  test('one participant project deleted → participant-missing, not a silent narrowing', () => {
+    // `Cebab-6fax.41`. `listResolvedParticipants` INNER JOINs `projects` and
+    // the participant row cascades with the project, so losing ONE participant
+    // returns a shorter roster with nothing to notice it by. Every guard above
+    // passed on two workers out of three, and the operator continued a run
+    // quietly missing an agent. The checkpoint table does not cascade, so an
+    // agent that ran and no longer resolves is the tell.
+    seedReconstructable();
+    const reviewer = findProjectByPath(path.join(tmpRoot, 'workspace', 'reviewer'))!;
+    upsertAgentSession(SID, 'reviewer', 'reviewer-cli-1'); // it ran before the delete
+    getDb().prepare('DELETE FROM projects WHERE id = ?').run(reviewer.id);
+
+    const row = getMultiAgentSession(SID)!;
+    // The narrowing itself is real: one worker left where there were two.
+    expect(listResolvedParticipants(SID).filter((r) => r.role === 'worker')).toHaveLength(1);
+    expect(checkReconstructable(row)).toEqual({ ok: false, reason: 'participant-missing' });
+    expect(reconstructOrchestratorSession(row, cbs())).toBe(false);
+  });
+
+  test('a participant that never ran can vanish without blocking the resume', () => {
+    // The other direction, and the reason the comparison is against the
+    // CHECKPOINT table rather than the participant count: an agent with no
+    // completed hop contributed nothing to resume, so its absence costs the
+    // rebuilt run nothing. A guard keyed on "fewer participants than before"
+    // would refuse here and make ordinary sessions unrecoverable.
+    seedReconstructable(); // checkpoints exist for orchestrator + coder only
+    const reviewer = findProjectByPath(path.join(tmpRoot, 'workspace', 'reviewer'))!;
+    getDb().prepare('DELETE FROM projects WHERE id = ?').run(reviewer.id);
+
+    const row = getMultiAgentSession(SID)!;
+    expect(checkReconstructable(row)).toEqual({ ok: true });
   });
 
   test('all participant projects deleted', () => {
