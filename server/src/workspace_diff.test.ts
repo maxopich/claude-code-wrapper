@@ -195,6 +195,69 @@ describeGit('computeWorkspaceDiff — integration (git available)', () => {
     );
   });
 
+  test('a managed agent nested in an ignored dir does not report the OUTER repo', async () => {
+    // `Cebab-6fax.43`, measured. git resolves the NEAREST enclosing
+    // repository, and a managed agent is never one of its own: `.git` is
+    // excluded from the copy and the data dir carries a bare-`*` .gitignore.
+    // So `git status` from `<repo>/.cebab/agents/foo` printed the outer repo's
+    // dirty files — paths that do not exist inside the agent — and the reopen
+    // modal read `fullDiffAvailable: true` off that.
+    execFileSync('git', ['init', '-q'], { cwd: tmpRoot });
+    execFileSync('git', ['config', 'user.email', 'test@cebab.test'], { cwd: tmpRoot });
+    execFileSync('git', ['config', 'user.name', 'cebab-test'], { cwd: tmpRoot });
+    fs.mkdirSync(path.join(tmpRoot, 'src'), { recursive: true });
+    fs.writeFileSync(path.join(tmpRoot, 'src', 'a.txt'), 'original\n');
+    execFileSync('git', ['add', '.'], { cwd: tmpRoot });
+    execFileSync('git', ['commit', '-q', '-m', 'init'], { cwd: tmpRoot });
+    // The outer repo is dirty, which is what used to be reported.
+    fs.writeFileSync(path.join(tmpRoot, 'src', 'a.txt'), 'modified\n');
+    fs.writeFileSync(path.join(tmpRoot, 'src', 'b.txt'), 'untracked\n');
+
+    // The data dir, ignored exactly as `data_perms` writes it.
+    const agent = path.join(tmpRoot, '.cebab', 'agents', 'foo');
+    fs.mkdirSync(agent, { recursive: true });
+    fs.writeFileSync(path.join(tmpRoot, '.cebab', '.gitignore'), '*\n');
+    fs.writeFileSync(path.join(agent, 'CLAUDE.md'), 'hi\n');
+
+    // Control: the outer repo really is dirty, so a false negative below
+    // cannot come from there being nothing to find.
+    const outer = await computeWorkspaceDiff(tmpRoot);
+    expect(outer.fullDiffAvailable).toBe(true);
+    expect(outer.filesChanged).toBeGreaterThan(0);
+
+    const inner = await computeWorkspaceDiff(agent);
+    expect(inner.fullDiffAvailable).toBe(false);
+    expect(inner.filesChanged).toBe(0);
+    expect(inner.sampleChanges).toEqual([]);
+  });
+
+  test('a project that is a plain subdirectory reports only its own changes', async () => {
+    // The other half of the same over-report, and the one that is not about
+    // managed agents at all: a project inside a larger repo (the ordinary
+    // monorepo shape) is NOT ignored, so it still reports — but only what is
+    // under it. Without `-- .` this counted the sibling's changes too.
+    execFileSync('git', ['init', '-q'], { cwd: tmpRoot });
+    execFileSync('git', ['config', 'user.email', 'test@cebab.test'], { cwd: tmpRoot });
+    execFileSync('git', ['config', 'user.name', 'cebab-test'], { cwd: tmpRoot });
+    fs.mkdirSync(path.join(tmpRoot, 'mine'), { recursive: true });
+    fs.mkdirSync(path.join(tmpRoot, 'theirs'), { recursive: true });
+    fs.writeFileSync(path.join(tmpRoot, 'mine', 'a.txt'), 'a\n');
+    fs.writeFileSync(path.join(tmpRoot, 'theirs', 'b.txt'), 'b\n');
+    execFileSync('git', ['add', '.'], { cwd: tmpRoot });
+    execFileSync('git', ['commit', '-q', '-m', 'init'], { cwd: tmpRoot });
+    fs.writeFileSync(path.join(tmpRoot, 'mine', 'a.txt'), 'changed\n');
+    fs.writeFileSync(path.join(tmpRoot, 'theirs', 'b.txt'), 'changed\n');
+
+    const result = await computeWorkspaceDiff(path.join(tmpRoot, 'mine'));
+    expect(result.fullDiffAvailable).toBe(true);
+    expect(result.filesChanged).toBe(1);
+    // Paths stay REPO-relative — `git status` reports from the repo root
+    // regardless of cwd, and `-- .` narrows which entries appear, not how they
+    // are spelled. Unchanged by this fix, and asserted so the convention is
+    // recorded rather than rediscovered.
+    expect(result.sampleChanges).toEqual(['mine/a.txt']);
+  });
+
   test('respects sample cap on a noisy workspace', async () => {
     execFileSync('git', ['init', '-q'], { cwd: tmpRoot });
     for (let i = 0; i < 25; i += 1) {

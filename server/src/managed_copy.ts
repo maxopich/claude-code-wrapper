@@ -179,7 +179,11 @@ export async function runManagedCopy(
     });
   } catch (err: unknown) {
     // A half-copied tree that no project row points at is garbage in the data
-    // dir, and nothing in Cebab can delete a managed agent yet. Take it back.
+    // dir, and it is UNREACHABLE garbage: `runManagedDelete` has existed since
+    // `Cebab-m1f`, but it starts from a project row, so a rowless tree is
+    // exactly what no delete verb can reach. (`Cebab-6fax.43`: this used to
+    // say "nothing in Cebab can delete a managed agent yet", which stopped
+    // being true when that verb shipped.) Take it back.
     await removeManagedDir(target).catch(() => {});
     return fail(`the copy failed partway and was removed: ${String(err)}`);
   }

@@ -76,6 +76,38 @@ export function skipLabel(reason: ManagedCopySkip['reason']): string {
   }
 }
 
+/**
+ * The "not copied" list, shared by the preflight and the result.
+ *
+ * One component rather than two copies of the markup: they answer the same
+ * question at two moments — what a copy WILL leave out, and what it DID — and
+ * two hand-maintained copies of a list nobody reads twice would drift.
+ * Renders nothing when there is nothing to say, so callers need no guard.
+ */
+function SkipList(props: {
+  skips: readonly ManagedCopySkip[];
+  truncated: number;
+  testId: string;
+}): React.JSX.Element | null {
+  if (props.skips.length === 0) return null;
+  return (
+    <div className="managed-copy-skips" data-testid={props.testId}>
+      <p className="gate-modal-help">Not copied:</p>
+      <ul>
+        {props.skips.map((skip) => (
+          <li key={`${skip.rel}:${skip.reason}`}>
+            <span className="managed-copy-skip-path">{skip.rel}</span>
+            <span className="managed-copy-skip-reason">{skipLabel(skip.reason)}</span>
+          </li>
+        ))}
+      </ul>
+      {props.truncated > 0 && (
+        <p className="gate-modal-help">…and {props.truncated.toLocaleString('en')} more</p>
+      )}
+    </div>
+  );
+}
+
 /** Stable identity so a guarded-shut modal doesn't hand the key/backdrop hooks a fresh closure each render. */
 const NOOP = () => {};
 
@@ -188,24 +220,11 @@ export function ManagedCopyModal({
                 )}
               </div>
             )}
-            {preflight.skips.length > 0 && (
-              <div className="managed-copy-skips" data-testid="managed-copy-skips">
-                <p className="gate-modal-help">Not copied:</p>
-                <ul>
-                  {preflight.skips.map((skip) => (
-                    <li key={`${skip.rel}:${skip.reason}`}>
-                      <span className="managed-copy-skip-path">{skip.rel}</span>
-                      <span className="managed-copy-skip-reason">{skipLabel(skip.reason)}</span>
-                    </li>
-                  ))}
-                </ul>
-                {preflight.skipsTruncated > 0 && (
-                  <p className="gate-modal-help">
-                    …and {preflight.skipsTruncated.toLocaleString('en')} more
-                  </p>
-                )}
-              </div>
-            )}
+            <SkipList
+              skips={preflight.skips}
+              truncated={preflight.skipsTruncated}
+              testId="managed-copy-skips"
+            />
           </div>
         )}
 
@@ -218,14 +237,33 @@ export function ManagedCopyModal({
         )}
 
         {state.status === 'done' && state.result && (
-          <p
-            className={`gate-modal-help ${state.result.ok ? 'managed-copy-done' : 'managed-copy-error'}`}
-            role="status"
-          >
-            {state.result.ok
-              ? `Copied ${state.result.files.toLocaleString('en')} files. The copy is in your sidebar as ${state.result.name}.`
-              : state.result.error}
-          </p>
+          <>
+            <p
+              className={`gate-modal-help ${state.result.ok ? 'managed-copy-done' : 'managed-copy-error'}`}
+              role="status"
+            >
+              {state.result.ok
+                ? `Copied ${state.result.files.toLocaleString('en')} files.${
+                    state.result.skips.length > 0
+                      ? ` ${(state.result.skips.length + state.result.skipsTruncated).toLocaleString('en')} items were not copied.`
+                      : ''
+                  } The copy is in your sidebar as ${state.result.name}.`
+                : state.result.error}
+            </p>
+            {/* `Cebab-6fax.43`: the RESULT's skips, which reached this
+                component intact and were never rendered — only the preflight's
+                were. A source whose root is unreadable or has vanished
+                produces one `unreadable_dir` skip at rel '' and zero files,
+                and the copy still registers the project, so "Copied 0 files"
+                was the whole report an operator got for an empty agent. */}
+            {state.result.ok && (
+              <SkipList
+                skips={state.result.skips}
+                truncated={state.result.skipsTruncated}
+                testId="managed-copy-result-skips"
+              />
+            )}
+          </>
         )}
 
         <div className="gate-modal-buttons">

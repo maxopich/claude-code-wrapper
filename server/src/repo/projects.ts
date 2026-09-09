@@ -325,11 +325,21 @@ export function registerManagedProject(
   sourcePath: string,
   copiedAt: number,
 ): ProjectRow {
-  const row = upsertProject(name, projectPath);
-  getDb()
-    .prepare('UPDATE projects SET managed_source_path = ?, managed_copied_at = ? WHERE id = ?')
-    .run(sourcePath, copiedAt, row.id);
-  return getProject(row.id)!;
+  // `Cebab-6fax.43`: one transaction, matching the two other multi-statement
+  // writers in this file. These were two independent statements, and since
+  // `#564` the caller reacts to a throw here by DELETING the copied tree — so
+  // an INSERT that succeeded followed by a provenance UPDATE that threw left a
+  // `projects` row pointing at a directory that had just been removed. That
+  // row lives under `managedAgentsRoot()`, which exempts it from the workspace
+  // missing-sweep, so it would sit in the sidebar until deleted by hand.
+  const db = getDb();
+  return db.transaction(() => {
+    const row = upsertProject(name, projectPath);
+    db.prepare(
+      'UPDATE projects SET managed_source_path = ?, managed_copied_at = ? WHERE id = ?',
+    ).run(sourcePath, copiedAt, row.id);
+    return getProject(row.id)!;
+  })();
 }
 
 /**

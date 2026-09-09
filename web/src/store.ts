@@ -2650,13 +2650,21 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             pendingMutations: [],
             // Same reasoning again, for the two banner slots this case used to
             // leave standing. `awaitingContinue` gates `UserPromptInput` and
-            // draws the Continue banner an R-B reconstruct sets; stopping such
-            // a session left the banner and its dead button on a `stopped`
-            // row — the case is not hypothetical, it is what an operator sees
-            // after stopping a session that came back read-only. And the
-            // `recoveryContext` two lines down, already cleared here as
-            // "banner-bound", is the disclosure INSIDE that same banner, so
-            // the two had drifted apart.
+            // draws the Continue banner an R-B reconstruct sets; `autoRetry`
+            // counts down to a retry that can no longer fire.
+            //
+            // CORRECTION to what this comment said when it landed (#575): it
+            // claimed an operator saw the dead banner and its button on a
+            // `stopped` row. They did not. Every one of those banners mounts
+            // behind `isRunning` in `MultiAgentTab` (`run.status === 'running'`),
+            // and `multi_agent_ended` sets a status that is never 'running' —
+            // so the stale slots had no render consequence, and clearing them
+            // is consistency in the slice rather than a visible fix. It is
+            // still worth doing: `recoveryContext` two lines down was already
+            // cleared here as "banner-bound", and it is the disclosure INSIDE
+            // the banner `awaitingContinue` draws, so the two had drifted
+            // apart — which is how the next reader of this case learns the
+            // wrong rule about which slots an ended session retires.
             awaitingContinue: false,
             // Interactive AskUserQuestion: a stopped/crashed session can't be
             // answered either — drop any parked question.
