@@ -357,3 +357,78 @@ describe('project_scan — the pass', () => {
     expect(typeof (out as { then?: unknown }).then).toBe('undefined');
   });
 });
+
+describe('[security] the scan line does not claim a settings-layer server loads (Cebab-6fax.42)', () => {
+  /**
+   * `scopeLoads` answered "is this scope read", which is true of the FILE, and
+   * the sidebar rendered that as LOADS for a declaration the CLI never starts.
+   * Measured, all four rows, `mcp_scope_smoke.ts` Parts 2-3.
+   *
+   * Each case asserts a HOOK in the very same settings file still reports
+   * `loaded: 1`. That is the control that makes the mcp verdict a measurement:
+   * hooks and env injections DO load from these files, so a scan that had
+   * simply failed to read the file — or a fix that turned the whole layer off —
+   * reddens here instead of passing as a tidy `loads: false`.
+   */
+  const SERVER = { mcpServers: { misplaced: { command: '/usr/local/bin/thing' } } };
+  const HOOK = { hooks: { Stop: [{ hooks: [{ type: 'command', command: '/bin/echo hi' }] }] } };
+
+  test('a TRUSTED project reads .claude/settings.json and still reports not-loading', () => {
+    const proj = makeProject('settings-mcp-trusted', true);
+    write(path.join(proj.path, '.claude', 'settings.json'), { ...SERVER, ...HOOK });
+    const scan = scanProject(proj);
+
+    expect(scan.scopesLoaded).toEqual(['user', 'project', 'local']);
+    expect(scan.hooks).toEqual({ declared: 1, loaded: 1, hasLocalScope: false });
+    expect(scan.mcpServers).toEqual([
+      expect.objectContaining({
+        name: 'misplaced',
+        loads: false,
+        originPath: path.join(proj.path, '.claude', 'settings.json'),
+      }),
+    ]);
+  });
+
+  test('the same holds for the user layer, which every project reads', () => {
+    // The `'user'` scope is in the loaded set whether or not a project is
+    // trusted, so this row is the one that would have been claimed as loading
+    // on EVERY project in the sidebar.
+    write(path.join(os.homedir(), '.claude', 'settings.json'), { ...SERVER, ...HOOK });
+    const scan = scanProject(makeProject('settings-mcp-user'));
+
+    expect(scan.scopesLoaded).toEqual(['user']);
+    expect(scan.hooks).toEqual({ declared: 1, loaded: 1, hasLocalScope: false });
+    expect(scan.mcpServers).toEqual([
+      expect.objectContaining({
+        name: 'misplaced',
+        loads: false,
+        originPath: path.join(os.homedir(), '.claude', 'settings.json'),
+      }),
+    ]);
+  });
+
+  test('a .mcp.json server in the same project still reports LOADS', () => {
+    // The positive control for the whole change. Turning every MCP row to
+    // `loads: false` would satisfy both cases above and would be a far worse
+    // bug than the one being fixed — the sidebar would stop showing that a
+    // trusted project's real servers are live.
+    const proj = makeProject('both-origins', true);
+    write(path.join(proj.path, '.claude', 'settings.json'), SERVER);
+    write(path.join(proj.path, '.mcp.json'), {
+      mcpServers: { real: { command: '/usr/local/bin/real' } },
+    });
+    const scan = scanProject(proj);
+
+    expect(scan.mcpServers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ name: 'misplaced', loads: false }),
+        expect.objectContaining({
+          name: 'real',
+          loads: true,
+          originPath: path.join(proj.path, '.mcp.json'),
+        }),
+      ]),
+    );
+    expect(scan.mcpServers).toHaveLength(2);
+  });
+});

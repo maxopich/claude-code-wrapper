@@ -109,9 +109,12 @@ export function ProjectScanLine({ scan, managed }: ProjectScanLineProps) {
         <span
           className="project-scan-chip is-warn"
           title={
-            'This project is not trusted, so its own settings files are not loaded into a session: ' +
-            '.claude/settings.json, .claude/settings.local.json and .mcp.json. ' +
-            'They are counted here because they exist on disk. Trust the project to load them.'
+            'Declared on disk, but not loaded into a session. Two different causes ' +
+            'land here and only one is a Trust setting. An untrusted project does not ' +
+            'read its own .claude/settings.json, .claude/settings.local.json or ' +
+            '.mcp.json, and trusting it loads them. An mcpServers key inside ' +
+            '.claude/settings.json or settings.local.json never loads at any scope — ' +
+            'Trust will not change that; move the server to .mcp.json.'
           }
         >
           <span className="project-scan-glyph" aria-hidden="true">

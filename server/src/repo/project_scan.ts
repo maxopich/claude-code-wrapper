@@ -58,6 +58,7 @@ import {
   trustDerivedScopes,
   type SettingScope,
 } from './project_authority.js';
+import { mcpOriginLoads } from '@cebab/shared';
 import type { ProjectRow } from './projects.js';
 
 /** Every scope a settings file can live in — "what is declared", before Trust. */
@@ -145,9 +146,18 @@ export function scanProject(row: ProjectRow, scannedAt: number = Date.now()): Pr
     const loadedClaudeJsonNames = new Set(loadedClaudeJson.map((s) => s.name));
 
     const mcpServers = foldMcp([
+      // `Cebab-6fax.42`: settings-layer `mcpServers` keys never load, at any
+      // scope — measured for all four rows by `mcp_scope_smoke.ts` Parts 2-3.
+      // `scopeLoads` is the WRONG question here and was the one being asked:
+      // it answers "is this scope read", which is true of the file, and the
+      // sidebar then told the operator a server loads that the CLI never
+      // starts. It stays correct for hooks and env injections below, which do
+      // load from these same files — that asymmetry is why the call goes away
+      // here and not there. The rows are still listed, marked not-loaded: that
+      // is the whole signal, since a server declared here is a misplaced one.
       ...detectMcpServers(layers).map((view) => ({
         view,
-        loads: scopeLoads(scopesLoaded, view.scope),
+        loads: mcpOriginLoads(view.scope),
       })),
       // `.mcp.json` loads iff the project scope is read — the reader's own gate.
       ...declaredMcpJson.map((view) => ({ view, loads: scopesLoaded.includes('project') })),

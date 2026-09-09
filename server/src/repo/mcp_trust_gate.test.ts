@@ -8,6 +8,7 @@ import { config } from '../config.js';
 import { _resetOperatorIdCache } from '../notifications/operator.js';
 import { checkTrust, recordTrustDecision } from './mcp_trust.js';
 import {
+  abandonPendingMcpGates,
   awaitMcpTrustDecisions,
   denyOnceKey,
   makeTrustGateState,
@@ -68,7 +69,7 @@ function viewPending(name: string, originPath: string, command?: string): McpSer
   const view: McpServerView = {
     name,
     status: 'unknown',
-    scope: 'project',
+    scope: 'mcp-json',
     originPath,
     tools: [],
     trust: 'pending_tofu',
@@ -104,7 +105,7 @@ function viewTrusted(name: string, originPath: string): McpServerView {
   return {
     name,
     status: 'unknown',
-    scope: 'project',
+    scope: 'mcp-json',
     originPath,
     tools: [],
     trust: 'trusted',
@@ -115,7 +116,7 @@ function viewDenied(name: string, originPath: string): McpServerView {
   return {
     name,
     status: 'unknown',
-    scope: 'project',
+    scope: 'mcp-json',
     originPath,
     tools: [],
     trust: 'denied',
@@ -126,7 +127,7 @@ function viewHashChanged(name: string, originPath: string, binarySha: string): M
   return {
     name,
     status: 'unknown',
-    scope: 'project',
+    scope: 'mcp-json',
     originPath,
     tools: [],
     trust: 'hash_changed',
@@ -154,7 +155,7 @@ describe('awaitMcpTrustDecisions — silent short-circuits', () => {
       projectId: 1,
       gate,
       send: sink.send,
-      servers: [viewTrusted('git-mcp', '/u/proj/.claude/settings.json')],
+      servers: [viewTrusted('git-mcp', '/u/proj/.mcp.json')],
     });
     expect(sink.sent).toEqual([]);
     expect(outcome.approvals).toBe(0);
@@ -182,11 +183,11 @@ describe('awaitMcpTrustDecisions — silent short-circuits', () => {
       projectId: 1,
       gate,
       send: sink.send,
-      servers: [viewDenied('shady-mcp', '/u/proj/.claude/settings.json')],
+      servers: [viewDenied('shady-mcp', '/u/proj/.mcp.json')],
     });
     expect(sink.sent).toEqual([]); // no operator prompt
     expect(outcome.refused).toEqual([
-      { serverName: 'shady-mcp', originPath: '/u/proj/.claude/settings.json', persisted: true },
+      { serverName: 'shady-mcp', originPath: '/u/proj/.mcp.json', persisted: true },
     ]);
     // Audit row should land — we want forensic trace of every spawn past
     // a denial, since Cebab can't (today) prevent the SDK from loading it.
@@ -203,7 +204,7 @@ describe('awaitMcpTrustDecisions — silent short-circuits', () => {
     const view: McpServerView = {
       name: 'orphan',
       status: 'unknown',
-      scope: 'project',
+      scope: 'mcp-json',
       tools: [],
       trust: 'pending_tofu',
       // no originPath
@@ -225,7 +226,7 @@ describe('awaitMcpTrustDecisions — first_seen prompt + trust decision', () => 
   test('pending_tofu emits a first_seen envelope and parks the spawn', async () => {
     const sink = makeSink();
     const gate = makeTrustGateState();
-    const view = viewPending('new-mcp', '/u/proj/.claude/settings.json', '/usr/local/bin/new-mcp');
+    const view = viewPending('new-mcp', '/u/proj/.mcp.json', '/usr/local/bin/new-mcp');
 
     const gatePromise = awaitMcpTrustDecisions({
       projectId: 42,
@@ -239,7 +240,7 @@ describe('awaitMcpTrustDecisions — first_seen prompt + trust decision', () => 
     const env = sink.sent[0] as Extract<ServerMsg, { type: 'mcp_auto_install_pending' }>;
     expect(env.type).toBe('mcp_auto_install_pending');
     expect(env.serverName).toBe('new-mcp');
-    expect(env.originPath).toBe('/u/proj/.claude/settings.json');
+    expect(env.originPath).toBe('/u/proj/.mcp.json');
     expect(env.command).toBe('/usr/local/bin/new-mcp');
     expect(env.reason).toBe('first_seen');
     expect(env.previousSha).toBeUndefined();
@@ -263,14 +264,14 @@ describe('awaitMcpTrustDecisions — first_seen prompt + trust decision', () => 
     // to name the command the gate just recorded. Asking with a different one
     // returns `declaration_changed` — which is the whole point, and is what
     // this line caught when it was first adapted.
-    const lookup = look('new-mcp', '/u/proj/.claude/settings.json', null, '/usr/local/bin/new-mcp');
+    const lookup = look('new-mcp', '/u/proj/.mcp.json', null, '/usr/local/bin/new-mcp');
     expect(lookup.decision).toBe('trusted');
   });
 
   test('allow_pinned writes trusted_pinned_hash with the supplied sha', async () => {
     const sink = makeSink();
     const gate = makeTrustGateState();
-    const view = viewPending('pinned-mcp', '/u/proj/.claude/settings.json', '/bin/x');
+    const view = viewPending('pinned-mcp', '/u/proj/.mcp.json', '/bin/x');
     const gatePromise = awaitMcpTrustDecisions({
       projectId: 1,
       gate,
@@ -281,7 +282,7 @@ describe('awaitMcpTrustDecisions — first_seen prompt + trust decision', () => 
     const entry = gate.pending.get(env.pendingId)!;
     entry.resolve({ kind: 'allow_pinned', binarySha: 'abc123pinned' });
     await gatePromise;
-    const lookup = look('pinned-mcp', '/u/proj/.claude/settings.json', 'abc123pinned', '/bin/x');
+    const lookup = look('pinned-mcp', '/u/proj/.mcp.json', 'abc123pinned', '/bin/x');
     expect(lookup.decision).toBe('trusted_pinned_hash');
     expect(lookup.decision === 'trusted_pinned_hash' && lookup.binarySha).toBe('abc123pinned');
   });
@@ -293,7 +294,7 @@ describe('awaitMcpTrustDecisions — deny outcomes', () => {
   test('deny_remember persists denied_remember and refuses', async () => {
     const sink = makeSink();
     const gate = makeTrustGateState();
-    const view = viewPending('drop-mcp', '/u/proj/.claude/settings.json');
+    const view = viewPending('drop-mcp', '/u/proj/.mcp.json');
     const gatePromise = awaitMcpTrustDecisions({
       projectId: 7,
       gate,
@@ -307,16 +308,16 @@ describe('awaitMcpTrustDecisions — deny outcomes', () => {
 
     expect(outcome.persistedDenials).toBe(1);
     expect(outcome.refused).toEqual([
-      { serverName: 'drop-mcp', originPath: '/u/proj/.claude/settings.json', persisted: true },
+      { serverName: 'drop-mcp', originPath: '/u/proj/.mcp.json', persisted: true },
     ]);
-    const lookup = look('drop-mcp', '/u/proj/.claude/settings.json', null);
+    const lookup = look('drop-mcp', '/u/proj/.mcp.json', null);
     expect(lookup.decision).toBe('denied_remember');
   });
 
   test('deny_once populates the in-memory set, no mcp_trust row written', async () => {
     const sink = makeSink();
     const gate = makeTrustGateState();
-    const view = viewPending('once-mcp', '/u/proj/.claude/settings.json');
+    const view = viewPending('once-mcp', '/u/proj/.mcp.json');
     const gatePromise = awaitMcpTrustDecisions({
       projectId: 9,
       gate,
@@ -329,19 +330,17 @@ describe('awaitMcpTrustDecisions — deny outcomes', () => {
     const outcome = await gatePromise;
 
     expect(outcome.refused).toEqual([
-      { serverName: 'once-mcp', originPath: '/u/proj/.claude/settings.json', persisted: false },
+      { serverName: 'once-mcp', originPath: '/u/proj/.mcp.json', persisted: false },
     ]);
-    expect(gate.denyOnce.has(denyOnceKey(9, 'once-mcp', '/u/proj/.claude/settings.json'))).toBe(
-      true,
-    );
+    expect(gate.denyOnce.has(denyOnceKey(9, 'once-mcp', '/u/proj/.mcp.json'))).toBe(true);
     // No mcp_trust row — deny_once is in-memory.
-    expect(look('once-mcp', '/u/proj/.claude/settings.json', null).decision).toBe('first_seen');
+    expect(look('once-mcp', '/u/proj/.mcp.json', null).decision).toBe('first_seen');
   });
 
   test('deny_once short-circuits the same gate state on a repeat pass (no re-prompt)', async () => {
     const sink = makeSink();
     const gate = makeTrustGateState();
-    const view = viewPending('repeat-mcp', '/u/proj/.claude/settings.json');
+    const view = viewPending('repeat-mcp', '/u/proj/.mcp.json');
 
     // First pass: operator deny_once.
     const first = awaitMcpTrustDecisions({
@@ -365,12 +364,12 @@ describe('awaitMcpTrustDecisions — deny outcomes', () => {
     });
     expect(sink.sent).toHaveLength(1); // no new pending envelope
     expect(secondOutcome.refused).toEqual([
-      { serverName: 'repeat-mcp', originPath: '/u/proj/.claude/settings.json', persisted: false },
+      { serverName: 'repeat-mcp', originPath: '/u/proj/.mcp.json', persisted: false },
     ]);
   });
 
   test('fresh gate state (new connection) re-prompts even after deny_once on another gate', async () => {
-    const view = viewPending('reset-mcp', '/u/proj/.claude/settings.json');
+    const view = viewPending('reset-mcp', '/u/proj/.mcp.json');
 
     // First connection: deny_once.
     const sinkA = makeSink();
@@ -410,7 +409,7 @@ describe('awaitMcpTrustDecisions — hash_changed flow', () => {
     // Pre-seed: pin a prior decision with sha 'oldsha'.
     recordTrustDecision({
       serverName: 'churn-mcp',
-      originPath: '/u/proj/.claude/settings.json',
+      originPath: '/u/proj/.mcp.json',
       // Same (empty) declaration the config-less `viewHashChanged` produces —
       // this case is about the HASH changing, so the declaration must not.
       command: '',
@@ -422,7 +421,7 @@ describe('awaitMcpTrustDecisions — hash_changed flow', () => {
 
     const sink = makeSink();
     const gate = makeTrustGateState();
-    const view = viewHashChanged('churn-mcp', '/u/proj/.claude/settings.json', 'newsha');
+    const view = viewHashChanged('churn-mcp', '/u/proj/.mcp.json', 'newsha');
     const gatePromise = awaitMcpTrustDecisions({
       projectId: 1,
       gate,
@@ -439,7 +438,7 @@ describe('awaitMcpTrustDecisions — hash_changed flow', () => {
     await gatePromise;
 
     // Lookup with the new sha now returns trusted_pinned_hash.
-    const lookup = look('churn-mcp', '/u/proj/.claude/settings.json', 'newsha');
+    const lookup = look('churn-mcp', '/u/proj/.mcp.json', 'newsha');
     expect(lookup.decision).toBe('trusted_pinned_hash');
   });
 });
@@ -927,5 +926,109 @@ describe('[security] refuseUnapprovedForProbe — a probe starts only what is tr
     ]);
     expect(refused).toEqual(['payments', 'never-seen']);
     expect(refusalRows()).toHaveLength(1); // only the standing decision
+  });
+});
+
+describe('[security] a declaration the CLI cannot start reaches no gate (Cebab-6fax.42)', () => {
+  /**
+   * An `mcpServers` key in a `.claude/settings*.json` layer starts no server —
+   * measured for all four rows by `mcp_scope_smoke.ts` Parts 2-3, each with a
+   * control declaration in the same spawn. Before this, the gate parked the
+   * spawn and asked the operator to approve one anyway: a consent prompt for a
+   * capability that cannot be granted, whose "Allow" wrote a durable trust row
+   * anchored to a file the CLI never reads.
+   *
+   * EVERY CASE HERE CARRIES ITS CONTROL IN THE SAME CALL. "No prompt" is also
+   * what a gate that stopped working entirely produces, and that failure is
+   * the serious one — so a `.mcp.json` declaration rides along in each list
+   * and must still be prompted for. A test asserting only the absence would
+   * stay green if the fix silenced TOFU altogether.
+   */
+  const SETTINGS_ORIGIN = '/u/proj/.claude/settings.json';
+  const MCP_JSON_ORIGIN = '/u/proj/.mcp.json';
+
+  function pending(name: string, scope: McpServerView['scope'], originPath: string): McpServerView {
+    return {
+      name,
+      status: 'unknown',
+      scope,
+      originPath,
+      tools: [],
+      trust: 'pending_tofu',
+      config: { command: '/usr/local/bin/thing' },
+    };
+  }
+
+  test('the gate prompts for the .mcp.json server and not the settings-layer one', async () => {
+    const sink = makeSink();
+    const gate = makeTrustGateState();
+    const p = awaitMcpTrustDecisions({
+      projectId: 11,
+      gate,
+      send: sink.send,
+      servers: [
+        pending('in-settings', 'project', SETTINGS_ORIGIN),
+        pending('in-settings-user', 'user', SETTINGS_ORIGIN),
+        pending('in-settings-local', 'local', SETTINGS_ORIGIN),
+        pending('in-mcp-json', 'mcp-json', MCP_JSON_ORIGIN),
+      ],
+    });
+
+    // Prompts are emitted synchronously, before the gate awaits.
+    expect(sink.sent).toHaveLength(1);
+    expect(gate.pending.size).toBe(1);
+    expect([...gate.pending.values()][0]?.serverName).toBe('in-mcp-json');
+
+    abandonPendingMcpGates(gate, 'test teardown');
+    await expect(p).rejects.toThrow();
+  });
+
+  test('a skipped declaration writes no refusal row either', async () => {
+    // The skip must be SILENT, not a recorded refusal. `recordSilentRefusal`
+    // writes to the audit chain, and a row saying Cebab refused a server the
+    // operator never declared anywhere the CLI reads would put a decision
+    // nobody made into the forensic trail — the same objection that made
+    // parked-gate overflow stop writing `deny_once`.
+    const silentRefusals = (): unknown[] =>
+      getDb()
+        .prepare(`SELECT kind FROM safety_audit WHERE kind = ?`)
+        .all('mcp.trust_silent_refusal');
+    const before = silentRefusals().length;
+    const sink = makeSink();
+    const gate = makeTrustGateState();
+    const p = awaitMcpTrustDecisions({
+      projectId: 12,
+      gate,
+      send: sink.send,
+      servers: [pending('in-settings', 'project', SETTINGS_ORIGIN)],
+    });
+    // Asserted BEFORE the await, deliberately. Under the pre-fix code this
+    // call parks the spawn forever waiting for an operator decision, so an
+    // `await` here reddens by hitting vitest's timeout fifteen seconds later
+    // rather than by failing — `project_blocking_regression_hangs_not_fails`.
+    // The synchronous shape makes the revert-check instant and names the
+    // defect. `gate.pending` is the same claim from the other side: a parked
+    // entry is what the operator would have been asked about.
+    expect(sink.sent).toEqual([]);
+    expect(gate.pending.size).toBe(0);
+    expect(silentRefusals().length).toBe(before);
+    const result = await p;
+    expect(result.refused).toEqual([]);
+    expect(result.approvals).toBe(0);
+    expect(getDb().prepare('SELECT COUNT(*) AS c FROM mcp_trust').get() as { c: number }).toEqual({
+      c: 0,
+    });
+  });
+
+  test('the probe refusal skips the same rows, and still refuses the real one', () => {
+    // `refuseUnapprovedForProbe` is the second surface, and it had the same
+    // bug: it named a settings-layer server as refused, so the authority panel
+    // reported Cebab had blocked something that was never going to start.
+    const refused = refuseUnapprovedForProbe(13, [
+      pending('in-settings', 'project', SETTINGS_ORIGIN),
+      pending('in-settings-user', 'user', SETTINGS_ORIGIN),
+      pending('in-mcp-json', 'mcp-json', MCP_JSON_ORIGIN),
+    ]);
+    expect(refused).toEqual(['in-mcp-json']);
   });
 });

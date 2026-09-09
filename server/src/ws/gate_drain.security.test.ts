@@ -54,8 +54,8 @@ function mcpServer(name: string): McpServerView {
   return {
     name,
     status: 'connected',
-    originPath: '/proj/.claude/settings.json',
-    scope: 'project',
+    originPath: '/proj/.mcp.json',
+    scope: 'mcp-json',
     tools: [],
     trust: 'pending_tofu',
     config: { command: '/usr/bin/thing', args: [] },
