@@ -35,19 +35,12 @@ function main(): void {
   declareRealDataDirIntent();
   getDb();
 
-  // Register H01: bring `~/.cebab` to owner-only. `getDb()` above already
-  // created the directory and the database with the right modes, but that does
-  // nothing for an install written by an earlier build — `mkdirSync` ignores
-  // its `mode` for a directory that already exists. This is the retrofit, and
-  // it is what actually protects the database you already have.
-  //
-  // Must run after `getDb()`: the "have I already swept?" flag lives in the
-  // `settings` table. Everything — the sweep decision, the log line, and the
-  // notification when it could not finish — sits behind this one call, because
-  // `main()` is not reachable from a unit test and a sequence here could
-  // silently lose a step.
-  runDataPermsBootCheck();
-
+  // `Cebab-6fax.46`: the chain walk runs BEFORE any safety-class emitter.
+  // `runDataPermsBootCheck` (moved below) can emit `data_perms.insecure`, and
+  // that APPENDS to the hash chain — so on a boot where the data directory is
+  // also insecure, Cebab was extending the very chain it had not yet examined.
+  // `runMigrationIntegrityBootCheck` further down emits too. Ordering is the
+  // whole fix: read what is on disk, then write.
   // Cluster A Phase 1: walk the safety_audit hash chain at boot. The walk is
   // cheap (the genesis marker anchors verification, so the chain length equals
   // real-event count since the last migration).
@@ -88,6 +81,23 @@ function main(): void {
       console.error(`[cebab] could not record tamper notification: ${result.error}`);
     }
   }
+
+  // Register H01: bring `~/.cebab` to owner-only. `getDb()` above already
+  // created the directory and the database with the right modes, but that does
+  // nothing for an install written by an earlier build — `mkdirSync` ignores
+  // its `mode` for a directory that already exists. This is the retrofit, and
+  // it is what actually protects the database you already have.
+  //
+  // Must run after `getDb()`: the "have I already swept?" flag lives in the
+  // `settings` table. Everything — the sweep decision, the log line, and the
+  // notification when it could not finish — sits behind this one call, because
+  // `main()` is not reachable from a unit test and a sequence here could
+  // silently lose a step.
+  //
+  // And after `verifyChain()` above (`Cebab-6fax.46`): this call can emit a
+  // safety-class notification, which appends to the hash chain, and a chain is
+  // read before it is written to.
+  runDataPermsBootCheck();
 
   // Cebab-x1n.7.31: has an already-applied migration been edited since it was
   // applied? The runner keys on filename alone, so without this an edited
