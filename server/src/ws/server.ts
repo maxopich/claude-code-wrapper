@@ -103,6 +103,7 @@ import {
   abandonPendingStartGates,
   ACKNOWLEDGMENT_TRIGGER,
   awaitEnvInjectionAck,
+  injectionSetFingerprint,
   makeStartGateState,
   recordEnvInjectionAcknowledgment,
   type StartGateState,
@@ -4735,6 +4736,13 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
         return;
       }
       conn.startGate.pending.delete(msg.pendingStartId);
+      // `Cebab-6fax.27`: remember it, so the gate stops firing on EVERY message
+      // of every turn. Keyed to the exact injection set the operator was shown,
+      // so adding a key or moving one to a different settings file asks again —
+      // the change is the event worth a prompt, not the presence. Recorded only
+      // after the audit row lands, so an acknowledgment that was refused is not
+      // remembered as one that happened.
+      conn.startGate.acknowledged.set(entry.projectId, injectionSetFingerprint(entry.injections));
       entry.resolve();
       return;
     }

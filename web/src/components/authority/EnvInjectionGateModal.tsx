@@ -102,9 +102,15 @@ export function EnvInjectionGateModal(props: {
           </span>
         </header>
         <p className="gate-modal-help">
-          This project&apos;s <code>.claude/settings*.json</code> declares credential-class
-          environment variables that will be injected into the session, bypassing Cebab&apos;s
-          subscription-only scrub. Review the keys below and type the confirmation word to proceed.
+          {/* `Cebab-6fax.27`: NOT "this project's settings" unconditionally. A
+              `user`-scope injection comes from `~/.claude/settings.json` and has
+              nothing to do with the project the operator just opened — telling
+              them otherwise sends them looking through project files that do not
+              contain it. Each row below names its own scope and path; this
+              sentence now only summarises what they all have in common. */}
+          Settings files loaded for this session declare credential-class environment variables that
+          will be injected into it, bypassing Cebab&apos;s subscription-only scrub. Each row shows
+          which file it comes from. Review the keys below and type the confirmation word to proceed.
         </p>
         <ul className="gate-modal-injection-list" aria-label="Detected credential-class env vars">
           {pending.detectedInjections.map((inj) => (

@@ -68,6 +68,24 @@ export type StartListeningDeps = {
   errorSources?: readonly ErrorSource[];
   /** Injected so a test can observe it; production passes `process.exit`. */
   exit: (code: number) => void;
+  /**
+   * What to do about an error that arrives AFTER the socket is bound.
+   *
+   * `Cebab-6fax.24`. The handler below stays attached for the process's whole
+   * life — it has to, since an unheard `'error'` on an EventEmitter throws —
+   * so a runtime ACCEPT failure (EMFILE when the process is out of file
+   * descriptors, ENFILE, ECONNABORTED) took the BIND-failure path and called
+   * `exit(1)` directly. That is correct for a bind failure, where there is
+   * nothing in flight and "changes nothing" is the goal, and wrong afterwards:
+   * it skips the drain, so every SDK-spawned `claude` subprocess outlives the
+   * server and keeps spending subscription quota — the exact failure
+   * `runner/lifecycle.ts` exists to prevent, reached through the one exit path
+   * that does not go through it.
+   *
+   * Optional so the many tests that only exercise bind failures need no
+   * change; absent, the behaviour is the old `exit(1)`.
+   */
+  onPostBindError?: (err: NodeJS.ErrnoException) => void;
   log?: (msg: string) => void;
 };
 
@@ -105,9 +123,22 @@ export function startListening(deps: StartListeningDeps): void {
   // emitter that re-emits it, and two copies of the remedy would read as two
   // problems.
   let handled = false;
+  let bound = false;
   const onError = (err: NodeJS.ErrnoException): void => {
     if (handled) return;
     handled = true;
+    // Post-bind: a runtime accept failure, not a bind failure. Hand it to the
+    // caller's graceful shutdown so in-flight work is drained — see
+    // `onPostBindError`. Falls through to the old behaviour when the caller
+    // supplies none.
+    if (bound && deps.onPostBindError) {
+      log(
+        `[cebab] listener error after bind on ${deps.host}:${deps.port}` +
+          `${err?.code ? ` (${err.code})` : ''} — ${err?.message ?? String(err)}; shutting down`,
+      );
+      deps.onPostBindError(err);
+      return;
+    }
     if (err?.code === 'EADDRINUSE') {
       log(addressInUseMessage(deps.host, deps.port));
     } else {
@@ -130,6 +161,11 @@ export function startListening(deps: StartListeningDeps): void {
   for (const source of deps.errorSources ?? []) source.on('error', onError);
 
   deps.server.listen(deps.port, deps.host, () => {
+    // Set BEFORE `onBound`, which is where the caller builds the shutdown this
+    // flag routes to. An error during `onBound` itself is then treated as
+    // post-bind, which is right: the socket is up and there may already be
+    // work to drain.
+    bound = true;
     deps.onBound();
   });
 }

@@ -49,7 +49,47 @@ import { abandonPendingGates, GateAbandonedError, MAX_PENDING_GATES } from '../g
  */
 export type StartGateState = {
   pending: Map<string, PendingStartEntry>;
+  /**
+   * What this connection has already acknowledged: projectId → fingerprint of
+   * the injection set the operator typed `inject` for.
+   *
+   * `Cebab-6fax.27`. The gate is called from `runOneTurn`, so it fired on EVERY
+   * MESSAGE of every turn on a project with any credential-class `env:` block.
+   * A typed acknowledgment repeated per message is not a safety control: the
+   * reliable outcome is an operator who types the word without reading it,
+   * which is the opposite of what a typed gate is for. Worse, it made such a
+   * project effectively unusable, and the workaround is to remove the gate.
+   *
+   * Keyed on the SET, not just the project, so the acknowledgment covers one
+   * specific declaration. Add a key, change a scope, or point the same key at
+   * a different settings file, and the fingerprint moves and the operator is
+   * asked again — which is the event actually worth a prompt.
+   *
+   * Per CONNECTION, deliberately: this map lives on `StartGateState`, which is
+   * built per WS connection, so a reload re-asks. That is the conservative
+   * end — a durable acknowledgment would need its own audit story, and the
+   * defect being fixed here is per-message, not per-session.
+   */
+  acknowledged: Map<number, string>;
 };
+
+/**
+ * A stable identity for one injection set.
+ *
+ * Sorted, and built from the three fields that decide what will be injected and
+ * from where — the key, its scope, and the file. `isSet` is excluded on
+ * purpose: whether the variable currently holds a value in the operator's
+ * environment changes between turns for reasons that have nothing to do with
+ * what the project declares, and re-prompting on that would reintroduce the
+ * per-message gate through the back door. `posture` is excluded too; it is
+ * derived from the key.
+ */
+export function injectionSetFingerprint(injections: readonly EnvInjection[]): string {
+  return injections
+    .map((i) => `${i.scope}\u0000${i.envKey}\u0000${i.scopePath}`)
+    .sort()
+    .join('\u0001');
+}
 
 export type PendingStartEntry = {
   pendingStartId: string;
@@ -71,7 +111,7 @@ export type PendingStartEntry = {
 };
 
 export function makeStartGateState(): StartGateState {
-  return { pending: new Map() };
+  return { pending: new Map(), acknowledged: new Map() };
 }
 
 /**
@@ -112,6 +152,10 @@ export type AwaitGateInput = {
  */
 export async function awaitEnvInjectionAck(input: AwaitGateInput): Promise<void> {
   if (input.injections.length === 0) return;
+  // Already acknowledged on this connection, for this exact set. See
+  // `StartGateState.acknowledged` for why the set and not just the project.
+  const fingerprint = injectionSetFingerprint(input.injections);
+  if (input.gate.acknowledged.get(input.projectId) === fingerprint) return;
   // H15: fail closed rather than park an unbounded number of prompts. This
   // gate parks one per project, so the ceiling is only reachable by a client
   // starting sessions far faster than a human answers — and throwing is the

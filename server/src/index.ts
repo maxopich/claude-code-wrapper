@@ -173,6 +173,12 @@ function main(): void {
   // `startListening` owns that failure path; everything destructive or
   // process-global now happens in `onBound`, so a boot that never binds
   // changes nothing.
+  // `Cebab-6fax.24`: assigned a few statements below, before any event-loop
+  // turn can deliver a socket error — `main()` runs straight through. Held in a
+  // mutable so the post-bind error path can reach the same graceful shutdown a
+  // signal takes, instead of the bare `exit(1)` that skips the query drain and
+  // leaves `claude` subprocesses spending quota.
+  let shutdown: ((signal: string) => void) | null = null;
   startListening({
     server,
     // `ws` re-emits the http server's bind failure on the WebSocketServer, and
@@ -183,6 +189,12 @@ function main(): void {
     port: config.port,
     host: config.host,
     exit: (code) => process.exit(code),
+    onPostBindError: (err) => {
+      // Structurally unreachable with `shutdown` still null (see above), so
+      // the fallback is belt-and-braces rather than a case anyone should see.
+      if (shutdown) shutdown(`listener error${err?.code ? ` (${err.code})` : ''}`);
+      else process.exit(1);
+    },
     onBound: () => {
       persistAuthToken();
       console.log(`[cebab] auth-token written to ${authTokenPath()}`);
@@ -197,7 +209,7 @@ function main(): void {
   // from outliving the server (and spending quota) was unreachable from any
   // test. The signal list, the ordering, and the re-entrancy guard are pinned
   // in `shutdown.test.ts`.
-  const shutdown = createShutdown({
+  shutdown = createShutdown({
     stopSessionPurgeCron,
     closeAllQueries,
     terminateClients: () => wss.clients.forEach((c) => c.terminate()),
