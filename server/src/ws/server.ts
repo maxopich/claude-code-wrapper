@@ -4153,6 +4153,12 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
         );
         return;
       }
+      // `Cebab-6fax.40`: `decision` is validated to the closed pair at the
+      // boundary (`validate_client_msg.ts`), so the branch below can treat
+      // "not allow" as deny. It could not before: the spec was a bare `string`,
+      // so any value passed, was treated as a deny, and was then ECHOED and
+      // PERSISTED verbatim into the replayed transcript beside the request
+      // card, where it reads as an operator decision Cebab never defined.
       conn.pendingPermissions.delete(msg.requestId);
       const toolName = pending.toolName;
       const denyMessage = msg.message ?? 'User denied this action';

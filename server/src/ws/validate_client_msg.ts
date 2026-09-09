@@ -84,6 +84,23 @@ const permissionModeOrNull = {
   kind: 'string|null',
   is: (v: unknown) => v === null || isSessionPermissionMode(v),
 } as const;
+/**
+ * `Cebab-6fax.40`. `decision` was specified as a bare `string`, so every value
+ * reached the handler, was treated as a deny, and was echoed and persisted
+ * verbatim — putting a decision Cebab never defined into the replayed
+ * transcript beside the request card, where it reads as the operator's.
+ *
+ * At the boundary rather than in the handler, for the reason this file's own
+ * header gives: one validation site covers the whole verb surface, and a
+ * rejected frame is dropped with a log line. Dropping is also the right answer
+ * on its own terms — an unrecognised decision is not a deny anyone made, and
+ * the parked promise stays parked (the WS close path drains it), so refusing
+ * approves nothing either.
+ */
+const permissionDecision = {
+  kind: 'string',
+  is: (v: unknown) => v === 'allow' || v === 'deny',
+} as const;
 const controlReason = { kind: 'string', is: isControlReasonCode } as const;
 const stopReason = { kind: 'string', is: isStopReasonCode } as const;
 const expiryAction = { kind: 'string', is: isPauseExpiryAction } as const;
@@ -109,7 +126,7 @@ const SHAPES: Table = {
   permission_decision: {
     sessionId: 'string',
     requestId: 'string',
-    decision: 'string',
+    decision: permissionDecision,
     updatedInput: 'object?',
     message: 'string?',
   },
