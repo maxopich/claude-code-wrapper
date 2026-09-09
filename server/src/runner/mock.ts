@@ -239,14 +239,47 @@ export function runMock(opts: MockOptions): AsyncIterable<SDKMessage> & {
   opts.abortController?.signal.addEventListener(
     'abort',
     () => {
-      cancelled = true;
+      cancel();
     },
     { once: true },
   );
 
+  /**
+   * Inter-message pacing that a `close()` / `interrupt()` can cut short.
+   *
+   * `Cebab-6fax.40`: this was a plain `setTimeout`, so a cancellation landing
+   * mid-sleep was not observed until the timer fired — up to one full interval
+   * later, and `CEBAB_MOCK_INTERVAL_MS` is operator-settable, so "up to one
+   * interval" is however long the operator asked for. Teardown paths that wait
+   * on the iterator to finish therefore inherited that delay, which is what
+   * made mock-mode teardown tests slow and slightly nondeterministic.
+   *
+   * The waiters are kept in a set and resolved by the same `cancel()` the abort
+   * listener and both control verbs call, rather than each sleep subscribing to
+   * the signal — one listener for the whole run is a property the comment above
+   * already establishes, and per-sleep listeners are what it was fixing.
+   */
+  const sleepers = new Set<() => void>();
+  const cancel = (): void => {
+    cancelled = true;
+    for (const wake of sleepers) wake();
+    sleepers.clear();
+  };
   const sleep = (ms: number) =>
     new Promise<void>((resolve) => {
-      setTimeout(resolve, ms);
+      if (cancelled) {
+        resolve();
+        return;
+      }
+      const timer = setTimeout(() => {
+        sleepers.delete(wake);
+        resolve();
+      }, ms);
+      const wake = (): void => {
+        clearTimeout(timer);
+        resolve();
+      };
+      sleepers.add(wake);
     });
 
   let synthesized = 0;
@@ -362,10 +395,10 @@ export function runMock(opts: MockOptions): AsyncIterable<SDKMessage> & {
       return it;
     },
     close() {
-      cancelled = true;
+      cancel();
     },
     async interrupt() {
-      cancelled = true;
+      cancel();
     },
     async setPermissionMode() {
       // no-op in mock; real Query forwards to the spawned claude
