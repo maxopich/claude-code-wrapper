@@ -28,6 +28,21 @@ import { isMuteAllowed, muteKeyFor, readMutes, removeMute, type MuteEntry } from
  * Per-row "Mark read" sends an `ack_notification` ClientMsg via the
  * dock's existing onAck callback. The server's reply is a fresh
  * `inbox_snapshot` that updates the panel automatically.
+ *
+ * SAFETY-CLASS ROWS ASK FOR A REASON FIRST (`Cebab-6fax.30`). The server
+ * REQUIRES a non-empty `ackReason` for the highest safety sub-codes
+ * (`requiresTypedAckReason` in `ws/server.ts`) and refuses the ack without
+ * one. Every path here used to call `onAck(row.id)` with no second argument
+ * and the prop was typed `(id: string) => void`, so those rows — the ones that
+ * exist BECAUSE they must not be dismissed silently — could not be
+ * acknowledged at all, and the refusal surfaced as a generic "Server error".
+ *
+ * The prompt fires on the whole `safety` class, deliberately wider than the
+ * server's rule: the envelope carries `class` and `reasonCode` but not the
+ * audit KIND that half the server's decision reads, so the client cannot
+ * reproduce that predicate without shipping a second copy of it to drift.
+ * A reason on a row that did not need one is accepted and recorded
+ * (`msg.ackReason?.trim() || null`), which is the harmless direction.
  */
 
 const TIER_LABEL: Record<NotificationSeverity, string> = {
@@ -55,7 +70,7 @@ export type NotificationInboxProps = {
    * (BE-7) is enforced server-side identically regardless of where the
    * ack originates. Optional in tests.
    */
-  onAck?: (id: string) => void;
+  onAck?: (id: string, ackReason?: string) => void;
 };
 
 export function NotificationInbox({ onClose, onAck }: NotificationInboxProps) {
@@ -253,13 +268,17 @@ function MuteUntilLabel({ entry }: { entry: MuteEntry }) {
 
 type InboxRowProps = {
   row: NotificationEnvelope;
-  onAck?: (id: string) => void;
+  onAck?: (id: string, ackReason?: string) => void;
   isMuted: boolean;
 };
 
 function InboxRow({ row, onAck, isMuted }: InboxRowProps) {
   const time = formatTime(row.ts);
   const muteEligible = isMuteAllowed(row.severity);
+  const needsReason = row.class === 'safety';
+  const [reasonOpen, setReasonOpen] = useState(false);
+  const [reason, setReason] = useState('');
+  const reasonValid = reason.trim().length > 0;
   return (
     <li className="notif-inbox-row" data-severity={row.severity} data-class={row.class}>
       <div className="notif-inbox-row-head">
@@ -279,7 +298,7 @@ function InboxRow({ row, onAck, isMuted }: InboxRowProps) {
       {row.message && <div className="notif-inbox-row-msg">{row.message}</div>}
       <div className="notif-inbox-row-foot">
         {row.action && <ActionLabel action={row.action} />}
-        {onAck && (
+        {onAck && !needsReason && (
           <button
             type="button"
             className="notif-inbox-row-ack"
@@ -289,7 +308,57 @@ function InboxRow({ row, onAck, isMuted }: InboxRowProps) {
             Mark read
           </button>
         )}
+        {onAck && needsReason && !reasonOpen && (
+          <button
+            type="button"
+            className="notif-inbox-row-ack"
+            onClick={() => setReasonOpen(true)}
+            aria-label={`Mark notification ${row.title} as read, with a reason`}
+          >
+            Mark read…
+          </button>
+        )}
       </div>
+      {onAck && needsReason && reasonOpen && (
+        <form
+          className="notif-inbox-row-reason"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (!reasonValid) return;
+            onAck(row.id, reason.trim());
+            setReasonOpen(false);
+            setReason('');
+          }}
+        >
+          <label className="notif-inbox-row-reason-label" htmlFor={`ack-reason-${row.id}`}>
+            Why is this safe to dismiss?
+          </label>
+          <input
+            id={`ack-reason-${row.id}`}
+            className="notif-inbox-row-reason-input"
+            type="text"
+            value={reason}
+            autoFocus
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="e.g. re-seat was mine, chain re-anchored"
+          />
+          <div className="notif-inbox-row-reason-actions">
+            <button type="submit" className="notif-inbox-row-ack" disabled={!reasonValid}>
+              Mark read
+            </button>
+            <button
+              type="button"
+              className="notif-inbox-row-reason-cancel"
+              onClick={() => {
+                setReasonOpen(false);
+                setReason('');
+              }}
+            >
+              Cancel
+            </button>
+          </div>
+        </form>
+      )}
     </li>
   );
 }
