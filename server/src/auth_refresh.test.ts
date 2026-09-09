@@ -1,11 +1,13 @@
 import { describe, expect, test, afterEach, vi, beforeEach } from 'vitest';
 import { EventEmitter } from 'node:events';
 import type { ChildProcess } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import {
   startAuthRefresh,
   cancelAuthRefresh,
   getActiveAuthRefreshRunId,
   _resetForTesting,
+  CLAUDE_AUTH_LOGIN_ARGS,
   type AuthRefreshCallbacks,
 } from './auth_refresh.js';
 
@@ -117,7 +119,7 @@ describe('[security] startAuthRefresh — win32 shell requirement', () => {
     // through cmd.exe's PATHEXT lookup.
     const win = spawnOptsOn('win32');
     expect(win.command).toBe('claude');
-    expect(win.args).toEqual(['login']);
+    expect(win.args).toEqual([...CLAUDE_AUTH_LOGIN_ARGS]);
   });
 
   test('the platform seam actually changes the outcome — anti-vacuity', () => {
@@ -153,7 +155,7 @@ describe('startAuthRefresh — happy path', () => {
     expect(onStarted).toHaveBeenCalledWith({ runId: result.runId, pid: 9999 });
     expect(spawnFn).toHaveBeenCalledWith(
       'claude',
-      ['login'],
+      [...CLAUDE_AUTH_LOGIN_ARGS],
       expect.objectContaining({ stdio: ['ignore', 'pipe', 'pipe'] }),
     );
     expect(getActiveAuthRefreshRunId()).toBe(result.runId);
@@ -404,5 +406,68 @@ describe('finalize-once invariant', () => {
     expect(onCompleted).toHaveBeenCalledTimes(1);
     child.emit('error', new Error('late error'));
     expect(onCompleted).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('[security] the re-authenticate argv names a command the CLI actually has', () => {
+  // WHY THIS TEST IS NOT AN EQUALITY CHECK AGAINST A LITERAL. The version it
+  // replaces asserted `expect(win.args).toEqual(['login'])` — a copy of the
+  // value under test, which agrees with the code no matter what the code says.
+  // `claude login` is not a command: the root parser takes an unrecognised
+  // word as a PROMPT, so it started a session, asked the model about the
+  // string "login", and exited 0 — which Cebab reported as a successful
+  // re-authentication (`Cebab-6fax.12`). The only way to catch that class of
+  // error is to compare against something outside this repo, so this reads the
+  // installed CLI's own command surface.
+  //
+  // It is SKIPPED, not failed, when `claude` is absent or `--help` misbehaves:
+  // CI has no CLI, and a gate that reddens on a missing optional binary gets
+  // deleted rather than fixed. The skip is visible in the reporter, and the
+  // structural half above (argv === CLAUDE_AUTH_LOGIN_ARGS) runs everywhere.
+  const help = (() => {
+    try {
+      return execFileSync('claude', ['auth', '--help'], {
+        encoding: 'utf8',
+        timeout: 20_000,
+        stdio: ['ignore', 'pipe', 'ignore'],
+      });
+    } catch {
+      return null;
+    }
+  })();
+
+  /**
+   * Does `--help` list `name` as a subcommand? A line scan rather than a
+   * constructed RegExp: `security/detect-non-literal-regexp` rejects the
+   * latter, and a linear scan needs no exemption — the better end state either
+   * way (`project_adopted_rule_vs_deliberate_code`).
+   *
+   * Help output indents each command and follows it with whitespace and a
+   * description, e.g. "  login [options]   Sign in to your Anthropic account".
+   */
+  function listsSubcommand(text: string, name: string): boolean {
+    return text
+      .split('\n')
+      .map((l) => l.trim())
+      .some((l) => l === name || l.startsWith(`${name} `));
+  }
+
+  test.skipIf(help === null)('`claude auth` lists the subcommand we spawn', () => {
+    expect(listsSubcommand(help!, CLAUDE_AUTH_LOGIN_ARGS[1]!)).toBe(true);
+  });
+
+  test.skipIf(help === null)('anti-vacuity: the same probe rejects a made-up subcommand', () => {
+    // Without this, a `--help` that returned an empty string — or a matcher
+    // that was really matching some other line — would pass the assertion
+    // above for any input at all.
+    expect(listsSubcommand(help!, 'notasubcommand')).toBe(false);
+    // And it must not match a mere substring of a longer command name.
+    expect(listsSubcommand('  logins   Not the one\n', 'login')).toBe(false);
+  });
+
+  test('the args go through the shared constant, not a literal at the call site', () => {
+    // Pins the seam the fix introduced: one place to change, and the test above
+    // is what says whether that place is right.
+    expect([...CLAUDE_AUTH_LOGIN_ARGS]).toEqual(['auth', 'login']);
   });
 });

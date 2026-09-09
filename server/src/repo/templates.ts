@@ -15,14 +15,37 @@ const VALID_MODES: ReadonlySet<MultiAgentTemplate['mode']> = new Set([
   'custom',
 ]);
 
-export function listTemplates(): MultiAgentTemplate[] {
+/**
+ * The stored array exactly as written, with no filtering.
+ *
+ * WHY THE WRITE PATH NEEDS THIS AND THE READ PATH DOES NOT
+ * (`Cebab-6fax.34`). `listTemplates` drops rows whose `mode` it does not
+ * recognise — defensive, and right for a renderer. But `saveTemplate` and
+ * `deleteTemplate` used to build their new array FROM that filtered read and
+ * write it back, so the read-side tolerance became write-side DESTRUCTION: one
+ * unrecognised row plus one unrelated save, and the row was gone. A client one
+ * version ahead (or a single corrupted entry) silently wiped the operator's
+ * saved rosters.
+ *
+ * So the rule is: filter what you RENDER, preserve what you STORE. Rows this
+ * process cannot interpret are carried through untouched — a value we cannot
+ * judge is not a value we may delete.
+ */
+function readStoredTemplates(): MultiAgentTemplate[] {
   const stored = getSetting<MultiAgentTemplate[]>(SETTING_KEY);
   if (!Array.isArray(stored)) return [];
+  // A null/non-object entry would throw on the `.name`/`.id` reads in the
+  // write paths; drop only those, since there is nothing to preserve.
+  return stored.filter((t): t is MultiAgentTemplate => typeof t === 'object' && t !== null);
+}
+
+export function listTemplates(): MultiAgentTemplate[] {
   // PR-6: defensive mode filter. Drop rows with unknown modes so a
   // future client can't read a row it doesn't understand and either
   // crash or render garbage. `roles?` and `layout?` survive unchanged
-  // (the renderer treats absent fields as "no override").
-  return stored.filter((t) => VALID_MODES.has(t.mode));
+  // (the renderer treats absent fields as "no override"). READ-ONLY —
+  // see `readStoredTemplates` for why no write path may start here.
+  return readStoredTemplates().filter((t) => VALID_MODES.has(t.mode));
 }
 
 /**
@@ -55,7 +78,10 @@ export function saveTemplate(input: {
   pauseOnDangerous?: boolean;
 }): MultiAgentTemplate[] {
   const name = input.name.trim();
-  const list = listTemplates();
+  // The RAW list, not `listTemplates()` — see `readStoredTemplates`. Upserting
+  // over the filtered view would rewrite the setting without the rows the
+  // filter dropped.
+  const list = readStoredTemplates();
   const idx = list.findIndex((t) => t.name === name);
   // PR-7: defensive clamp. We accept a fractional value gracefully (round
   // down), reject NaN/Infinity/non-numbers, and require >= 1 — sub-1 is
@@ -82,11 +108,17 @@ export function saveTemplate(input: {
   };
   const out = idx >= 0 ? list.map((t, i) => (i === idx ? next : t)) : [...list, next];
   setSetting(SETTING_KEY, out);
-  return out;
+  // Store everything, return only what this build can render — the same split
+  // `deleteTemplate` makes.
+  return out.filter((t) => VALID_MODES.has(t.mode));
 }
 
 export function deleteTemplate(id: string): MultiAgentTemplate[] {
-  const out = listTemplates().filter((t) => t.id !== id);
+  // Raw list for the same reason as `saveTemplate`: deleting ONE template must
+  // not also delete every row whose mode this build does not recognise.
+  const out = readStoredTemplates().filter((t) => t.id !== id);
   setSetting(SETTING_KEY, out);
-  return out;
+  // The caller renders this, so hand back the filtered view — the unreadable
+  // rows stay on disk and stay invisible, which is the intended split.
+  return out.filter((t) => VALID_MODES.has(t.mode));
 }

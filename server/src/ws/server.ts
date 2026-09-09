@@ -5399,17 +5399,25 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
           return;
         }
         conn.multiAgentStartClaim = startClaimId;
-        // Cluster B Phase 4b (§4.4): TOFU spawn-gate. Per unique worker
-        // project, prompt the operator for any declared MCP server that
-        // isn't currently 'trusted'. Awaiting blocks the spawn until every
-        // decision arrives. The orchestrator itself runs from an empty
-        // cwd (no MCPs to gate); only workers carry project-declared MCPs.
-        const orchestratorDenials = await gateProjectsForSpawn(
-          conn,
-          workers.map((w) => w.projectId),
-          BUS_SETTING_SCOPES,
-        );
         try {
+          // Cluster B Phase 4b (§4.4): TOFU spawn-gate. Per unique worker
+          // project, prompt the operator for any declared MCP server that
+          // isn't currently 'trusted'. Awaiting blocks the spawn until every
+          // decision arrives. The orchestrator itself runs from an empty
+          // cwd (no MCPs to gate); only workers carry project-declared MCPs.
+          //
+          // INSIDE the try, and that is the fix, not a tidy-up
+          // (`Cebab-6fax.16`). This await used to sit between the claim above
+          // and the `try` below, so the `cancel_gate` path — an operator
+          // DECLINING a trust prompt — returned with the process-wide claim
+          // still held, and every later bus start from this connection was
+          // refused until the tab was closed. Same await-before-try shape as
+          // `Cebab-0s4d`; the claim's only release is this block's `finally`.
+          const orchestratorDenials = await gateProjectsForSpawn(
+            conn,
+            workers.map((w) => w.projectId),
+            BUS_SETTING_SCOPES,
+          );
           const handle = await startOrchestratorSession({
             workers,
             mcpDenials: orchestratorDenials,
@@ -5527,15 +5535,17 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
         return;
       }
       conn.multiAgentStartClaim = startClaimId;
-      // Cluster B Phase 4b (§4.4): TOFU spawn-gate, mirror of the
-      // orchestrator path. Chain participants may repeat (e.g. [A, B, A])
-      // and the helper dedupes on projectId so A is gated once.
-      const chainDenials = await gateProjectsForSpawn(
-        conn,
-        participants.map((p) => p.projectId),
-        BUS_SETTING_SCOPES,
-      );
       try {
+        // Cluster B Phase 4b (§4.4): TOFU spawn-gate, mirror of the
+        // orchestrator path — including its placement INSIDE the try, for the
+        // reason spelled out there (`Cebab-6fax.16`). Chain participants may
+        // repeat (e.g. [A, B, A]) and the helper dedupes on projectId so A is
+        // gated once.
+        const chainDenials = await gateProjectsForSpawn(
+          conn,
+          participants.map((p) => p.projectId),
+          BUS_SETTING_SCOPES,
+        );
         const handle = await startChainSession({
           participants,
           mcpDenials: chainDenials,

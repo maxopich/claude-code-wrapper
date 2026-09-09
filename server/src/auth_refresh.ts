@@ -59,6 +59,27 @@ export type StartAuthRefreshResult =
   | { ok: false; reason: 'already_running'; existingRunId: string }
   | { ok: false; reason: 'spawn_failed'; error: string };
 
+/**
+ * The CLI subcommand that actually signs a subscription account in.
+ *
+ * IT IS `claude auth login`, NOT `claude login` (`Cebab-6fax.12`). The bare
+ * form is not a command at all: the root parser takes an unrecognised word as
+ * a PROMPT, so `claude login` starts a session and asks the model what to do
+ * with the string "login" — measured 2026-09-09 against CLI 2.1.212, which
+ * answered "there's no login action I can take here" and exited 0. Cebab read
+ * that zero as success, so Re-authenticate reported a completed refresh while
+ * spending a real subscription turn and changing no credential. `claude --help`
+ * lists no `login` command; `claude auth --help` lists `login`, `logout` and
+ * `status`.
+ *
+ * A constant rather than an inline literal because the unit test previously
+ * asserted the argv against its own hard-coded copy of the wrong value, which
+ * is a test that can only ever agree with the code. The test now asserts this
+ * constant AND checks it against the installed CLI's own command surface, so
+ * the argv is pinned to something outside the repo.
+ */
+export const CLAUDE_AUTH_LOGIN_ARGS: readonly string[] = ['auth', 'login'];
+
 export type AuthRefreshOptions = {
   /** Injection seam for tests. Defaults to `child_process.spawn`. */
   spawnFn?: typeof spawn;
@@ -69,7 +90,7 @@ export type AuthRefreshOptions = {
   /** Override the binary name. Defaults to `'claude'`. Tests use a
    *  no-op alternative like `'node'` with a stub script. */
   binary?: string;
-  /** Override the args. Defaults to `['login']`. */
+  /** Override the args. Defaults to {@link CLAUDE_AUTH_LOGIN_ARGS}. */
   args?: string[];
   /** Injection seam for tests. Defaults to `process.platform`. Exists
    *  because the win32 shell requirement below is otherwise only
@@ -140,7 +161,7 @@ export function startAuthRefresh(
 
   const spawnFn = opts.spawnFn ?? spawn;
   const binary = opts.binary ?? 'claude';
-  const args = opts.args ?? ['login'];
+  const args = opts.args ?? [...CLAUDE_AUTH_LOGIN_ARGS];
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const platform = opts.platform ?? process.platform;
 
@@ -173,8 +194,8 @@ export function startAuthRefresh(
       //
       // No injection surface on the reachable path: `ws/server.ts` calls
       // `startAuthRefresh(callbacks)` with no opts, so binary and args are
-      // the fixed literals 'claude' and ['login']. `opts.binary`/`opts.args`
-      // are test seams.
+      // the fixed literals 'claude' and CLAUDE_AUTH_LOGIN_ARGS.
+      // `opts.binary`/`opts.args` are test seams.
       //
       // Residual, Windows only: with a shell the child is cmd.exe, so
       // `cancelAuthRefresh`'s kill may terminate the shell and leave the
