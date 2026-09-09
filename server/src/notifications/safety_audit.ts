@@ -124,12 +124,20 @@ export const HIGHEST_AUDIT_KINDS: ReadonlySet<string> = new Set(['audit.tamper_d
 /**
  * Runtime mode tagged on every audit row (Cluster G Phase 1 / migration
  * 023). 'live' for normal Cebab runs; 'mock' iff `config.mock === true`
- * at append time (operator launched with `MOCK=1`).
+ * at append time (operator launched with `CEBAB_MOCK=1`).
  *
- * Default forensics queries filter `WHERE mode='live'` so a misconfigured
- * demo doesn't pollute eval signal — but mock rows are still WRITTEN, so
- * the same demo can't pretend nothing happened. Callers do not pass this;
- * it's derived inside `appendSafetyAudit` from `config.mock`.
+ * The tag exists so a forensics query CAN exclude a misconfigured demo
+ * without losing the fact that it happened — mock rows are still written, so
+ * the demo cannot pretend nothing did. `Cebab-6fax.44`: this used to say
+ * "default forensics queries filter `WHERE mode='live'`", stated as present
+ * tense. No query in `server/` filters on `mode` or `mock` at all; the only
+ * non-test uses of either column are the writes. Migration 023 created three
+ * indexes for those absent queries, which are therefore B-trees maintained on
+ * every insert for no reader — dropping them needs its own migration and is
+ * still open on the bead.
+ *
+ * Callers do not pass this; it's derived inside `appendSafetyAudit` from
+ * `config.mock`.
  */
 export type SafetyAuditMode = 'live' | 'mock';
 

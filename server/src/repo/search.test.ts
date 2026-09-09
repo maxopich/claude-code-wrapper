@@ -15,6 +15,7 @@ import {
 } from './multi_agent.js';
 import { MIN_SEARCH_QUERY_LEN, searchSessions } from './search.js';
 import { ensureAssistantProject } from '../assistant/identity.js';
+import { buildSingleAgentSessionLogChunk } from '../ws/session_log.js';
 
 // Cluster I Phase C4 (UI_Findings spec §4.2): server-side coverage for the
 // tier-1 cross-session LIKE scan. We spin a real SQLite under a tmp `~/.cebab`
@@ -156,8 +157,79 @@ describe('[security] searchSessions — containment / redaction invariant (C4-5 
     // The whole snippet is built from the redacted object — the secret bytes
     // are gone even though the raw row (which the LIKE scanned) still has them.
     expect(hit.snippet).not.toContain(SECRET);
-    // And the UI gets told the row contained redacted content.
-    expect(hit.redactedFields).toContain('api_key');
+    // And the UI gets told the row contained redacted content, by the SAME
+    // path the drawer reports (`Cebab-6fax.44`). It used to be `api_key`,
+    // because search wrapped the row one level shallower than the projector
+    // does — the same offset that let a node at parsed-depth 12 be masked in
+    // the drawer and snippeted verbatim here.
+    expect(hit.redactedFields).toContain('payload.api_key');
+  });
+
+  test('[security] the two redactors agree, path for path, on the same row', () => {
+    // The invariant the module header claims, asserted against the OTHER
+    // implementation rather than against a literal. A path list that differs
+    // is the visible half of a depth offset whose invisible half is which
+    // nodes `MAX_DEPTH` masks — and the module had exactly that offset while
+    // claiming "we rebuild the EXACT object the per-session view redacts".
+    const pid = seedProject('p');
+    seedSessionWithText(pid, 's1', 'hello world from the agent', { api_key: SECRET });
+
+    const { results } = searchSessions({ query: 'hello', scope: 'all_projects' });
+    const chunk = buildSingleAgentSessionLogChunk({
+      sessionId: 's1',
+      offset: 0,
+      limit: 100,
+      revealSensitive: false,
+    });
+    const drawerFields = chunk.rows.flatMap((r) => r.redactedFields ?? []);
+    expect(drawerFields).not.toEqual([]); // anti-vacuity: both sides found something
+    expect(results[0]!.redactedFields).toEqual(drawerFields);
+  });
+
+  test('[security] a needle the drawer masks at MAX_DEPTH is not snippeted by search', () => {
+    // The half of the offset that leaks, and the reason the wrapper had to
+    // move rather than the header (`Cebab-6fax.44`). `redactSensitive` masks a
+    // whole subtree past `MAX_DEPTH`. The projector walks the SDK envelope
+    // under a `payload` key, so a node the drawer sees at depth 13 was seen
+    // here at depth 12 — one level, in the leak direction: a plain,
+    // non-secret-shaped string the Logs drawer shows as `<redacted>` came back
+    // as a search snippet.
+    //
+    // Stated as the invariant rather than as a boundary constant: at EVERY
+    // depth the drawer masks, search must return nothing. The loop spans the
+    // boundary from both sides, and the anti-vacuity assertion below is that
+    // it actually crossed it — a nesting builder that never reached MAX_DEPTH
+    // would make every iteration trivially true.
+    const pid = seedProject('p');
+    let anyMasked = false;
+    for (let depth = 9; depth <= 16; depth += 1) {
+      const sid = `deep-${depth}`;
+      const needle = `needledepth${depth}`;
+      let nest: Record<string, unknown> = { leaf: needle };
+      for (let i = 0; i < depth; i += 1) nest = { [`n${i}`]: nest };
+      createSession(sid, pid);
+      insertEvent(
+        sid,
+        nextSeq(sid),
+        'assistant',
+        null,
+        JSON.stringify({ type: 'assistant', nest }),
+      );
+
+      const chunk = buildSingleAgentSessionLogChunk({
+        sessionId: sid,
+        offset: 0,
+        limit: 10,
+        revealSensitive: false,
+      });
+      const drawerShowsIt = JSON.stringify(chunk.rows).includes(needle);
+      const hits = searchSessions({ query: needle, scope: 'all_projects' }).results;
+      if (!drawerShowsIt) {
+        anyMasked = true;
+        expect(hits, `depth ${depth}: drawer masks it, search must not snippet it`).toEqual([]);
+      }
+    }
+    expect(anyMasked, 'no depth in the range was masked — the case tests nothing').toBe(true);
   });
 
   test('searching FOR the secret value returns nothing (the match lived only in a redacted field)', () => {

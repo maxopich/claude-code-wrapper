@@ -386,6 +386,52 @@ describe('buildSingleAgentSessionLogChunk — projection', () => {
     expect(chunk.rows[0]?.summary).toBe('hello world');
   });
 
+  test('same-millisecond rows are ordered by row id, not by collating the display string', () => {
+    // `Cebab-6fax.44`. The tiebreak was `a.id.localeCompare(b.id)` over the
+    // DERIVED string `event:<id>`, so `event:10` collated before `event:9` and
+    // before `event:2`. Single-agent is the worst case: `agent` is the
+    // constant 'agent' here, so the id decides EVERY same-millisecond pair,
+    // and a turn mints several rows inside one millisecond routinely — the
+    // drawer showed an order that was neither insertion nor time.
+    //
+    // The ts is written explicitly rather than left to `Date.now()`: a test
+    // that happened to straddle a millisecond boundary would be decided by the
+    // `ts` comparison and never reach the tiebreak at all, which is the
+    // fixture-omits-the-input failure. Twelve rows, so the ids cross the digit
+    // boundary that produces the wrong collation.
+    const sid = setupSession('sa-order');
+    for (let i = 1; i <= 12; i += 1) {
+      getDb()
+        .prepare(
+          `INSERT INTO events (session_id, seq, ts, type, subtype, raw)
+           VALUES (?, ?, 1000, 'assistant', NULL, ?)`,
+        )
+        .run(sid, i, JSON.stringify({ message: { content: [{ type: 'text', text: `m${i}` }] } }));
+    }
+
+    const chunk = buildSingleAgentSessionLogChunk({
+      sessionId: sid,
+      offset: 0,
+      limit: 100,
+      revealSensitive: false,
+    });
+    expect(chunk.total).toBe(12);
+    expect(chunk.rows.map((r) => r.summary)).toEqual([
+      'm1',
+      'm2',
+      'm3',
+      'm4',
+      'm5',
+      'm6',
+      'm7',
+      'm8',
+      'm9',
+      'm10',
+      'm11',
+      'm12',
+    ]);
+  });
+
   test('assistant carrying tool_use blocks projects as kind=tool with the tool name in status', () => {
     const sid = setupSession();
     pushEvent(sid, 'assistant', null, {

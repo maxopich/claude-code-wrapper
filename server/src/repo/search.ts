@@ -14,12 +14,23 @@
  *
  *   1. SQL `LIKE` is only the COARSE candidate finder — it scans the raw
  *      (unredacted) column so we don't miss rows. Its output is never shown.
- *   2. For each candidate we rebuild the EXACT object the per-session view
- *      redacts (`{ type, subtype, payload }` for events; `{ source, destination,
- *      kind, text }` for hops), run it through the same `redactSensitive`, and
- *      collect only the STRING VALUES of the redacted tree as the snippet
- *      haystack. Keys are dropped (kills field-name noise, per spec §4.2) and
- *      redacted values are already `<redacted>`.
+ *   2. For each candidate we run the same `redactSensitive` over a tree of the
+ *      same DEPTH as the one the per-session view redacts, and collect only
+ *      the STRING VALUES of the redacted tree as the snippet haystack. Keys
+ *      are dropped (kills field-name noise, per spec §4.2) and redacted values
+ *      are already `<redacted>`.
+ *
+ *      Depth, not shape, is what the invariant needs, and this used to claim
+ *      shape and deliver neither (`Cebab-6fax.44`). The projector wraps an
+ *      event as `{ type, subtype, seq, payload }`; search wrapped it as the
+ *      bare parsed envelope, one level shallower — so a node the projector
+ *      walked at depth 13 and masked wholesale at `MAX_DEPTH` was walked at
+ *      depth 12 here and kept verbatim. Exactly one level, in the leak
+ *      direction. The wrapper is now `{ payload }` in every branch, which puts
+ *      every node at the projector's depth; the sibling keys are deliberately
+ *      NOT copied, because they are VALUES (`assistant`, `user`, `result`) and
+ *      `collectStringValues` would put them into every row's haystack, making
+ *      a search for "user" match the whole corpus.
  *   3. The query is then re-found in that REDACTED haystack. A hit whose only
  *      match lived in a redacted value (e.g. the operator pasted a known
  *      secret) or in a JSON key name yields no match in the haystack, so the
@@ -291,14 +302,21 @@ function eventRowToHit(
   queryLower: string,
 ): SearchResult | null {
   const parsed = safeParseJson(row.raw);
-  // Mirror the per-session projector's redaction target exactly: the parsed
-  // SDK envelope when available, else a `{ payload: <raw string> }` wrapper so
-  // Tier-3 inline patterns still mask secrets in a corrupt/partial row.
-  const target = parsed ?? { payload: row.raw };
+  // `Cebab-6fax.44`: the projector's target is `{ type, subtype, seq, payload }`
+  // — the parsed envelope sits one level DOWN, under `payload`. Wrapping here
+  // the same way is what makes `redactSensitive` see every node at the same
+  // depth it sees on the per-session side, so `MAX_DEPTH` fires on the same
+  // nodes. Wrapping only the corrupt-row case (which is what this did) left
+  // every parsed row a level shallow, and a node at parsed-depth 12 was masked
+  // in the drawer and snippeted verbatim here.
+  //
+  // Used by BOTH branches: the raw path fed `parsed` unwrapped, so the two
+  // haystacks disagreed about depth even before redaction entered it.
+  const target = { payload: parsed ?? row.raw };
   let haystack: string;
   let redactedFields: string[] | undefined;
   if (useRaw) {
-    haystack = haystackFor(parsed ?? row.raw);
+    haystack = haystackFor(target);
   } else {
     const { redacted, fields } = redactSensitive(target);
     haystack = haystackFor(redacted);

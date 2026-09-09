@@ -8,13 +8,23 @@
  * SORT; redaction is the dominant cost.
  *
  * WHY THE FIX IS A KEY SCAN AND NOT `LIMIT`/`OFFSET` IN SQL. The register's
- * suggested fix was "push offset and limit into SQL". The ordering is
- * `(ts, agent, id)` where BOTH tiebreak fields are DERIVED in the projector —
- * `event:${id}` / `mutation:${id}`, and `agent` is `source` or `agentName` —
- * and compared with `String.localeCompare`, i.e. ICU collation. A `UNION`
- * with a SQL `ORDER BY` would have to be argued equivalent to `localeCompare`
- * before it could claim "no behaviour change". Reading the sort KEY first
- * keeps the comparator in JS, byte for byte, so there is nothing to argue.
+ * suggested fix was "push offset and limit into SQL". The tiebreak fields are
+ * DERIVED in the projector — the stream and row id behind `event:${id}` /
+ * `mutation:${id}`, and an `agent` that is `source` or `agentName` compared
+ * with `String.localeCompare`, i.e. ICU collation. A `UNION` with a SQL
+ * `ORDER BY` would have to be argued equivalent before it could claim "no
+ * behaviour change". Reading the sort KEY first keeps the comparator in JS,
+ * byte for byte, so there is nothing to argue.
+ *
+ * `Cebab-6fax.44`: the oracle below is UPDATED, not merely preserved. It
+ * reproduced the pre-S04 tiebreak faithfully — `a.id.localeCompare(b.id)` on
+ * the display string — and that tiebreak was wrong: it collates `event:10`
+ * before `event:9`. Faithful reproduction of a defect is what a
+ * pre-refactor oracle is for, and it is also how a green test ends up
+ * defending the bug, so the rule moves on both sides at once and the direct
+ * ordering case added below is what keeps THIS side honest. The oracle still
+ * derives the key from the row's own `id` string rather than importing the
+ * comparator, so the two remain independent implementations.
  *
  * TWO GATES, and they check different things:
  *
@@ -100,10 +110,20 @@ function oracleMultiAgent(sessionId: string, offset: number, limit: number): Log
     const row = multiAgentMutationToLogRow(m, false);
     if (row !== null) rows.push(row);
   }
+  // Derived here from the row's own `id`, independently of the projector's
+  // `SortKey`: `event:12` -> stream `event`, row 12. Numeric, so `event:10`
+  // sorts after `event:9` (`Cebab-6fax.44`).
+  const key = (r: LogRow): { stream: string; n: number } => {
+    const at = r.id.lastIndexOf(':');
+    return { stream: r.id.slice(0, at), n: Number(r.id.slice(at + 1)) };
+  };
   rows.sort((a, b) => {
     if (a.ts !== b.ts) return a.ts - b.ts;
     if (a.agent !== b.agent) return a.agent.localeCompare(b.agent);
-    return a.id.localeCompare(b.id);
+    const ka = key(a);
+    const kb = key(b);
+    if (ka.stream !== kb.stream) return ka.stream < kb.stream ? -1 : 1;
+    return ka.n - kb.n;
   });
   return rows.slice(offset, offset + limit);
 }

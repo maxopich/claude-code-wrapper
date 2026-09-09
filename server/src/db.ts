@@ -154,9 +154,37 @@ export function getDb(): Database.Database {
   precreateDbFile(config.dbPath);
   const db = new Database(config.dbPath);
   db.pragma('journal_mode = WAL');
-  db.pragma('foreign_keys = ON');
+  // `Cebab-6fax.44`: migrations run with foreign-key enforcement OFF, and the
+  // pragma is only turned on afterwards.
+  //
+  // SQLite's own procedure for altering a table you cannot `ALTER` — create
+  // `<t>_new`, copy, `DROP TABLE <t>`, rename — requires `foreign_keys = OFF`,
+  // and `applyMigrations` wraps every file in a transaction. Inside a
+  // transaction that pragma is a NO-OP: a migration author who writes
+  // `PRAGMA foreign_keys = OFF` at the top of their file gets no error, no
+  // effect, and a `DROP TABLE` that cascade-deletes every child row — inside a
+  // transaction that then COMMITs clean. Measured on sqlite 3.51.0: the child
+  // table came out empty and nothing failed.
+  //
+  // Not a hypothetical shape. `038_mcp_trust_declaration_identity.sql` already
+  // performs that exact dance; it was safe only because nothing references
+  // `mcp_trust`. `projects`, `sessions` and `multi_agent_sessions` all have
+  // CASCADE children, and rebuilding any of them under the old ordering would
+  // have silently emptied them.
+  //
+  // `foreign_key_check` between the two is what keeps this from trading one
+  // silent failure for another: with enforcement off, a migration that leaves
+  // a dangling reference would otherwise be noticed only by whichever later
+  // query tripped over it.
   ensureMigrationsTable(db);
   applyMigrations(db);
+  const violations = db.pragma('foreign_key_check') as unknown[];
+  if (violations.length > 0) {
+    throw new Error(
+      `[db] migrations left ${violations.length} foreign-key violation(s); refusing to open the database`,
+    );
+  }
+  db.pragma('foreign_keys = ON');
   _db = db;
   return db;
 }

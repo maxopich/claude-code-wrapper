@@ -264,6 +264,49 @@ const SESSION_ORDER_QUERIES: ReadonlyArray<{
   },
 ];
 
+/**
+ * `Cebab-6fax.44` — what `sessions_archived_deleted_idx` actually serves.
+ *
+ * Migration 025 documented three queries for it and serves none of them; the
+ * measured plans are in the migration's own comment now. These two pin the
+ * corrected reading from both sides, so the next person to read that comment
+ * is reading something a test agrees with.
+ */
+describe('the (archived, deleted_at) index: what uses it and what does not', () => {
+  withTempDataDir('queryplans-archived-deleted');
+
+  test('listIdleSessionIds enters it — both columns are constrained', () => {
+    // `IS NULL` counts as an equality to SQLite, so `archived = 0 AND
+    // deleted_at IS NULL` gives the index both of its terms.
+    sameShapeAsSource(
+      'repo/sessions.ts',
+      'WHERE last_event_at < ? AND deleted_at IS NULL AND archived = 0',
+    );
+    const p = plan(
+      'SELECT id FROM sessions WHERE last_event_at < ? AND deleted_at IS NULL AND archived = 0 ORDER BY last_event_at ASC',
+      [0],
+    ).join(' ');
+    expect(p, p).toContain('sessions_archived_deleted_idx');
+  });
+
+  test('the purge cron cannot, and its scan is the recorded decision', () => {
+    // `archived` leads the index and the cron constrains only `deleted_at`,
+    // so there is no way in. Recorded rather than fixed: it is a cron over a
+    // table with one row per session, and an index for it would be a second
+    // B-tree maintained on every insert to serve one periodic query.
+    sameShapeAsSource(
+      'repo/sessions.ts',
+      'WHERE deleted_at IS NOT NULL AND deleted_at < ? ORDER BY deleted_at ASC',
+    );
+    const p = plan(
+      'SELECT id FROM sessions WHERE deleted_at IS NOT NULL AND deleted_at < ? ORDER BY deleted_at ASC',
+      [0],
+    ).join(' ');
+    expect(p, p).toContain('SCAN sessions');
+    expect(p, p).toContain('USE TEMP B-TREE');
+  });
+});
+
 describe('C20: every session-ordering query keeps its recorded plan shape', () => {
   withTempDataDir('queryplans-session-order');
 
