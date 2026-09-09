@@ -408,3 +408,34 @@ describe('the rejection reason is safe to log', () => {
     expect((r.ok ? '' : r.reason).length).toBeLessThan(100);
   });
 });
+
+describe('[security] permission_decision is a closed pair (Cebab-6fax.40)', () => {
+  // `decision` was specified as a bare `string`, so anything passed validation,
+  // was treated as a deny by the handler, and was then ECHOED on the wire and
+  // PERSISTED into the session's replay — putting a decision Cebab never
+  // defined next to the request card, where it reads as the operator's.
+  const base = { type: 'permission_decision', sessionId: 's1', requestId: 'r1' };
+
+  test('the two real values pass', () => {
+    expect(validateClientMsg({ ...base, decision: 'allow' }).ok).toBe(true);
+    expect(validateClientMsg({ ...base, decision: 'deny' }).ok).toBe(true);
+  });
+
+  test('anything else is rejected, not coerced to a deny', () => {
+    // Rejecting is right on its own terms: an unrecognised decision is not a
+    // deny anyone made. The parked promise stays parked (the WS close path
+    // drains it), so refusing approves nothing either.
+    for (const decision of ['Allow', 'ALLOW', 'approve', 'yes', '', 'allow ']) {
+      expect(
+        validateClientMsg({ ...base, decision }).ok,
+        `accepted ${JSON.stringify(decision)}`,
+      ).toBe(false);
+    }
+  });
+
+  test('a non-string is still rejected by the kind check', () => {
+    expect(validateClientMsg({ ...base, decision: true }).ok).toBe(false);
+    expect(validateClientMsg({ ...base, decision: null }).ok).toBe(false);
+    expect(validateClientMsg({ ...base }).ok).toBe(false);
+  });
+});
