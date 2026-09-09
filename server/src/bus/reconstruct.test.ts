@@ -23,6 +23,7 @@ import {
   createMultiAgentSession,
   getMultiAgentSession,
   listMultiAgentEvents,
+  recordSessionHops,
   upsertAgentSession,
   setProjectBusInstalled,
 } from '../repo/multi_agent.js';
@@ -738,5 +739,80 @@ describe('reconstructOrchestratorSession — R-B reseed (Phase 4e)', () => {
     expect(registry.isScheduled(SID, coder.id)).toBe(true);
     expect(registry.isScheduled(SID, reviewer.id)).toBe(true);
     expect(registry.getScheduledCount()).toBe(2);
+  });
+});
+
+describe('a session nobody continues does not accumulate banners or hop seed (Cebab-6fax.37)', () => {
+  // MEASURED 2026-09-08 on a QA session left awaiting Continue since
+  // 2026-08-21: 12 identical recovery banners among 30 event rows, one per
+  // nightly restart, and the scrollback opened on a stack of them. The rows
+  // are EVENTS, so for a pre-`v85` row (`hops_used = NULL`) they also inflated
+  // `resolveInitialHopsCount`'s fallback — the very seed the budget brake then
+  // enforces on. Cosmetic and safety-relevant at once.
+  //
+  // `unregisterLiveSession` between calls is what makes each iteration a
+  // fresh SERVER START rather than the already-live no-op the idempotency
+  // test above covers. Without it this would pass for the wrong reason.
+  function restart(): void {
+    unregisterLiveSession(SID);
+    reconstructOrchestratorSession(getMultiAgentSession(SID)!, cbs());
+  }
+
+  test('the banner is appended once, however many restarts happen', () => {
+    seedReconstructable();
+    const before = listMultiAgentEvents(SID).length;
+
+    restart();
+    const afterFirst = listMultiAgentEvents(SID).length;
+    expect(afterFirst).toBe(before + 1);
+
+    restart();
+    restart();
+    restart();
+    expect(listMultiAgentEvents(SID).length).toBe(afterFirst);
+    const banners = listMultiAgentEvents(SID).filter((e) => e.text === RECOVERY_BANNER);
+    expect(banners).toHaveLength(1);
+  });
+
+  test('but a session that HAS moved on gets a fresh banner', () => {
+    // The self-limiting condition is "the tail is an unanswered banner", not a
+    // flag — so a run that was continued and then restarted again must be told
+    // so. Without this case the fix could be "never append twice", which is a
+    // different and worse behaviour.
+    seedReconstructable();
+    restart();
+    expect(listMultiAgentEvents(SID).filter((e) => e.text === RECOVERY_BANNER)).toHaveLength(1);
+
+    appendMultiAgentEvent(SID, 'user', 'orchestrator', 'prompt', 'carry on');
+    restart();
+    expect(listMultiAgentEvents(SID).filter((e) => e.text === RECOVERY_BANNER)).toHaveLength(2);
+  });
+
+  test('the hop seed handed to the router is persisted, so the wire agrees with the brake', () => {
+    // `Cebab-v85` made `hops_used` the single answer. A row that predates it
+    // is NULL, so the router was seeded from the event-row count while
+    // `currentHopsUsed` — what the client renders — read the column and said
+    // 0. The UI showed `0 / N` on a session whose first hop the brake would
+    // have refused.
+    seedReconstructable();
+    const rowCount = listMultiAgentEvents(SID).length;
+    expect(getMultiAgentSession(SID)!.hops_used).toBeNull();
+
+    restart();
+
+    // The banner append happens after the seed is resolved, so the persisted
+    // value is the pre-banner count — the same number the router got.
+    expect(getMultiAgentSession(SID)!.hops_used).toBe(rowCount);
+  });
+
+  test('a row that already carries a counter is never overwritten', () => {
+    // The authoritative answer must win over the derived one; overwriting it
+    // with an event-row count would re-introduce the inflation `v85` removed.
+    seedReconstructable();
+    recordSessionHops(SID, 3);
+
+    restart();
+
+    expect(getMultiAgentSession(SID)!.hops_used).toBe(3);
   });
 });
