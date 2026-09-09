@@ -488,6 +488,57 @@ describe('resolveProjectAuthority (BE-B3) — merge cached init + file scans', (
       expect((out.unloadedMcpServers ?? []).map((m) => m.name)).toEqual(['kitchen']);
     });
 
+    test('a name collision with ~/.claude.json no longer hides the .mcp.json row', () => {
+      // `Cebab-6fax.42`. `~/.claude.json`'s top-level block loads at every
+      // scope set Cebab passes, so on an untrusted project it was in the
+      // loaded list — and the name filter on the `.mcp.json` loop then
+      // suppressed the project's own declaration of the same name.
+      //
+      // That is exactly backwards. The merge loop pushes `.mcp.json` LAST and
+      // splices out the clash, so turning Trust ON makes the PROJECT's
+      // declaration the one that loads. The panel was hiding the single row
+      // whose behaviour the toggle changes, and that row has its own
+      // `originPath`, so it needs a TOFU decision the operator never saw.
+      setProjectTrusted(projectId, false);
+      fs.writeFileSync(
+        path.join(projectPath, '.mcp.json'),
+        JSON.stringify({ mcpServers: { github: { command: '/bin/project-github' } } }),
+      );
+      fs.writeFileSync(
+        path.join(os.homedir(), '.claude.json'),
+        JSON.stringify({ mcpServers: { github: { command: '/bin/home-github' } } }),
+      );
+
+      const out = resolveProjectAuthority({ projectId, mode: 'cache' })!;
+      // The home-scope row loads, as it always did.
+      expect(out.mcpServers.filter((m) => m.name === 'github')).toHaveLength(1);
+      // And the project's own declaration is now named as inert-but-present.
+      const unloaded = (out.unloadedMcpServers ?? []).filter((m) => m.name === 'github');
+      expect(unloaded).toHaveLength(1);
+      expect(unloaded[0]!.scope).toBe('mcp-json');
+    });
+
+    test('but the two blocks of ~/.claude.json are still one declaration', () => {
+      // The other direction, and the reason the filter stays on the OTHER
+      // loop: the top-level block and the per-project block live in the same
+      // file and anchor to the same originPath, so a name in both is one
+      // declaration and must not be listed twice.
+      setProjectTrusted(projectId, false);
+      fs.writeFileSync(
+        path.join(os.homedir(), '.claude.json'),
+        JSON.stringify({
+          mcpServers: { shared: { command: '/bin/shared' } },
+          projects: {
+            [projectPath]: { mcpServers: { shared: { command: '/bin/shared' } } },
+          },
+        }),
+      );
+
+      const out = resolveProjectAuthority({ projectId, mode: 'cache' })!;
+      expect(out.mcpServers.filter((m) => m.name === 'shared')).toHaveLength(1);
+      expect((out.unloadedMcpServers ?? []).filter((m) => m.name === 'shared')).toHaveLength(0);
+    });
+
     test('trusted: the same declarations load, so nothing is left unloaded', () => {
       setProjectTrusted(projectId, true);
       writeProjectDeclarations();

@@ -182,6 +182,61 @@ describe('[security] computeScriptShas — which tokens get pinned', () => {
     expect(Object.keys(computeScriptShas('node', args.slice(0, 8), projectPath)!)).toHaveLength(8);
   });
 
+  test('the realistic filesystem-server shape pins its script again', () => {
+    // `Cebab-6fax.42`, and the case the cap was measured against: `npx -y
+    // @modelcontextprotocol/server-filesystem <8 roots>`. `scriptCandidates`
+    // yields the command plus EVERY non-flag arg, so the package name and the
+    // eight directories were nine "candidates" and the whole declaration
+    // pinned NOTHING — permanently, since the null is stored as a NULL
+    // `script_shas_json` on approval and every later spawn then compares null
+    // against null.
+    //
+    // None of those tokens is a file: each costs an lstat that fails and
+    // hashes no bytes, which is the resource the cap exists to bound. Only
+    // reads that consumed bytes count now.
+    const sha = writeScript('server.mjs', 'the real script\n');
+    const roots: string[] = [];
+    for (let i = 0; i < 8; i += 1) {
+      fs.mkdirSync(path.join(projectPath, `root${i}`), { recursive: true });
+      roots.push(`root${i}`);
+    }
+    const out = computeScriptShas('node', ['server.mjs', ...roots], projectPath);
+    expect(out).not.toBeNull();
+    expect(out!['server.mjs']).toBe(sha);
+    // The directories are still recorded — `Cebab-r89`'s rule is unchanged, a
+    // token that resolves to nothing is pinned ABSENT so a file created there
+    // later reads as `absent -> sha` rather than as an invisible new key.
+    for (const r of roots) expect(out![r]).toBe(SCRIPT_ABSENT);
+  });
+
+  test('and the hash cap still binds on files that really are read', () => {
+    // The other direction. If the counter had simply been deleted, the case
+    // above would pass and the expensive budget would be gone — nine readable
+    // files must still refuse.
+    const args: string[] = [];
+    for (let i = 0; i < 9; i += 1) {
+      writeScript(`g${i}.mjs`, `file ${i}\n`);
+      args.push(`g${i}.mjs`);
+    }
+    expect(computeScriptShas('node', args, projectPath)).toBeNull();
+  });
+
+  test('a token flood past the candidate ceiling refuses to pin', () => {
+    // The ceiling that had to come WITH the change above: once failed reads
+    // stop consuming the hash budget, nothing else bounds the token count —
+    // and the map is serialized into `mcp_trust.script_shas_json` and rebuilt
+    // on every authority resolve, so an unbounded map is an unbounded row in
+    // the operator's own database.
+    writeScript('server.mjs', 'the real script\n');
+    const flood = Array.from({ length: 64 }, (_, i) => `missing-${i}.txt`);
+    expect(computeScriptShas('node', ['server.mjs', ...flood], projectPath)).toBeNull();
+    // One under the ceiling still pins, so the bound is the stated one rather
+    // than "anything large".
+    expect(
+      computeScriptShas('node', ['server.mjs', ...flood.slice(0, 62)], projectPath),
+    ).not.toBeNull();
+  });
+
   test('a tilde is a literal directory name, not the home directory', () => {
     // Neither `execvp` nor an interpreter expands `~` — the shell does, and no
     // shell runs in this spawn. So the file to pin is `<project>/~/x.mjs`.

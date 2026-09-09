@@ -218,6 +218,26 @@ describe('[security] the parked-decision ceiling fails closed', () => {
     expect(gate.pending.size).toBe(MAX_PENDING_GATES);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('already parked'));
 
+    // `Cebab-6fax.42`: and it is recorded as an overflow rather than as a
+    // decision. This branch used to route through `applyDecision({ kind:
+    // 'deny_once' })`, so the audit read as a human denial of a server no
+    // human had been shown — while `gate_abandon.ts` refuses to drain by
+    // resolving for exactly that reason, and the sibling bus gate already has
+    // its own `gate_backlog` code so a forensic reader can tell the two apart.
+    const codes = getDb()
+      .prepare<[], { reason_code: string }>(
+        "SELECT reason_code FROM safety_audit WHERE kind = 'mcp.trust_silent_refusal'",
+      )
+      .all()
+      .map((r) => r.reason_code);
+    expect(codes).toHaveLength(3); // MAX_PENDING_GATES + 3 servers, 3 over
+    expect(new Set(codes)).toEqual(new Set(['gate_backlog']));
+
+    // And the overflow does not become a connection-lifetime denial. A backlog
+    // is transient; adding the session key made the next spawn re-refuse (and
+    // re-audit a fabricated decision) instead of prompting once it drained.
+    expect(gate.denyOnce.size).toBe(0);
+
     abandonPendingMcpGates(gate, 'client disconnected');
     await expect(p).rejects.toThrow();
     warn.mockRestore();

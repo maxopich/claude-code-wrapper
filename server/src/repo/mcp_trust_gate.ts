@@ -265,19 +265,29 @@ export async function awaitMcpTrustDecisions(input: AwaitGateInput): Promise<Gat
     };
 
     // H15: fail closed rather than park an unbounded number of decisions.
+    //
+    // `Cebab-6fax.42`: refused as an OVERFLOW, not as an operator decision.
+    // This used to route through `applyDecision({ kind: 'deny_once' })`, which
+    // wrote `reasonCode: 'deny_once'` into the trust history — an audit row
+    // saying a human denied a server no human was ever shown. The repo already
+    // says twice that this is wrong: `gate_abandon.ts` refuses to drain by
+    // resolving because "that would write decisions the operator never made
+    // into the trust history", and the sibling bus gate gives the same
+    // condition its own `gate_backlog` code precisely so "a forensic reader
+    // needs to tell those apart".
+    //
+    // And deliberately NOT `gate.denyOnce.add(sessionKey)`. A backlog is
+    // transient; adding the key turned a momentary overflow into a
+    // connection-lifetime denial that re-recorded a fabricated `deny_once` on
+    // every later spawn. The next spawn should re-evaluate — recording
+    // `gate_backlog` again if the backlog is still full, or prompting properly
+    // once it has drained.
     if (input.gate.pending.size >= MAX_PENDING_GATES) {
       console.warn(
         `[mcp-gate] refusing ${server.name}: ${MAX_PENDING_GATES} decisions already parked on this connection`,
       );
-      applyDecision({
-        projectId: input.projectId,
-        gate: input.gate,
-        server,
-        originPath,
-        decision: { kind: 'deny_once' },
-        outcome,
-        sessionKey,
-      });
+      recordSilentRefusal(input.projectId, server.name, originPath, 'gate_backlog');
+      outcome.refused.push({ serverName: server.name, originPath, persisted: false });
       continue;
     }
 
@@ -499,7 +509,14 @@ function recordSilentRefusal(
   projectId: number,
   serverName: string,
   originPath: string,
-  reasonCode: 'denied_remember' | 'deny_once',
+  reasonCode:
+    | 'denied_remember'
+    | 'deny_once'
+    // `Cebab-6fax.42`: the per-connection parked-decision ceiling was hit. Its
+    // own code rather than a reused `deny_once` — the operator denied nothing,
+    // they were never asked — matching what the bus install gate already does
+    // with the same condition.
+    | 'gate_backlog',
 ): void {
   appendSafetyAudit({
     ts: Date.now(),

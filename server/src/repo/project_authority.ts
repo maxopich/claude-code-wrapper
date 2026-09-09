@@ -1160,19 +1160,33 @@ export function resolveProjectAuthority(input: ResolverInput): ProjectAuthority 
   // `~/.claude.json`'s per-project block (loads iff 'local' is read). A
   // settings-layer `mcpServers` key never loads at any scope, so its absence
   // from the loaded list is not a Trust artifact and it is not surfaced here as
-  // if Trust would make it load. A name already in the loaded list is not
-  // repeated.
+  // if Trust would make it load.
   const unloadedMcpServers: McpServerView[] = [];
   const loadedMcpNames = new Set(declaredMcp.map((d) => d.name));
   if (!scopes.includes('project')) {
+    // `Cebab-6fax.42`: NO name filter on this loop, unlike the one below.
+    //
+    // It ran only when `'project'` is absent from `scopes` — in which case
+    // `readMcpJsonServers(path, scopes)` returned `[]` and no `.mcp.json` row
+    // can be in `declaredMcp` at all. So the filter could only ever suppress a
+    // row because a DIFFERENT file happened to declare the same name, which is
+    // exactly backwards: the merge loop forty lines up pushes `.mcp.json` LAST
+    // and splices out the clash, so with Trust ON the `.mcp.json` declaration
+    // is the one Cebab reports as loading. The panel was hiding the single row
+    // whose behaviour the Trust toggle changes — and, because that row has its
+    // own `originPath`, it needs a TOFU decision the operator had never been
+    // shown.
     for (const s of readMcpJsonServers(project.path, ['project'])) {
-      if (!loadedMcpNames.has(s.name)) unloadedMcpServers.push(s);
+      unloadedMcpServers.push(s);
     }
   }
   if (!scopes.includes('local')) {
     // `['user', 'local']` returns the always-loading top-level block (already
     // in `declaredMcp`) plus the per-project block that needs 'local'; the
-    // name filters below keep only the latter.
+    // name filters below keep only the latter. The `loadedMcpNames` filter
+    // STAYS here, unlike on the `.mcp.json` loop above: these two blocks live
+    // in the same file and anchor to the same `originPath`, so a name in both
+    // is one declaration, not two.
     for (const s of readClaudeJsonServers(project.path, ['user', 'local'])) {
       if (!loadedMcpNames.has(s.name) && !unloadedMcpServers.some((u) => u.name === s.name)) {
         unloadedMcpServers.push(s);
