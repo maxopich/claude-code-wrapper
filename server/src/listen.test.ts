@@ -164,3 +164,103 @@ describe('startListening', () => {
     expect(h.logs.join('\n')).toContain('something else went wrong');
   });
 });
+
+describe('[security] an error AFTER bind drains instead of exiting (Cebab-6fax.24)', () => {
+  // The handler has to stay attached for the process's whole life — an unheard
+  // `'error'` on an EventEmitter throws — so a RUNTIME accept failure (EMFILE
+  // when the process runs out of file descriptors, ENFILE, ECONNABORTED) took
+  // the BIND-failure path and called `exit(1)` directly. Correct before the
+  // bind, where nothing is in flight and "a failed boot changes nothing" is the
+  // whole design; wrong afterwards, because it skips the query drain and every
+  // SDK-spawned `claude` subprocess outlives the server and keeps spending
+  // subscription quota. That is the failure `runner/lifecycle.ts` exists to
+  // prevent, reached through the one exit path that never went through it.
+
+  function postBindHarness() {
+    const server = new FakeServer();
+    const logs: string[] = [];
+    const exits: number[] = [];
+    const drains: string[] = [];
+    startListening({
+      server,
+      port: 4319,
+      host: '127.0.0.1',
+      onBound: () => {},
+      exit: (code) => exits.push(code),
+      onPostBindError: (err) => drains.push(err?.code ?? 'unknown'),
+      log: (msg) => logs.push(msg),
+    });
+    return { server, logs, exits, drains };
+  }
+
+  test('after a successful bind, the error goes to the drain — not to exit', () => {
+    const h = postBindHarness();
+    h.server.succeed();
+
+    h.server.fail('EMFILE', 'accept EMFILE');
+
+    expect(h.drains).toEqual(['EMFILE']);
+    expect(h.exits).toEqual([]);
+  });
+
+  test('BEFORE the bind, the same error still exits — the boot path is unchanged', () => {
+    // The half that must not regress. A bind failure has nothing to drain, and
+    // routing it through a shutdown would run teardown for a server that never
+    // came up.
+    const h = postBindHarness();
+
+    h.server.fail('EADDRINUSE');
+
+    expect(h.exits).toEqual([1]);
+    expect(h.drains).toEqual([]);
+  });
+
+  test('with no drain supplied the old behaviour stands', () => {
+    // The callback is optional so the existing bind-failure tests need no
+    // change; absence must mean exactly what it meant before.
+    const h = harness();
+    h.server.succeed();
+
+    h.server.fail('EMFILE', 'accept EMFILE');
+
+    expect(h.exits).toEqual([1]);
+  });
+
+  test('the post-bind report names the code and says it is shutting down', () => {
+    // The operator has to be able to tell this from a bind failure, whose
+    // message says "cannot start" and offers a port remedy that does not apply.
+    const h = postBindHarness();
+    h.server.succeed();
+    h.server.fail('EMFILE', 'accept EMFILE');
+
+    expect(h.logs.join('\n')).toContain('after bind');
+    expect(h.logs.join('\n')).toContain('EMFILE');
+    expect(h.logs.join('\n')).not.toContain('cannot start');
+  });
+
+  test('still reports once, however many emitters re-deliver it', () => {
+    // The `handled` latch has to cover the new branch too, or `ws` re-emitting
+    // a runtime error would run the shutdown twice.
+    const server = new FakeServer();
+    const wss = new EventEmitter();
+    const drains: string[] = [];
+    startListening({
+      server,
+      errorSources: [wss],
+      port: 4319,
+      host: '127.0.0.1',
+      onBound: () => {},
+      exit: () => {},
+      onPostBindError: (err) => drains.push(err?.code ?? 'unknown'),
+      log: () => {},
+    });
+    server.succeed();
+
+    const err = new Error('accept EMFILE') as NodeJS.ErrnoException;
+    err.code = 'EMFILE';
+    wss.emit('error', err);
+    server.emit('error', err);
+
+    expect(drains).toEqual(['EMFILE']);
+  });
+});

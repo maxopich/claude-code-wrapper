@@ -9,6 +9,7 @@ import { _resetOperatorIdCache } from '../notifications/operator.js';
 import {
   ACKNOWLEDGMENT_TRIGGER,
   awaitEnvInjectionAck,
+  injectionSetFingerprint,
   makeStartGateState,
   recordEnvInjectionAcknowledgment,
 } from './session_start_gate.js';
@@ -246,4 +247,93 @@ describe('recordEnvInjectionAcknowledgment — [security] BE-1', () => {
       // keeping the spawn parked. No spawn proceeds past a broken chain.
     },
   );
+});
+
+describe('the acknowledgment is remembered, per exact injection set (Cebab-6fax.27)', () => {
+  // THE DEFECT. The gate is called from `runOneTurn`, so on a project with any
+  // credential-class `env:` block it fired on EVERY MESSAGE. A typed
+  // acknowledgment repeated per message is not a safety control: the reliable
+  // outcome is an operator who types the word without reading it, which is the
+  // opposite of what a typed gate is for. It also made such a project
+  // effectively unusable, and the workaround for that is to remove the gate.
+
+  function scoped(envKey: string, scope: EnvInjection['scope'], scopePath: string): EnvInjection {
+    return { envKey, scope, scopePath, posture: 'p', isSet: true };
+  }
+
+  test('a second turn with the same set does not re-prompt', () => {
+    const sink = makeSink();
+    const gate = makeStartGateState();
+    const injections = [injection('ANTHROPIC_API_KEY')];
+
+    // First turn parks (this promise is intentionally not awaited — nothing
+    // resolves it until the operator answers).
+    void awaitEnvInjectionAck({ projectId: 1, gate, send: sink.send, injections });
+    expect(sink.sent).toHaveLength(1);
+
+    // The operator answers. `ws/server.ts` does this after the audit row lands.
+    gate.pending.clear();
+    gate.acknowledged.set(1, injectionSetFingerprint(injections));
+
+    void awaitEnvInjectionAck({ projectId: 1, gate, send: sink.send, injections });
+    expect(sink.sent).toHaveLength(1);
+    expect(gate.pending.size).toBe(0);
+  });
+
+  test('ANOTHER project is not covered by it', () => {
+    // Anti-vacuity in the direction that matters: "remember it and never ask
+    // again" would pass the case above and be a far worse bug.
+    const sink = makeSink();
+    const gate = makeStartGateState();
+    const injections = [injection('ANTHROPIC_API_KEY')];
+    gate.acknowledged.set(1, injectionSetFingerprint(injections));
+
+    void awaitEnvInjectionAck({ projectId: 2, gate, send: sink.send, injections });
+
+    expect(sink.sent).toHaveLength(1);
+  });
+
+  test('adding a key re-prompts', () => {
+    const sink = makeSink();
+    const gate = makeStartGateState();
+    gate.acknowledged.set(1, injectionSetFingerprint([injection('ANTHROPIC_API_KEY')]));
+
+    void awaitEnvInjectionAck({
+      projectId: 1,
+      gate,
+      send: sink.send,
+      injections: [injection('ANTHROPIC_API_KEY'), injection('AWS_BEARER_TOKEN_BEDROCK')],
+    });
+
+    expect(sink.sent).toHaveLength(1);
+  });
+
+  test('the SAME key from a different file re-prompts', () => {
+    // The declaration moving is a change of what will run, even though the key
+    // is the same — and it is the case a project-only key would miss.
+    const sink = makeSink();
+    const gate = makeStartGateState();
+    const fromProject = scoped('ANTHROPIC_API_KEY', 'project', '/u/proj/.claude/settings.json');
+    const fromUser = scoped('ANTHROPIC_API_KEY', 'user', '/home/u/.claude/settings.json');
+    gate.acknowledged.set(1, injectionSetFingerprint([fromProject]));
+
+    void awaitEnvInjectionAck({ projectId: 1, gate, send: sink.send, injections: [fromUser] });
+
+    expect(sink.sent).toHaveLength(1);
+  });
+
+  test('order does not matter — the same set in any order is the same set', () => {
+    const a = injection('ANTHROPIC_API_KEY');
+    const b = injection('AWS_BEARER_TOKEN_BEDROCK');
+    expect(injectionSetFingerprint([a, b])).toBe(injectionSetFingerprint([b, a]));
+  });
+
+  test('`isSet` is NOT part of the identity', () => {
+    // Whether the variable currently holds a value changes between turns for
+    // reasons that have nothing to do with what the project declares. Keying on
+    // it would reintroduce the per-message gate through the back door.
+    const set = { ...injection('ANTHROPIC_API_KEY'), isSet: true };
+    const unset = { ...injection('ANTHROPIC_API_KEY'), isSet: false };
+    expect(injectionSetFingerprint([set])).toBe(injectionSetFingerprint([unset]));
+  });
 });
