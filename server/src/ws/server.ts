@@ -1094,6 +1094,50 @@ export function describeHeldWorkers(sessionId: string): string | null {
 }
 
 /**
+ * `Cebab-6fax.45`: every open connection, so a bus run's ENDING can reach all
+ * of them.
+ *
+ * A bus session has exactly one wire sink and a re-attach SWAPS it rather than
+ * adding a subscriber (`live.rebind`), so every lifecycle emit went to one
+ * socket. Measured on the Playground: a second tab attached to a session that
+ * was stopped from the first kept showing it as RUNNING, with a live Stop
+ * button, for a whole five-minute run on the other connection — and never
+ * learned a new session had started.
+ *
+ * `active_runs` cannot substitute for this. It is registered per QUERY, one
+ * entry per hop, so a bus session is legitimately absent from the snapshot
+ * between hops; absence there is not an end signal.
+ *
+ * Scoped to the ENDED half deliberately. `multi_agent_started`'s reducer
+ * replaces `active` wholesale for any session id, so broadcasting it would
+ * push a run into every tab whether or not the operator was looking at one —
+ * a different decision, and it interacts with the tab-switch guard.
+ */
+const openConns = new Set<Conn>();
+
+/**
+ * Fan one message out over a set of connections.
+ *
+ * Takes the set rather than reading `openConns` so the behaviour is testable
+ * without a real socket — the registry itself is populated only from
+ * `onConnection`. Non-OPEN sockets are skipped by `send`, which is the single
+ * place that check lives; duplicating it here would be a second copy to keep
+ * in step for no gain.
+ *
+ * Safe to fan out because the receiving reducer is already scoped: every
+ * `multi_agent_*` case bails on `active.sessionId !== msg.sessionId`, so a
+ * broadcast is a no-op in every tab that is not tracking that run.
+ */
+export function broadcastTo(conns: Iterable<{ ws: WebSocket }>, msg: ServerMsg): void {
+  for (const c of conns) send(c.ws, msg);
+}
+
+/** Fan out to every currently-open connection. */
+function broadcastServerMsg(msg: ServerMsg): void {
+  broadcastTo(openConns, msg);
+}
+
+/**
  * Register B02: the process-wide half of the single-active invariant.
  *
  * `start_multi_agent`'s original guard was `if (conn.multiAgent)` — per
@@ -2947,6 +2991,8 @@ function onConnection(ws: WebSocket): void {
     lastInterruptIds: new Map(),
   };
 
+  openConns.add(conn);
+
   // Cluster A Phase 3 (E1, BE-10): tell the operator which auth-precedence
   // env vars `runner/claude.ts` stripped from this session's spawn env. Fires
   // on every attach (initial + reconnect) so a late-opening browser tab sees
@@ -3112,6 +3158,7 @@ function onConnection(ws: WebSocket): void {
 
   ws.on('close', () => {
     console.log('[ws] client disconnected');
+    openConns.delete(conn);
     // Register S06: persist each denial as well as resolving it. The request
     // row replays as a live card; without a matching decision row the operator
     // reopens the session to buttons that do nothing. `reason` says Cebab
@@ -3233,7 +3280,7 @@ function resumeCallbacks(
       // executor's defensive re-check would catch it (no-op-diverged),
       // but cancelling here is cheaper + cleaner.
       getPauseExpiryRegistry().clearSession(sessionId);
-      send(conn.ws, { type: 'multi_agent_ended', sessionId, reason, iterationId });
+      broadcastServerMsg({ type: 'multi_agent_ended', sessionId, reason, iterationId });
       if (conn.multiAgent?.sessionId === sessionId) {
         conn.multiAgent = null;
       }
@@ -5337,7 +5384,7 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
         // row, so the hash-chained log accrued expiry events for a session
         // that had ended.
         getPauseExpiryRegistry().clearSession(sessionId);
-        send(conn.ws, {
+        broadcastServerMsg({
           type: 'multi_agent_ended',
           sessionId,
           reason,
@@ -5796,7 +5843,7 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
         console.error('[ws] stop_multi_agent failed', err);
         // onEnded won't fire if stop threw; emit a synthetic ended so the
         // client doesn't get stuck in 'running' state.
-        send(conn.ws, {
+        broadcastServerMsg({
           type: 'multi_agent_ended',
           sessionId: active.sessionId,
           reason: 'crashed',
