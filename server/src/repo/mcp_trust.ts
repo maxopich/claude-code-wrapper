@@ -52,6 +52,9 @@ export type TrustDecisionInput = {
    */
   command: string;
   args: readonly string[];
+  /** `Cebab-6fax.25`: see `TrustLookupInput.identityDigest`. Recorded so the
+   *  approval is stored against the SAME identity the lookup will ask for. */
+  identityDigest?: string;
   /**
    * sha256 of the resolved binary, or `null` for unresolvable targets
    * (e.g. `npx <name>`). `trusted_pinned_hash` MUST have a non-null
@@ -82,6 +85,9 @@ export type TrustLookupInput = {
   /** Cebab-1af: what the declaration's files hash to RIGHT NOW, from
    *  `computeScriptShas`. Compared against what the matching row approved. */
   candidateScriptShas: Record<string, string> | null;
+  /** `Cebab-6fax.25`: `McpServerView.config.identityDigest` — the url / header
+   *  names / env names a command-and-args identity cannot see. See `argsKey`. */
+  identityDigest?: string;
 };
 
 export type TrustLookupResult =
@@ -137,7 +143,12 @@ export type McpTrustRow = {
  */
 function parseArgsJson(raw: string): string[] {
   try {
-    const parsed: unknown = JSON.parse(raw);
+    // `Cebab-6fax.25`: `args_json` may carry an identity digest after a `#`
+    // (see `argsKey`). Strip it before parsing — without this a digest-bearing
+    // row throws here and `previousDeclaration` reports empty args, so the
+    // operator's "changed from X to Y" prompt would silently lose the X.
+    const hash = raw.lastIndexOf('#');
+    const parsed: unknown = JSON.parse(hash === -1 ? raw : raw.slice(0, hash));
     if (Array.isArray(parsed) && parsed.every((a) => typeof a === 'string')) return parsed;
   } catch {
     /* fall through */
@@ -150,9 +161,29 @@ function parseArgsJson(raw: string): string[] {
  * the same declaration alternates between two rows and re-prompts forever.
  * Same helper, same reason, as `hook_trust.ts` — the ledger this one is
  * catching up to.
+ *
+ * `identityDigest` (`Cebab-6fax.25`) folds in the parts of a declaration that
+ * `command` + `args` cannot see: an http/sse server's URL, its header NAMES,
+ * and its env NAMES. Those declarations have no command and no args at all, so
+ * every remote server under one name shared one identity and could be
+ * re-pointed at a different host with no re-prompt.
+ *
+ * IT RIDES IN THIS KEY RATHER THAN IN A NEW COLUMN, deliberately. The identity
+ * is the UNIQUE triple (server_name, origin_path, command, args_json,
+ * binary_sha) that `INSERT OR REPLACE` and every lookup key on; adding a column
+ * means a migration and five query sites, and gets the same answer. Appending
+ * here means a changed digest simply does not match the stored row, which is
+ * already exactly the behaviour for a changed command.
+ *
+ * ABSENT means absent, not empty: a declaration with no url, headers or env
+ * produces no digest and therefore the byte-identical key it always had. That
+ * is what stops this from re-prompting for every stdio server in the tree. A
+ * declaration that DOES have those parts has never had them covered, so its
+ * one-time re-approval is the fix working.
  */
-export function argsKey(args: readonly string[] | undefined): string {
-  return JSON.stringify(args ?? []);
+export function argsKey(args: readonly string[] | undefined, identityDigest?: string): string {
+  const base = JSON.stringify(args ?? []);
+  return identityDigest === undefined || identityDigest === '' ? base : `${base}#${identityDigest}`;
 }
 
 // ---- binary sha computation ----
@@ -494,7 +525,7 @@ export function recordTrustDecision(input: TrustDecisionInput): McpTrustRow {
   // lands. If the audit throws (chain broken, db error), the trust
   // decision is not recorded — operator sees the failure and can retry
   // with the chain repaired.
-  const argsJson = argsKey(input.args);
+  const argsJson = argsKey(input.args, input.identityDigest);
   const scriptShasJson = serializeScriptShas(input.scriptShas);
   appendSafetyAudit({
     ts,
@@ -599,7 +630,7 @@ export function recordTrustDecision(input: TrustDecisionInput): McpTrustRow {
  */
 export function checkTrust(input: TrustLookupInput): TrustLookupResult {
   const { serverName, originPath, candidateSha } = input;
-  const argsJson = argsKey(input.args);
+  const argsJson = argsKey(input.args, input.identityDigest);
   const db = getDb();
   // Most-recent matching row wins — `id DESC` is what makes "most recent" mean
   // write order rather than whatever the scan reached first on a `ts` tie. Same

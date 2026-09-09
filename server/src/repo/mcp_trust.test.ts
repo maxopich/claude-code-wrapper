@@ -8,6 +8,7 @@ import { closeDb, getDb } from '../db.js';
 import { config } from '../config.js';
 import { _resetOperatorIdCache } from '../notifications/operator.js';
 import {
+  argsKey,
   checkTrust,
   computeBinarySha,
   firstDecisionTs,
@@ -1023,5 +1024,94 @@ describe('[security] checkTrust keys on the declaration, not just the command ha
       decision: 'trusted',
     });
     expect(previousDeclaration('moving', ORIGIN)).toEqual({ command: 'node', args: ['one.mjs'] });
+  });
+});
+
+describe('[security] a remote declaration cannot be re-pointed under an approved name (Cebab-6fax.25)', () => {
+  // THE GAP. The TOFU identity is name + origin + command + args + binary sha.
+  // An http/sse declaration has NONE of those — no command, no args, nothing to
+  // hash — so every remote server under one name shared one identity, and the
+  // URL could be re-pointed at a different host, or headers added and removed,
+  // with no re-prompt. TOFU is by CLAUDE.md's own statement "the only brake" on
+  // user-scope MCP servers; a brake whose identity omits where the traffic goes
+  // is not measuring the thing that can change.
+  //
+  // The digest is computed by `applyRemoteIdentity` in `project_authority.ts`
+  // and threaded through as `identityDigest`; these cases exercise the identity
+  // layer directly, which is where the decision is actually made.
+
+  const REMOTE = { serverName: 'weather', originPath: '/u/proj/.mcp.json' };
+
+  function approveRemote(identityDigest: string): void {
+    recordTrustDecision({
+      ...REMOTE,
+      command: '',
+      args: [],
+      binarySha: null,
+      scriptShas: null,
+      identityDigest,
+      decision: 'trusted',
+    });
+  }
+
+  function look(identityDigest?: string) {
+    return checkTrust({
+      ...REMOTE,
+      candidateSha: null,
+      command: '',
+      args: [],
+      candidateScriptShas: null,
+      ...(identityDigest !== undefined ? { identityDigest } : {}),
+    });
+  }
+
+  test('the same declaration stays trusted', () => {
+    approveRemote('digest-endpoint-a');
+    expect(look('digest-endpoint-a')).toEqual({ decision: 'trusted' });
+  });
+
+  test('a re-pointed endpoint does NOT match the approval', () => {
+    // The whole finding. Before this, both lookups returned `trusted`, because
+    // both declarations reduced to command='' args=[] under one name.
+    approveRemote('digest-endpoint-a');
+    expect(look('digest-endpoint-b')).not.toEqual({ decision: 'trusted' });
+  });
+
+  test('and a declaration with no digest does not inherit one that has it', () => {
+    // The other direction: stripping the url/headers from a declaration is also
+    // a change, and must not silently match the richer approval.
+    approveRemote('digest-endpoint-a');
+    expect(look()).not.toEqual({ decision: 'trusted' });
+  });
+
+  test('a plain stdio server keeps its EXACT identity — no flag day', () => {
+    // The reason the digest is absent rather than empty when there is nothing
+    // to cover. If it were always present, every already-trusted stdio server
+    // in the tree would re-prompt on upgrade, and the reliable response to a
+    // wall of prompts is to approve them all without reading.
+    expect(argsKey(['--port', '1'])).toBe(argsKey(['--port', '1'], undefined));
+    expect(argsKey(['--port', '1'])).toBe(argsKey(['--port', '1'], ''));
+    expect(argsKey(['--port', '1'])).not.toBe(argsKey(['--port', '1'], 'd'));
+  });
+
+  test('previousDeclaration still reads args out of a digest-bearing row', () => {
+    // `args_json` now sometimes carries a `#digest` suffix, and this reader
+    // used to `JSON.parse` the whole string — so a digest-bearing row threw and
+    // reported empty args, quietly losing the "changed from X" half of the
+    // operator's prompt.
+    recordTrustDecision({
+      serverName: 'stdio-with-env',
+      originPath: '/u/proj/.mcp.json',
+      command: 'node',
+      args: ['server.mjs', '--verbose'],
+      binarySha: null,
+      scriptShas: null,
+      identityDigest: 'digest-env-names',
+      decision: 'trusted',
+    });
+    expect(previousDeclaration('stdio-with-env', '/u/proj/.mcp.json')).toEqual({
+      command: 'node',
+      args: ['server.mjs', '--verbose'],
+    });
   });
 });

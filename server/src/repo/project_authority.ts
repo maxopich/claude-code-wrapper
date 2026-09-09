@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -91,6 +92,9 @@ type RawSettings = {
         command?: string;
         args?: string[];
         env?: Record<string, unknown>;
+        /** `Cebab-6fax.25`: http/sse transports. A stdio server has neither. */
+        url?: string;
+        headers?: Record<string, unknown>;
       }
     | undefined
   >;
@@ -256,10 +260,11 @@ export function readMcpJsonServers(
   for (const [name, conf] of Object.entries(parsed.mcpServers)) {
     if (!conf) continue;
     const envKeys = conf.env ? Object.keys(conf.env) : undefined;
-    const config: { command?: string; args?: string[]; envKeys?: string[] } = {};
+    const config: McpServerView['config'] & object = {};
     if (typeof conf.command === 'string') config.command = conf.command;
     if (Array.isArray(conf.args)) config.args = conf.args;
     if (envKeys && envKeys.length > 0) config.envKeys = envKeys;
+    applyRemoteIdentity(config, conf);
     const view: McpServerView = {
       name,
       status: 'unknown',
@@ -268,10 +273,55 @@ export function readMcpJsonServers(
       tools: [],
       trust: 'unknown',
     };
-    if (config.command || config.args || config.envKeys) view.config = config;
+    // `Cebab-6fax.25`: `Object.keys` rather than a list of field names. The
+    // list form is what hid the http/sse case — a remote declaration sets url
+    // and headerNames and NONE of command/args/envKeys, so its config was
+    // built and then dropped on the floor, and the identity digest with it.
+    if (Object.keys(config).length > 0) view.config = config;
     out.push(view);
   }
   return out;
+}
+
+/**
+ * Fold an http/sse declaration's endpoint and header NAMES onto the view, and
+ * compute the identity digest that covers them.
+ *
+ * `Cebab-6fax.25`. The TOFU identity is name + origin + command + args + binary
+ * sha. An http/sse declaration has none of those — no command, no args, nothing
+ * to hash — so every remote server under one name shared one identity, and the
+ * URL could be re-pointed at a different host with headers added or removed and
+ * no re-prompt. TOFU is "the only brake" on user-scope MCP servers (CLAUDE.md);
+ * a brake whose identity omits where the traffic goes measures the wrong thing.
+ *
+ * ABSENT WHEN THERE IS NOTHING TO COVER, which is what keeps this from being a
+ * flag day. An ordinary stdio server with no `env` block produces no digest, so
+ * its identity is byte-identical to before and it does not re-prompt. A server
+ * that DOES have a url, headers or env has, by definition, never had those
+ * covered — so a one-time re-approval there is the fix working, not a
+ * regression.
+ *
+ * VALUES ARE EXCLUDED — see `identityDigest`'s own note. Header values are
+ * bearer tokens that rotate; env values likewise. Re-prompting on a rotation is
+ * daily noise, and an operator who approves daily without reading is the
+ * failure this is supposed to prevent.
+ */
+function applyRemoteIdentity(
+  config: NonNullable<McpServerView['config']>,
+  conf: { url?: unknown; headers?: Record<string, unknown> | undefined },
+): void {
+  if (typeof conf.url === 'string' && conf.url.length > 0) config.url = conf.url;
+  const headerNames =
+    conf.headers && typeof conf.headers === 'object' ? Object.keys(conf.headers).sort() : [];
+  if (headerNames.length > 0) config.headerNames = headerNames;
+
+  const covered = {
+    url: config.url ?? null,
+    headerNames,
+    envKeys: [...(config.envKeys ?? [])].sort(),
+  };
+  if (covered.url === null && headerNames.length === 0 && covered.envKeys.length === 0) return;
+  config.identityDigest = crypto.createHash('sha256').update(JSON.stringify(covered)).digest('hex');
 }
 
 /**
@@ -375,10 +425,14 @@ export function readClaudeJsonServers(
       // way and there is nothing to choose between them.
       if (out.some((v) => v.name === name)) continue;
       const envKeys = conf.env ? Object.keys(conf.env) : undefined;
-      const config: { command?: string; args?: string[]; envKeys?: string[] } = {};
+      const config: NonNullable<McpServerView['config']> = {};
       if (typeof conf.command === 'string') config.command = conf.command;
       if (Array.isArray(conf.args)) config.args = conf.args;
       if (envKeys && envKeys.length > 0) config.envKeys = envKeys;
+      // `Cebab-6fax.25`: same identity extension as `.mcp.json`. This file is
+      // where `claude mcp add --scope user` writes — the servers Trust does not
+      // reach and TOFU is the only brake on.
+      applyRemoteIdentity(config, conf);
       const view: McpServerView = {
         name,
         status: 'unknown',
@@ -387,7 +441,11 @@ export function readClaudeJsonServers(
         tools: [],
         trust: 'unknown',
       };
-      if (config.command || config.args || config.envKeys) view.config = config;
+      // `Cebab-6fax.25`: `Object.keys` rather than a list of field names. The
+      // list form is what hid the http/sse case — a remote declaration sets url
+      // and headerNames and NONE of command/args/envKeys, so its config was
+      // built and then dropped on the floor, and the identity digest with it.
+      if (Object.keys(config).length > 0) view.config = config;
       out.push(view);
     }
   };
@@ -782,6 +840,11 @@ export function enrichWithTrustState(views: McpServerView[], projectPath: string
       command: view.config?.command ?? '',
       args: view.config?.args ?? [],
       candidateScriptShas: scriptShas,
+      // `Cebab-6fax.25`: the url / header names / env names, for the
+      // declarations whose identity command-and-args cannot express.
+      ...(view.config?.identityDigest !== undefined
+        ? { identityDigest: view.config.identityDigest }
+        : {}),
     });
     switch (lookup.decision) {
       case 'trusted':
