@@ -300,3 +300,77 @@ describe('saveTemplate — PR-7 hopBudget', () => {
     expect(listTemplates()[0]!.hopBudget).toBeUndefined();
   });
 });
+
+describe('[security] an unreadable row survives an unrelated write (Cebab-6fax.34)', () => {
+  // THE DEFECT. `listTemplates` drops rows whose `mode` this build does not
+  // recognise — correct for a renderer. `saveTemplate`/`deleteTemplate` built
+  // their new array from that filtered read and wrote it back, so read-side
+  // tolerance became write-side deletion: one row a newer client wrote, plus
+  // one unrelated save from an older client, and the row was gone for good.
+  //
+  // The fixture writes the setting directly because there is no supported way
+  // to CREATE such a row through `saveTemplate` — which is the point: the row
+  // comes from a build that is not this one.
+  function seedWithAnUnknownMode(): void {
+    setSetting('multi_agent_templates', [
+      {
+        id: 'from-the-future',
+        name: 'future-shaped',
+        // A value this build's VALID_MODES does not contain.
+        mode: 'swarm',
+        lifecycle: 'persistent',
+        participants: [1, 2],
+      },
+      {
+        id: 'ordinary',
+        name: 'ordinary',
+        mode: 'chain',
+        lifecycle: 'persistent',
+        participants: [1],
+      },
+    ] as unknown as MultiAgentTemplate[]);
+  }
+
+  /** What is actually on disk, filter bypassed — the thing under test. */
+  function storedIds(): string[] {
+    const raw = getDb()
+      .prepare(`SELECT value FROM settings WHERE key = 'multi_agent_templates'`)
+      .get() as { value: string } | undefined;
+    return (JSON.parse(raw!.value) as { id: string }[]).map((t) => t.id);
+  }
+
+  test('control: the unknown-mode row is hidden from the renderer', () => {
+    seedWithAnUnknownMode();
+    // Anti-vacuity for both tests below — if the filter were not dropping it,
+    // "it survived" would prove nothing about the write path.
+    expect(listTemplates().map((t) => t.id)).toEqual(['ordinary']);
+    expect(storedIds()).toEqual(['from-the-future', 'ordinary']);
+  });
+
+  test('saving a DIFFERENT template does not delete it', () => {
+    seedWithAnUnknownMode();
+    saveTemplate({ name: 'brand-new', mode: 'chain', lifecycle: 'temp', participants: [3] });
+    expect(storedIds()).toContain('from-the-future');
+    // And the renderer still does not see it.
+    expect(
+      listTemplates()
+        .map((t) => t.name)
+        .sort(),
+    ).toEqual(['brand-new', 'ordinary']);
+  });
+
+  test('deleting a DIFFERENT template does not delete it', () => {
+    seedWithAnUnknownMode();
+    deleteTemplate('ordinary');
+    expect(storedIds()).toEqual(['from-the-future']);
+    expect(listTemplates()).toEqual([]);
+  });
+
+  test('overwriting by name still replaces exactly one row', () => {
+    // The upsert must not have become an append now that it reads the raw list.
+    seedWithAnUnknownMode();
+    saveTemplate({ name: 'ordinary', mode: 'chain', lifecycle: 'temp', participants: [9] });
+    expect(storedIds()).toEqual(['from-the-future', 'ordinary']);
+    expect(listTemplates()[0]!.participants).toEqual([9]);
+  });
+});

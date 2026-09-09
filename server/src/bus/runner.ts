@@ -54,26 +54,77 @@ export const DEFAULT_STALL_TOOL_CEILING_MS = 900_000;
  * Built-in tools removed from a `'delegate-only'` agent's context (SDK
  * `disallowedTools`) so the orchestrator never even sees a file/shell/analysis
  * tool to reach for. This is the "remove from context" layer; the authoritative
- * boundary is the default-deny in `makeCanUseTool` (which also catches any
- * future built-in not listed here). `bus_send` (an MCP tool) and
- * `AskUserQuestion` are intentionally NOT here — those are the only two tools a
- * delegation-only agent may use.
+ * boundary is the default-deny in `makeCanUseTool`. `bus_send` (an MCP tool)
+ * and `AskUserQuestion` are intentionally NOT here — those are the only two
+ * tools a delegation-only agent may use.
+ *
+ * THE RULE IS "EVERY BUILT-IN EXCEPT AskUserQuestion", not a curated subset
+ * (`Cebab-6fax.20`). The previous list was hand-written against an older CLI
+ * and had rotted in both directions: it named `KillShell`, `BashOutput` and
+ * `Task`, which SDK 0.3.251 no longer ships, and it missed ten it does —
+ * `Agent`, `Monitor`, `REPL`, `Workflow`, `Artifact`, `Projects`,
+ * `EnterWorktree`, `TaskOutput`/`TaskStop`, `CronCreate` and friends. Its only
+ * test compared the constant to itself, so nothing could have noticed.
+ * `delegate_only_catalogue.test.ts` now derives the expected set from the
+ * SDK's own `sdk-tools.d.ts` and fails when the SDK adds a tool this list does
+ * not name, which forces a decision rather than a silent gap.
+ *
+ * LEGACY names are kept deliberately. The SDK bundles a CLI, but the constant
+ * costs nothing per entry and a name the current catalogue has dropped may
+ * still be live in an older bundle someone is running.
  */
 export const DELEGATE_ONLY_DISALLOWED: readonly string[] = [
+  // --- current SDK catalogue (sdk-tools.d.ts `ToolInputSchemas`), minus
+  // --- AskUserQuestion, which delegate-only agents may use.
+  'Agent',
+  'Artifact',
   'Bash',
-  'BashOutput',
-  'KillShell',
+  'ClaudeDesign',
+  'CronCreate',
+  'CronDelete',
+  'CronList',
+  'EnterPlanMode',
+  'EnterWorktree',
   'Edit',
-  'Write',
-  'MultiEdit',
-  'NotebookEdit',
-  'Read',
+  'ExitPlanMode',
+  'ExitWorktree',
   'Glob',
   'Grep',
-  'Task',
+  'ListMcpResources',
+  'Mcp',
+  'Monitor',
+  'NotebookEdit',
+  'Projects',
+  'ProposeGoal',
+  'ProposeSkills',
+  'PushNotification',
+  'REPL',
+  'Read',
+  'ReadMcpResource',
+  'ReadMcpResourceDir',
+  'ReadNotifications',
+  'RefreshMcpTools',
+  'RemoteTrigger',
+  'ReportFindings',
+  'ScheduleWakeup',
+  'SendFeedback',
+  'ShowOnboardingRolePicker',
+  'TaskCreate',
+  'TaskGet',
+  'TaskList',
+  'TaskOutput',
+  'TaskStop',
+  'TaskUpdate',
+  'TodoWrite',
   'WebFetch',
   'WebSearch',
-  'TodoWrite',
+  'Workflow',
+  'Write',
+  // --- legacy: named by older CLIs, absent from the pinned catalogue.
+  'BashOutput',
+  'KillShell',
+  'MultiEdit',
+  'Task',
 ];
 
 /**
