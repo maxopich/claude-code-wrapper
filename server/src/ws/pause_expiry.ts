@@ -43,14 +43,14 @@ import type { ControlReasonCode, PauseExpiryAction } from '@cebab/shared/protoco
  *     dual-write, and the state-change ServerMsg emit.
  *
  * R-A/R-B reseed:
- *   v1 doesn't reseed timers from durable state on server restart —
- *   that lands in C4e alongside the rest of the control-state read
- *   path. A server restart between pause + expiry currently means the
- *   pause stays in the DB indefinitely; the operator's next action
- *   (resume/kick) is the only path that clears it. Acceptable for v1
- *   (the operator notices "wait, I paused this 4 hours ago" the next
- *   time they look at the panel — same UX a missing timer fire would
- *   produce anyway).
+ *   Cluster C Phase 4e landed the reseed this header used to say was
+ *   missing. `reconstruct.ts` re-`schedule()`s a live pause's timer from
+ *   durable state when it rebuilds an ORCHESTRATED session, and emits no
+ *   ServerMsg on that path because the durable state is what the client
+ *   already replayed. The gap that remains is chain mode: chain
+ *   reconstruction exposes no per-agent control reseed, so a chain pause
+ *   that outlives a restart still sits in the DB until the operator's next
+ *   action clears it (`Cebab-w2z`).
  *
  * Process-singleton: production code uses `getPauseExpiryRegistry()`;
  * tests can either use the singleton (and clean up with

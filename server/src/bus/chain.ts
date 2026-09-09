@@ -29,12 +29,17 @@
  *      teardown 'completed'). `dest=user` is never legitimate in chain mode.
  *
  * Resume: a still-live session is re-attached from the in-process registry
- * on browser reconnect. After a Cebab *server* restart the registry is empty
- * → `resumeChainSession` returns null and the WS layer marks the row
- * crashed. Chain-mode reconstruction is intentionally out of scope, so a
- * chain run still does NOT survive a server restart (the old R-A behavior);
- * orchestrated runs do (R-B, see `reconstruct.ts`). Single-agent resume is
- * unaffected; that is a different path.
+ * on browser reconnect (R-A). After a Cebab *server* restart the registry is
+ * empty and `resumeChainSession` returns null — but since `Cebab-2t9.1` (#415)
+ * the row is then handed to `reconstructChainSession` (R-B), which rebuilds it
+ * READ-ONLY via the extracted `wireChainSession`, under the same
+ * `checkReconstructable` guard and the same `awaiting_continue` contract the
+ * orchestrator path uses. Only a row that FAILS that guard emits
+ * `chain_not_reconstructed` and falls back to crashed. Two chain-specific
+ * gaps, both real: there is no per-agent mute/kick/pause reseed (`Cebab-w2z`
+ * tracks the pause divergence that leaves), and a chain handle has no
+ * `sendUserPrompt`, so the pipeline cannot yet be continued past the
+ * read-only re-attach. Single-agent resume is unaffected; different path.
  *
  * Chain runs DO persist each participant's `--resume` checkpoint
  * (`onSessionId` → `upsertAgentSession`), even though nothing reads them

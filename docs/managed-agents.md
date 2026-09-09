@@ -6,10 +6,13 @@ project's own root `CLAUDE.md` and stop there — so this page arrives only when
 it.
 
 What is here is mechanism and the measurements behind it. The two rules an agent could act
-wrongly on are stated in [`SECURITY.md`](../SECURITY.md) rather than here, because a rule
-belongs where it cannot be missed: **Cebab owns every byte under `managedAgentsRoot()` and
-none outside it**, and **the wire carries a KIND, never a path**. Everything below explains
-how those are enforced.
+wrongly on are stated where they cannot be missed — in the always-loaded `CLAUDE.md`, and
+repeated here so a reader of this page alone has them: **Cebab owns every byte under
+`managedAgentsRoot()` and none outside it**, and **the wire carries a KIND, never a path**
+(`MANAGED_EDITABLE` in `managed_file.ts` is a closed set of three, so there is no traversal
+input to validate). Everything below explains how those are enforced. Note this page used
+to send the reader to `SECURITY.md` for them; that file states Cebab's runtime posture and
+threat model and has never carried these two.
 
 **Read before touching** `server/src/managed_agent.ts`, `managed_copy.ts`,
 `managed_delete.ts`, `managed_file.ts`, or `repo/projects.ts`'s managed helpers.
@@ -24,6 +27,7 @@ how those are enforced.
 - [Why `.git` is excluded](#why-git-is-excluded)
 - [Credentials, and why they are copied in the clear](#credentials-and-why-they-are-copied-in-the-clear)
 - [The symlink rule](#the-symlink-rule)
+- [The supported Node floor](#the-supported-node-floor)
 - [Deleting a managed agent](#deleting-a-managed-agent)
 
 ## The two kinds of project
@@ -48,7 +52,7 @@ how those are enforced.
 
 ## Why `.git` is excluded
 
-**It is what makes a managed agent uncommittable** (`Cebab-ws0.11`). Not a size optimisation: `gitignore(5)` consults parent ignore files only up to the top of the working tree, so a copied `.git` makes `<dataDir>/agents/<slug>/` its own working tree and `<dataDir>/.gitignore` — the bare `*` `ensureDataDir` writes — stops reaching inside it. The copy would also carry the source's remotes, so an agent running there could push into the operator's real repository. Excluding `.git` removes both at once. Matched by NAME at any depth (submodules have their own) and irrespective of kind, because `.git` is a regular FILE in a worktree or submodule holding a `gitdir:` pointer somewhere else entirely. `server/src/managed_copy.test.ts` pins the property from both sides: an outer `git add -A` stages nothing from the data dir, and `git rev-parse --show-toplevel` run inside a managed tree returns the outer repo rather than the copy.
+**It is what makes a managed agent uncommittable** (`Cebab-ws0.11`). Not a size optimisation: `gitignore(5)` consults parent ignore files only up to the top of the working tree, so a copied `.git` makes `<dataDir>/agents/<slug>/` its own working tree and `<dataDir>/.gitignore` — the bare `*` `ensureDataDir` writes — stops reaching inside it. The copy would also carry the source's remotes, so an agent running there could push into the operator's real repository. Excluding `.git` removes both at once. Matched by NAME at any depth (submodules have their own) and irrespective of kind, because `.git` is a regular FILE in a worktree or submodule holding a `gitdir:` pointer somewhere else entirely. `server/src/managed_copy.test.ts` pins the property from both sides: an outer `git add -A` stages nothing from the data dir, and `git rev-parse --show-prefix` run inside a managed tree returns a NON-EMPTY prefix — i.e. "inside some repo, not the top of one" — with the enclosing repo asserted empty as the anti-vacuity control. Deliberately not `--show-toplevel`: comparing that against a path went red on Windows only, where `os.tmpdir()` hands back the 8.3 short name and git returns the long one.
 
 ## Credentials, and why they are copied in the clear
 
@@ -58,7 +62,9 @@ how those are enforced.
 
 **It is stricter than "don't follow symlinks"** (`managed_agent.ts`). `fsp.cp({ dereference: false })` satisfies that phrase and is wrong here: it recreates an escaping link faithfully, handing the managed agent a live path out of the space Cebab owns. So does an **absolute** link that resolves _inside_ the source — recreated verbatim it still names the SOURCE after the copy. Only relative links resolving inside-or-at the source root are recreated; everything else is skipped and reported. Directory links are never descended, which is also the loop guard. Measured caps (5 GB / 300k files) are a backstop, not the decision: the operator sees a preflight measured by the _same traversal the copy uses_ and confirms. The copy is `fs.promises` throughout — a synchronous copy of the gigabyte-scale trees this deliberately includes would park the event loop for minutes.
 
-**The supported Node floor is declared, and `npm` now enforces it** (`Cebab-mfvu`). `package.json` gained `engines.node: ">=24.0.0"` and `.npmrc` gained `engine-strict=true`, and the second is what makes the first do anything: without it a dependency whose own `engines.node` excludes the running Node installs anyway — npm prints `npm warn EBADENGINE` and exits 0. Measured both directions. This is not hygiene, it is a defect class: two Dependabot majors (jsdom 30, better-sqlite3 13) both dropped Node 20 in their `engines`, CI was still on Node 20 (v20.20.2, itself EOL since 2026-04-30), npm installed them regardless, and the failure surfaced eighty seconds later as 230 runtime `TypeError: webidl.util.markAsUncloneable is not a function` and a wall of dead vitest workers — symptoms that read like code defects. The information was present at install time, as a warning. CI moved to Node 24 in the same change; the two `setup-node` sites and the `engines` floor are kept in lockstep and `ci.yml` says so. Cost of the strictness, measured against the tree: of 233 packages declaring `engines.node`, **zero** would block an install on Node 24 or 26 — one would on Node 20 (`lint-staged`, already silently unsupported there). Adding a dependency that needs a newer runtime is now an install-time refusal naming the package, the required range and the actual version.
+## The supported Node floor
+
+**It is declared, and `npm` now enforces it** (`Cebab-mfvu`). `package.json` gained `engines.node: ">=24.0.0"` and `.npmrc` gained `engine-strict=true`, and the second is what makes the first do anything: without it a dependency whose own `engines.node` excludes the running Node installs anyway — npm prints `npm warn EBADENGINE` and exits 0. Measured both directions. This is not hygiene, it is a defect class: two Dependabot majors (jsdom 30, better-sqlite3 13) both dropped Node 20 in their `engines`, CI was still on Node 20 (v20.20.2, itself EOL since 2026-04-30), npm installed them regardless, and the failure surfaced eighty seconds later as 230 runtime `TypeError: webidl.util.markAsUncloneable is not a function` and a wall of dead vitest workers — symptoms that read like code defects. The information was present at install time, as a warning. CI moved to Node 24 in the same change; the two `setup-node` sites and the `engines` floor are kept in lockstep and `ci.yml` says so. Cost of the strictness, measured against the tree: of 233 packages declaring `engines.node`, **zero** would block an install on Node 24 or 26 — one would on Node 20 (`lint-staged`, already silently unsupported there). Adding a dependency that needs a newer runtime is now an install-time refusal naming the package, the required range and the actual version.
 
 ## Deleting a managed agent
 

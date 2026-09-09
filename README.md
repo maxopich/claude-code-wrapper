@@ -194,8 +194,12 @@ halves are security-relevant:
   [`server/src/ws/permission.ts`](server/src/ws/permission.ts).
 - **`settingSources`** — `['user']` when untrusted, and all three scopes when
   trusted. Only a trusted project loads its own `CLAUDE.md`, `.claude/skills/`,
-  `.claude/settings*.json` (hooks, env injectors, MCP servers) and project-root
+  `.claude/settings*.json` (hooks and env injectors) and project-root
   `.mcp.json`. Flipping a project to trusted authorises all of that to run.
+  **Not** a settings-layer `mcpServers` key — that one never loads at any
+  scope, so Trust has nothing to turn on; `.mcp.json` is the project-scoped MCP
+  mechanism Trust actually controls. Measured; the table is in
+  `readMcpJsonServers`' header in `repo/project_authority.ts`.
 
 What Trust does **not** scope: MCP servers declared in `~/.claude.json`'s
 top-level `mcpServers` (`claude mcp add --scope user`) load under `['user']`
