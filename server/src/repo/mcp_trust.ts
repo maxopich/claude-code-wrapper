@@ -240,16 +240,44 @@ export function computeBinarySha(command: string): string | null {
  * (`node build/index.js`); the ceiling exists because `args` is
  * project-controlled and `enrichWithTrustState` runs on every authority
  * resolve, so an args array of a thousand file paths would otherwise be a
- * read amplifier aimed at the operator's own machine. Since `Cebab-r89` a
- * candidate that resolves to nothing is still READ (and recorded absent), so a
- * thousand nonexistent paths is bounded by this cap too.
+ * read amplifier aimed at the operator's own machine.
  *
  * Over the cap we return `null` — no pin at all — rather than the first eight.
  * A partial pin would report "unchanged" for a declaration whose ninth file was
  * rewritten, and a pin that is silently narrower than what it appears to cover
  * is the failure this whole module exists to avoid.
+ *
+ * `Cebab-6fax.42`: this counts BYTES HASHED, not candidates examined, and that
+ * distinction is the whole protection for a realistic declaration.
+ * `scriptCandidates` yields the command plus every non-flag arg, so the
+ * ordinary `npx -y @modelcontextprotocol/server-filesystem <8 directories>`
+ * reached nine entries and pinned NOTHING — permanently, because the null is
+ * stored as a NULL `script_shas_json` on approval and every later spawn then
+ * compares null against null, so `script_changed` could never fire for that row
+ * again. The directories are not files; each one costs an `lstat` that fails
+ * and hashes nothing. Only a read that consumed bytes now counts here, which is
+ * the resource this cap exists to bound.
  */
 const MAX_HASHED_SCRIPTS = 8;
+
+/**
+ * Absolute ceiling on candidate TOKENS examined, whatever they resolve to.
+ *
+ * Required by the change above rather than optional (`Cebab-6fax.42`): once
+ * failed reads stop consuming the hash budget, nothing else bounds the work or
+ * the output. Both matter. The reads are an amplifier aimed at the operator's
+ * machine and `enrichWithTrustState` runs them on every authority resolve; and
+ * the returned map is SERIALIZED into `mcp_trust.script_shas_json` at approval
+ * and rebuilt on every resolve after it, so a thousand-token args array would
+ * otherwise become a thousand-entry row in the operator's own database.
+ *
+ * Over this ceiling we return `null`, the same posture as the hash cap and for
+ * the same reason — a partial pin that reads as complete is the failure this
+ * module exists to avoid. 64 is far past any real declaration (the largest
+ * observed is a filesystem server with a handful of roots) and far below the
+ * shapes that make either cost interesting.
+ */
+const MAX_SCRIPT_CANDIDATES = 64;
 
 /**
  * Value recorded for a candidate that IS a regular file but is larger than
@@ -338,10 +366,21 @@ export const SCRIPT_ABSENT = 'absent';
  * direction was already the module's accepted trade — an entry can produce a
  * prompt, never suppress one.
  *
- * Returns `null` only when there was NO candidate token at all (`node` alone,
- * `npx` with only flags). A null means no identity to track, exactly as it does
- * for `binary_sha`; it no longer means "the files did not resolve", which is now
- * a map of `SCRIPT_ABSENT` entries that a later spawn is compared against.
+ * Returns `null` in exactly two cases, and they are not the same thing —
+ * a contradiction this header carried until `Cebab-6fax.42`, because it claimed
+ * "only when there was NO candidate token at all" while the cap below had
+ * always been a second null.
+ *
+ *  1. No candidate token at all (`node` alone, `npx` with only flags). No
+ *     identity to track, exactly as for `binary_sha`. It does NOT mean "the
+ *     files did not resolve" — that is a map of `SCRIPT_ABSENT` entries, which
+ *     a later spawn IS compared against.
+ *  2. A declaration past either ceiling. This one is a loss of protection, not
+ *     an absence of it: the row is approved with a NULL pin and no later spawn
+ *     can report `script_changed` for it. The ceilings are set so this is an
+ *     adversarial shape rather than a real one; making it degrade to a REFUSAL
+ *     instead of a null is tracked on the bead and is a separate change,
+ *     because it needs its own `McpServerView['trust']` state to be visible.
  */
 export function computeScriptShas(
   command: string,
@@ -355,6 +394,9 @@ export function computeScriptShas(
   for (const token of scriptCandidates(command, args)) {
     if (seen.has(token)) continue;
     seen.add(token);
+    // Checked BEFORE the read, so the ceiling bounds the reads it is there to
+    // bound rather than being noticed one read late.
+    if (seen.size > MAX_SCRIPT_CANDIDATES) return null;
     // `path.resolve` leaves an absolute token alone and anchors every other
     // one at the spawn cwd, which for both the single-agent turn and every bus
     // participant is the project root.
@@ -369,12 +411,14 @@ export function computeScriptShas(
       out[token] = read.refusal === 'too_large' ? SCRIPT_TOO_LARGE : SCRIPT_ABSENT;
     } else {
       out[token] = createHash('sha256').update(read.bytes).digest('hex');
+      // Only a read that consumed bytes counts. `MAX_SCRIPT_CANDIDATES` above
+      // is what bounds the token count now; this one bounds the hashing, which
+      // is the expensive half. Counting absent/too-large entries here is what
+      // made a filesystem server's directory list disable its own script pin
+      // (`Cebab-6fax.42`).
+      hashed += 1;
+      if (hashed > MAX_HASHED_SCRIPTS) return null;
     }
-    // Every recorded entry — sha, too-large OR absent — counts toward the cap:
-    // a hostile args array of a thousand nonexistent paths is still a read
-    // amplifier the backstop must bound, even though each read fails cheaply.
-    hashed += 1;
-    if (hashed > MAX_HASHED_SCRIPTS) return null;
   }
 
   const keys = Object.keys(out);
