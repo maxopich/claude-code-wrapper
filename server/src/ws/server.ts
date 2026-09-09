@@ -2889,6 +2889,34 @@ export function describeChainFailure(reason: string, brokenAt?: string): string 
   }
 }
 
+/**
+ * Which `WrapperErrorKind` does a rejected handler deserve?
+ *
+ * `Cebab-6fax.17`. This catch used to hard-code `process_crashed` for
+ * everything that reached it, so an operator DECLINING a trust or
+ * env-injection prompt — a normal, deliberate action, which rejects the parked
+ * promise with an `AbortError` — surfaced as "Server error … process_crashed".
+ * The same catch also styles a policy REFUSAL that way ("another multi-agent
+ * session is already running"), which is how a run this review measured
+ * reported a deliberate single-active guard as a crash.
+ *
+ * `aborted` exists in the union for exactly this and was never used here. The
+ * distinction is not cosmetic: `notifyFromServerMsg` and the session-status
+ * banner both branch on `kind`, so calling a cancellation a crash is what puts
+ * a sticky red error in front of an operator who just clicked Cancel.
+ *
+ * Deliberately narrow — it classifies only what it can name. Anything else
+ * stays `process_crashed`, which is the honest answer for an unexpected throw
+ * and keeps this from quietly downgrading a real failure.
+ */
+export function classifyHandlerFailure(err: unknown): WrapperErrorKind {
+  // `GateAbandonedError` sets `name = 'AbortError'`, and so does an
+  // `AbortController` abort — both mean "this did not happen because someone
+  // stopped it", which is what `aborted` says.
+  if (err instanceof Error && err.name === 'AbortError') return 'aborted';
+  return 'process_crashed';
+}
+
 function onConnection(ws: WebSocket): void {
   console.log('[ws] client connected');
   // H07: re-check the chain whenever a browser attaches, so tampering during a
@@ -3075,7 +3103,7 @@ function onConnection(ws: WebSocket): void {
       console.error('[ws] handler error', err);
       send(ws, {
         type: 'wrapper_error',
-        kind: 'process_crashed',
+        kind: classifyHandlerFailure(err),
         message: err instanceof Error ? err.message : String(err),
       });
     });

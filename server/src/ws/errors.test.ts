@@ -100,3 +100,50 @@ describe('classifyError', () => {
     expect(classifyError('plain string').kind).toBe('process_crashed');
   });
 });
+
+describe('the account usage limit is a wait, not a crash (Cebab-6fax.39)', () => {
+  // MEASURED 2026-09-08 on a live chain run: the SDK surfaced the account's
+  // hard limit as a generic `error_result`, not a `rate_limit_event`, and its
+  // message contains no "rate limit" anywhere — so it fell through to
+  // `process_crashed`. The consequences differ per surface and both are wrong:
+  // the bus parks a Retry that will simply fail again until the window resets,
+  // and the single-agent path's held-prompt retry is reachable only from a
+  // THROWN rate-limit, so a result-terminated one drops what the operator
+  // typed. The loop's gate reads the same failure as a code defect
+  // (`Cebab-weqo`).
+
+  test('the exact sentence the CLI produced', () => {
+    expect(
+      classifyError(
+        new Error(
+          "Claude Code returned an error result: You've hit your monthly spend limit · " +
+            'raise it at claude.ai/settings/usage, or your session limit resets 7:10pm',
+        ),
+      ).kind,
+    ).toBe('rate_limited');
+  });
+
+  test('the shapes separately, so a reworded prefix still classifies', () => {
+    expect(classifyError(new Error('usage limit reached for this account')).kind).toBe(
+      'rate_limited',
+    );
+    expect(classifyError(new Error('your session limit resets 9:00pm')).kind).toBe('rate_limited');
+  });
+
+  test('the per-minute rate limit still classifies — the old rule is kept', () => {
+    // Not replaced: `rate limit` is the API-level condition and means the same
+    // thing to a caller. Both must land in the same bucket.
+    expect(classifyError(new Error('Rate limit exceeded')).kind).toBe('rate_limited');
+  });
+
+  test('ANTI-VACUITY: an ordinary failure is still a crash', () => {
+    // A matcher wide enough to catch everything would satisfy every case above
+    // and turn every real failure into "wait a while".
+    expect(classifyError(new Error('ENOENT: no such file or directory')).kind).toBe(
+      'process_crashed',
+    );
+    expect(classifyError(new Error('the limit of this approach is clarity')).kind).toBe(
+      'process_crashed',
+    );
+  });
+});

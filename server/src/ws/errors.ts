@@ -64,7 +64,23 @@ export function classifyError(err: unknown): { kind: WrapperErrorKind; message: 
   ) {
     return { kind: 'auth_expired', message };
   }
-  if (/rate[ -]?limit/i.test(message)) {
+  // `Cebab-6fax.39`. MEASURED 2026-09-08: the account's hard usage limit
+  // arrives from the SDK as a generic `error_result` whose message begins
+  // "You've hit your monthly spend limit … your session limit resets 7:10pm".
+  // It contains no `rate limit` anywhere, so it fell through to
+  // `process_crashed` — a wait-then-retry condition reported as a crash, on
+  // both the bus (where Retry would simply fail again until the window resets)
+  // and the single-agent path (where the held-prompt retry is reachable only
+  // from a THROWN rate-limit and a result-terminated one drops what the
+  // operator typed).
+  //
+  // Matched on the shapes the CLI actually produces rather than a broad word:
+  // `usage limit` and `spend limit` are the account-level ceilings, and
+  // `session limit resets` is the sentence's own tail, which appears even when
+  // the leading phrase is worded differently. Kept alongside `rate limit`
+  // rather than replacing it — that one is the per-minute API condition and
+  // still means the same thing to a caller.
+  if (/rate[ -]?limit|usage limit|spend limit|session limit resets/i.test(message)) {
     return { kind: 'rate_limited', message };
   }
   // Tightened: was /parse|json/i which matched any error mentioning JSON.
