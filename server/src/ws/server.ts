@@ -5286,13 +5286,43 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
           conn.multiAgent = null;
         }
       };
+      // [R-A] `Cebab-6fax.14`: every run-scoped callback below sends through
+      // THIS, not through `conn.ws`.
+      //
+      // WHAT WENT WRONG. These callbacks are created once, at start, and close
+      // over the socket that existed then. `rebind` swaps the ROUTER's sink on
+      // a browser re-attach — which is why routed `multi_agent_event`s keep
+      // arriving — but nothing swapped these, so after one reload they were
+      // writing into a closed socket, where `send` silently drops them.
+      // MEASURED 2026-09-08 (session 2b87882c, socket dropped at 150 s and
+      // re-attached 1 s later): the new socket received the full replay and
+      // every later routed event, and ZERO `agent_activity` ticks (296 had
+      // gone to the first socket) and ZERO `multi_agent_mutation` messages,
+      // although the worker ran three tools afterwards and the rows are in the
+      // DB. So the activity bar and the mutation lane went dark for the rest
+      // of the run, and — travelling the same way — so would an
+      // AskUserQuestion card and a pause-on-dangerous banner, which is a run
+      // that waits forever for an operator who is never shown the prompt.
+      //
+      // The registry already had the answer: `sendServerMsg` (register B17)
+      // resolves the sink at CALL time, built for the pause-expiry timer that
+      // hits the same problem from the other direction. These callbacks were
+      // never migrated to it.
+      //
+      // The fallback matters: callbacks can fire before `registerLiveSession`
+      // runs, and at that moment `conn.ws` IS the right socket.
+      let liveSessionId: string | null = null;
+      const toLiveSink = (out: ServerMsg): void => {
+        const owner = liveSessionId === null ? undefined : getLiveSession(liveSessionId);
+        if (owner) owner.sendServerMsg(out);
+        else send(conn.ws, out);
+      };
       // Ephemeral liveness pulse for the active run's in-flight turn. Not
-      // persisted and not replayed: it is only meaningful to the connection
-      // that started the run (see the `agent_activity` protocol JSDoc — a
-      // live re-attach intentionally won't receive it; the spine re-syncs on
-      // the next real hop).
+      // persisted and not replayed — but it does now reach a re-attached
+      // window, because the alternative measured above is a bar that stops
+      // moving on a run that is still working.
       const onActivity = (sessionId: string, snap: ActivitySnapshot) => {
-        send(conn.ws, {
+        toLiveSink({
           type: 'agent_activity',
           sessionId,
           agentName: snap.agentName,
@@ -5311,7 +5341,7 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       // delta for transitions that happen later (a worker fails, the
       // operator retries, etc.).
       const onPendingRetry = (sessionId: string, pending: PendingRetryDescriptor | null) => {
-        send(conn.ws, { type: 'multi_agent_pending_retry', sessionId, pending });
+        toLiveSink({ type: 'multi_agent_pending_retry', sessionId, pending });
       };
       // Item #5: per-mutation live forwarding → `multi_agent_mutation`. Fires
       // for every classified non-'read' tool call observed during this
@@ -5320,7 +5350,7 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       // sticky safety toast with an Open-in-Logs CTA (additive — the
       // LogsButton cumulative-count chip stays per NR-2).
       const onMutation = (sessionId: string, mutation: MutationRecord) => {
-        send(conn.ws, {
+        toLiveSink({
           type: 'multi_agent_mutation',
           sessionId,
           mutation: mutationRecordToView(mutation),
@@ -5340,7 +5370,7 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       // never carry pending rows on `multi_agent_started`; this is the delta.
       // Whole-set, not a delta-of-a-delta, so a re-attach re-emit is idempotent.
       const onPendingMutation = (sessionId: string, pending: MutationRecord[]) => {
-        send(conn.ws, {
+        toLiveSink({
           type: 'multi_agent_pending_mutations',
           sessionId,
           pending: pending.map(mutationRecordToView),
@@ -5352,7 +5382,7 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       // layer just forwards it. The typed `router_drop` ServerMsg is
       // forward-compat for non-toast consumers (Cluster B routing-trail).
       const sendNotification = (env: NotificationEnvelope & { type: 'notification' }) => {
-        send(conn.ws, env);
+        toLiveSink(env);
       };
       const sendRouterDrop = (drop: {
         sessionId: string;
@@ -5362,7 +5392,7 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
         kind: string;
         auditRowId: string;
       }) => {
-        send(conn.ws, { type: 'router_drop', ...drop });
+        toLiveSink({ type: 'router_drop', ...drop });
       };
       // Cluster A Phase 4: generic ServerMsg sender. Threaded into the
       // bus runtime so the dispatcher.emit fan-out + new typed events
@@ -5370,7 +5400,7 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       // `bus_auto_installed`, dangerous-mutation safety toast) reach the
       // browser without one bespoke callback per event.
       const sendServerMsg = (msg: ServerMsg) => {
-        send(conn.ws, msg);
+        toLiveSink(msg);
       };
 
       // Cebab-ws0.8 moved per-session folders into the data dir, so this guard
@@ -5498,6 +5528,11 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
                 : undefined,
           });
           conn.multiAgent = handle;
+          // `Cebab-6fax.14`: from here the run-scoped callbacks resolve their
+          // destination through the REGISTRY, so a re-attach reaches them.
+          // Assigned after the start (which is what registers the session), so
+          // the pre-registration fallback covers the window before it.
+          liveSessionId = handle.sessionId;
           // Register B01: a freshly-built router's sink epoch is 0 and this
           // conn owns it. Reset explicitly — a conn that previously re-attached
           // to some other session would otherwise carry a stale non-zero epoch
@@ -5614,6 +5649,9 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
           templateId: typeof msg.templateId === 'string' ? msg.templateId : undefined,
         });
         conn.multiAgent = handle;
+        // `Cebab-6fax.14`: see the orchestrator path — the run-scoped callbacks
+        // resolve through the registry from here on.
+        liveSessionId = handle.sessionId;
         // Register B01: see the orchestrator path — reset to the fresh
         // router's epoch 0 so this conn's own close still silences its sink.
         conn.multiAgentSinkEpoch = 0;
