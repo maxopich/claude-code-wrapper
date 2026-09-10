@@ -8,6 +8,7 @@ import { resolve } from 'node:path';
 import { describe, expect, test, vi } from 'vitest';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { MockOptions, RunOptions, Runner } from '../runner/index.js';
+import { resolveSdkMcpTool } from '../runner/mock.js';
 import {
   AgentRunner,
   BUS_KINDS,
@@ -1652,6 +1653,173 @@ describe('AgentRunner — per-agent turn serialization', () => {
       runner.register({ name: 'coder', cwd: '/tmp/coder' });
       await expect(runner.deliverTurn('coder', 'go')).rejects.toThrow(/genuine failure/);
       errSpy.mockRestore();
+    });
+
+    test('Cebab-6fax.22: a retry does NOT re-route a bus_send the failed attempt already delivered', async () => {
+      // The regression: an attempt that called `bus_send` and THEN failed
+      // transiently left the message routed. The retry re-runs the turn from
+      // the resumed transcript and re-issues the identical send, so without a
+      // dedupe the peer's context gets the instruction twice and the hop budget
+      // is charged twice. Drive exactly that: attempt 1 routes a reply then
+      // fails with `error_during_execution` (on the transient-overload
+      // heuristic); the retry routes the identical reply again.
+      const routed: BusEvent[] = [];
+      let n = 0;
+
+      // Invoke the injected `bus_send` tool exactly as the SDK would when the
+      // agent calls it mid-turn — through the real handler on the per-agent
+      // `cebab_bus` server, so the routing seam under test is the live one.
+      async function sendReply(opts: RunOptions & Partial<MockOptions>): Promise<void> {
+        const tool = resolveSdkMcpTool(opts.mcpServers, 'mcp__cebab_bus__bus_send');
+        if (!tool) throw new Error('cebab_bus.bus_send not found on the injected server');
+        await tool.handler({ destination: 'orchestrator', kind: 'reply', text: 'done' }, {});
+      }
+
+      const runner = new AgentRunner({
+        onEvent: (ev) => void routed.push(ev),
+        overloadBackoffMs: [0], // one retry, no real sleep
+        runnerFactory: (opts) => {
+          n++;
+          const attemptId = n;
+          async function* gen(): AsyncGenerator<SDKMessage> {
+            await sendReply(opts); // the agent delivers its reply...
+            if (attemptId === 1) {
+              // ...then the turn fails transiently, AFTER the send routed.
+              yield {
+                type: 'result',
+                subtype: 'error_during_execution',
+                session_id: 's-fail',
+              } as unknown as SDKMessage;
+            } else {
+              yield resultMsg('s-ok');
+            }
+          }
+          const it = gen();
+          return { [Symbol.asyncIterator]: () => it, close: () => {} };
+        },
+      });
+      runner.register({ name: 'worker', cwd: '/tmp/worker' });
+
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      await runner.deliverTurn('worker', 'go');
+      warnSpy.mockRestore();
+
+      expect(n).toBe(2); // spawned twice: one failed attempt + one retry
+      // The identical send from the retry is dropped: exactly one routed row.
+      expect(routed).toHaveLength(1);
+      expect(routed[0]).toMatchObject({
+        source: 'worker',
+        destination: 'orchestrator',
+        kind: 'reply',
+        text: 'done',
+      });
+
+      // The dedupe is cross-attempt ONLY: two byte-identical sends inside a
+      // SINGLE attempt are the model's genuine intent, not a replay, so both
+      // must still reach the router. Asserted here, inside the reddening
+      // acceptance case, rather than as its own test — a standalone check of
+      // this would pass with or without the change (the pre-fix code has no
+      // dedupe at all, so it also lets both through), which is exactly the
+      // vacuous-guard shape the revert-check rejects. Folded in, it rides the
+      // primary assertion above (which does redden) while still pinning that
+      // the fix did not over-dedupe.
+      const within: BusEvent[] = [];
+      const withinRunner = new AgentRunner({
+        onEvent: (ev) => void within.push(ev),
+        overloadBackoffMs: [0],
+        runnerFactory: (opts) => {
+          async function* gen(): AsyncGenerator<SDKMessage> {
+            const tool = resolveSdkMcpTool(opts.mcpServers, 'mcp__cebab_bus__bus_send');
+            if (!tool) throw new Error('cebab_bus.bus_send not found');
+            await tool.handler({ destination: 'orchestrator', kind: 'reply', text: 'ping' }, {});
+            await tool.handler({ destination: 'orchestrator', kind: 'reply', text: 'ping' }, {});
+            yield resultMsg('s-ok');
+          }
+          const it = gen();
+          return { [Symbol.asyncIterator]: () => it, close: () => {} };
+        },
+      });
+      withinRunner.register({ name: 'worker2', cwd: '/tmp/worker2' });
+      await withinRunner.deliverTurn('worker2', 'go');
+      expect(within).toHaveLength(2);
+    });
+
+    // `Cebab-6fax.22` x `Cebab-x4rn`. The per-attempt dedupe wrapper sits
+    // between the router and the `bus_send` tool, so it is the one place the
+    // router's verdict can be lost on its way to the model. x4rn's own tests
+    // assert the verdict at the ROUTER and never drive it through AgentRunner,
+    // so without these two cases a wrapper that returns nothing ships green.
+    test('Cebab-6fax.22: a dropped send reaches the agent as NOT delivered, through the runner', async () => {
+      const replies: string[] = [];
+      const runner = new AgentRunner({
+        onEvent: () => ({ delivered: false as const, reasonCode: 'muted_source' as const }),
+        overloadBackoffMs: [0],
+        runnerFactory: (opts) => {
+          async function* gen(): AsyncGenerator<SDKMessage> {
+            const tool = resolveSdkMcpTool(opts.mcpServers, 'mcp__cebab_bus__bus_send');
+            if (!tool) throw new Error('cebab_bus.bus_send not found');
+            const res = (await tool.handler(
+              { destination: 'orchestrator', kind: 'reply', text: 'done' },
+              {},
+            )) as { content: { text: string }[] };
+            replies.push(res.content[0]!.text);
+            yield resultMsg('s-ok');
+          }
+          const it = gen();
+          return { [Symbol.asyncIterator]: () => it, close: () => {} };
+        },
+      });
+      runner.register({ name: 'worker', cwd: '/tmp/worker' });
+      await runner.deliverTurn('worker', 'go');
+      expect(replies).toHaveLength(1);
+      expect(replies[0]).toMatch(/^NOT delivered to orchestrator: you have been muted/);
+    });
+
+    test('Cebab-6fax.22: a replay suppressed on retry answers with the FIRST verdict, not "delivered"', async () => {
+      const replies: string[] = [];
+      let routerCalls = 0;
+      let n = 0;
+      const runner = new AgentRunner({
+        onEvent: () => {
+          routerCalls++;
+          return { delivered: false as const, reasonCode: 'muted_source' as const };
+        },
+        overloadBackoffMs: [0],
+        runnerFactory: (opts) => {
+          n++;
+          const attemptId = n;
+          async function* gen(): AsyncGenerator<SDKMessage> {
+            const tool = resolveSdkMcpTool(opts.mcpServers, 'mcp__cebab_bus__bus_send');
+            if (!tool) throw new Error('cebab_bus.bus_send not found');
+            const res = (await tool.handler(
+              { destination: 'orchestrator', kind: 'reply', text: 'done' },
+              {},
+            )) as { content: { text: string }[] };
+            replies.push(res.content[0]!.text);
+            if (attemptId === 1) {
+              yield {
+                type: 'result',
+                subtype: 'error_during_execution',
+                session_id: 's-fail',
+              } as unknown as SDKMessage;
+            } else {
+              yield resultMsg('s-ok');
+            }
+          }
+          const it = gen();
+          return { [Symbol.asyncIterator]: () => it, close: () => {} };
+        },
+      });
+      runner.register({ name: 'worker', cwd: '/tmp/worker' });
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      await runner.deliverTurn('worker', 'go');
+      warnSpy.mockRestore();
+      expect(n).toBe(2);
+      expect(routerCalls).toBe(1); // the retry's identical send was deduped...
+      expect(replies).toHaveLength(2);
+      // ...and BOTH attempts' agents read the truth, the replay included.
+      for (const text of replies)
+        expect(text).toMatch(/^NOT delivered to orchestrator: you have been muted/);
     });
   });
 
