@@ -185,7 +185,11 @@ export function redactJsonlLine(line: string): string | null {
       const type = (parsed as { type?: unknown }).type;
       if (typeof type === 'string' && isStreamPartial(type)) return null;
     }
-    const { redacted } = redactSensitive(parsed);
+    // Cebab-6fax.32: a share-safe artifact omits hook output (an auth helper's
+    // stderr, a `gcloud`/`aws` wrapper's stdout) — arbitrary program text that
+    // is exactly where a non-vendor-shaped credential shows up. The full trace
+    // stays in `format=raw`, which never reaches this function.
+    const { redacted } = redactSensitive(parsed, { omitHookOutput: true });
     return JSON.stringify(redacted);
   } catch {
     return JSON.stringify({

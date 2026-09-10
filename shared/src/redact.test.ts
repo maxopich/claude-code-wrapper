@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { redactSensitive, isSensitiveKey, pathLooksSensitive, ROOT_FIELD } from './redact.js';
+import {
+  redactSensitive,
+  isSensitiveKey,
+  pathLooksSensitive,
+  ROOT_FIELD,
+  HOOK_OUTPUT_OMITTED,
+} from './redact.js';
 
 describe('redactSensitive — key-based', () => {
   it('masks values for sensitive-named keys', () => {
@@ -1154,5 +1160,99 @@ describe('[security] a credential-NAMED assignment in free text (Cebab-ygu.51)',
     expect(JSON.stringify(withVendor.redacted)).not.toContain(PASSWORD);
     expect(JSON.stringify(without.redacted)).not.toContain(PASSWORD);
     expect(without.fields).toEqual(['message.content[0].text']);
+  });
+});
+
+describe('[security] hook output omitted from share surfaces (Cebab-6fax.32)', () => {
+  // Runtime-assembled so the secret scan stays at full strength (same reason as
+  // the block above). NOT vendor-shaped: a plain password is exactly the class
+  // the value patterns miss, so if these passed with a `sk-`/AKIA token they
+  // would pass for the wrong reason — the wholesale value branch would catch it.
+  const PASSWORD = 'hunter2' + '-prod';
+
+  /** `system/hook_response` as `runner/logger.ts` persists it. */
+  const hookResponse = () => ({
+    type: 'system',
+    subtype: 'hook_response',
+    hook_id: 'h1',
+    hook_name: 'PreToolUse:Bash',
+    hook_event: 'PreToolUse',
+    outcome: 'success',
+    exit_code: 0,
+    stdout: `resolved credential ${PASSWORD}\n`,
+    stderr: `auth-helper: using ${PASSWORD}`,
+    output: `token=${PASSWORD}`,
+    uuid: 'u1',
+  });
+
+  const assistantSaying = (text: string) => ({
+    type: 'assistant',
+    message: { role: 'assistant', content: [{ type: 'text', text }] },
+  });
+
+  // NOTE ON STRUCTURE: each `it` below carries a reddening assertion (the
+  // opt-in omission) AND folds a control into the SAME case. The controls —
+  // local view unchanged, not-keyed-on-name, ordinary prose untouched — do not
+  // redden when the source change is reverted (they assert unchanged behaviour),
+  // so as standalone cases they were green-vacuous and the revert-check flagged
+  // them. Folding them into a case that DOES redden keeps the control's value
+  // without a case that measures nothing. See the ygu.51 block above for the
+  // same "assert both halves together" pattern.
+
+  it('opted in: hook body → marker; not opted in: body stays (local-view control)', () => {
+    // Reddens: dropping the hook branch in `walk` — the plain password then
+    // ships in the redacted export, matching no vendor pattern.
+    const opted = redactSensitive(hookResponse(), { omitHookOutput: true });
+    expect(JSON.stringify(opted.redacted)).not.toContain(PASSWORD);
+    const obj = opted.redacted as Record<string, string>;
+    expect(obj.stdout).toBe(HOOK_OUTPUT_OMITTED);
+    expect(obj.stderr).toBe(HOOK_OUTPUT_OMITTED);
+    expect(obj.output).toBe(HOOK_OUTPUT_OMITTED);
+    // Explicit marker, never a silent gap: the reader still learns a hook ran.
+    expect(obj.hook_name).toBe('PreToolUse:Bash');
+    expect(obj.outcome).toBe('success');
+    expect(opted.fields).toEqual(['stdout', 'stderr', 'output']);
+
+    // CONTROL (folded, not standalone): the omission is opt-in, so the
+    // operator's local Logs view — which does NOT pass the flag — keeps output.
+    const local = redactSensitive(hookResponse());
+    expect((local.redacted as Record<string, string>).stdout).toContain(PASSWORD);
+    expect((local.redacted as Record<string, string>).stdout).not.toBe(HOOK_OUTPUT_OMITTED);
+  });
+
+  it('covers the hook_progress sibling; NOT keyed on the field name (control)', () => {
+    // Reddens: narrowing the predicate to hook_response alone. hook_progress
+    // carries the identical stdout/stderr/output and is durable too.
+    const prog = redactSensitive(
+      { ...hookResponse(), subtype: 'hook_progress', exit_code: undefined, outcome: undefined },
+      { omitHookOutput: true },
+    );
+    expect(JSON.stringify(prog.redacted)).not.toContain(PASSWORD);
+
+    // CONTROL (folded): why Option C and not SENSITIVE_KEY_PATTERNS — a non-hook
+    // object carrying `output` keeps its value even opted in. The omission is
+    // keyed on the message SHAPE, never the field name.
+    const nonHook = redactSensitive(
+      { type: 'result', subtype: 'success', output: `build ok ${PASSWORD}` },
+      { omitHookOutput: true },
+    );
+    expect((nonHook.redacted as { output: string }).output).toBe(`build ok ${PASSWORD}`);
+    expect(nonHook.fields).toEqual([]);
+  });
+
+  it('reaches a hook message nested under a search envelope; ordinary text untouched (control)', () => {
+    // Reddens: any implementation that only inspects the root object. The search
+    // projector wraps the event as `{ payload: <SDKMessage> }`, one level down.
+    const nested = redactSensitive({ payload: hookResponse() }, { omitHookOutput: true });
+    expect(JSON.stringify(nested.redacted)).not.toContain(PASSWORD);
+
+    // CONTROL (folded): the change touches hook messages only — ordinary
+    // assistant text is unaffected under the same opt-in.
+    const clean = 'the deploy finished and the hook printed its usual banner';
+    const prose = redactSensitive(assistantSaying(clean), { omitHookOutput: true });
+    expect(
+      (prose.redacted as { message: { content: { text: string }[] } }).message.content[0]!.text,
+    ).toBe(clean);
+    expect(prose.fields).toEqual([]);
   });
 });

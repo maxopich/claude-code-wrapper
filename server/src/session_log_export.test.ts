@@ -555,6 +555,68 @@ describe('[security] /session-log :: a durable message whose only secret is name
   });
 });
 
+describe('[security] /session-log :: hook output is omitted, not redacted (Cebab-6fax.32)', () => {
+  // Hook output is arbitrary text from a program the project chose to run — an
+  // auth helper's stderr, a `gcloud`/`aws` wrapper's stdout. A plain password in
+  // it matches no vendor pattern, so before Option C it walked straight out of
+  // the redacted export the durable corpus now feeds (`Cebab-ygu.47`).
+  //
+  // End to end through the real endpoint: the export is one of the two surfaces
+  // that opt into the omission, and the belief about the corpus is what the
+  // sibling ygu.47 case shows the unit alone cannot pin.
+  //
+  // Assembled at runtime; not vendor-shaped, or it would pass for the old reason.
+  const PASSWORD = 'hunter2' + '-prod';
+
+  const hookTurn = () => [
+    { type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'ok' }] } },
+    {
+      type: 'system',
+      subtype: 'hook_response',
+      hook_id: 'h1',
+      hook_name: 'SessionStart',
+      hook_event: 'SessionStart',
+      outcome: 'success',
+      stdout: `credential resolved: ${PASSWORD}`,
+      stderr: '',
+      output: `token=${PASSWORD}`,
+      uuid: 'u1',
+    },
+  ];
+
+  test('the redacted export omits the hook body but keeps ordinary text; raw still carries it', async () => {
+    // Reddens: dropping the export's `{ omitHookOutput: true }`. The raw control
+    // is folded into the SAME case rather than a standalone test — raw never
+    // redacts regardless of this change, so on its own it was green-vacuous and
+    // the revert-check flagged it. Here it rides a case that reddens.
+    writeJsonl('sess-1', hookTurn());
+
+    const redactedRes = await request({
+      path: `/session-log/sess-1?token=${token}`,
+      origin: DECLARED_WEB_ORIGIN,
+      hostHeader: defaultHostHeader(),
+    });
+    expect(redactedRes.status).toBe(200);
+    expect(redactedRes.body).not.toContain(PASSWORD);
+    expect(redactedRes.body).toContain('[hook output omitted from the shared log');
+    // The hook message itself still ships — a reader sees a hook ran.
+    expect(redactedRes.body).toContain('SessionStart');
+    // The control turn survives — "omits it" is not satisfied by dropping lines.
+    expect(redactedRes.body).toContain('"text":"ok"');
+
+    // CONTROL (folded): raw is complete and behind the acknowledge-raw gate —
+    // the two formats have not converged, and redaction never mutated the file.
+    const rawRes = await request({
+      path: `/session-log/sess-1?token=${token}&format=raw`,
+      origin: DECLARED_WEB_ORIGIN,
+      hostHeader: defaultHostHeader(),
+      extraHeaders: { [RAW_ACK_HEADER]: RAW_ACK_VALUE },
+    });
+    expect(rawRes.status).toBe(200);
+    expect(rawRes.body).toContain(PASSWORD);
+  });
+});
+
 describe('[security] /session-log :: raw format', () => {
   test('rejects raw without the acknowledgment header', async () => {
     writeJsonl('sess-1', [{ apiKey: 'sk-leak' }]);

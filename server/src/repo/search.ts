@@ -318,7 +318,11 @@ function eventRowToHit(
   if (useRaw) {
     haystack = haystackFor(target);
   } else {
-    const { redacted, fields } = redactSensitive(target);
+    // Cebab-6fax.32: hook output leaves the share surfaces via the same omission
+    // as the export. A snippet built over the marker can never centre on a
+    // secret that lived in hook stdout — the query won't match it, so the row
+    // drops, matching the containment invariant. `raw` (audited) keeps it.
+    const { redacted, fields } = redactSensitive(target, { omitHookOutput: true });
     haystack = haystackFor(redacted);
     if (fields.length > 0) redactedFields = fields;
   }
