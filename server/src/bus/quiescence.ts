@@ -84,30 +84,44 @@ export type StrandedRunDecision = { awaitingAgent: string; cause: StrandedCause 
  *    "the turn I just watched end", which would fire on every parallel hop.
  *  - `ended` — teardown. Both routers set it synchronously at the top of
  *    `teardown`, so this is a reliable read from inside a `.finally`.
- *  - `anyGateHeld` — the pause-on-dangerous hold or an operator pause. Both
- *    end (or park) a turn while the tail still points at the held agent, and
- *    both hand the operator a Continue/Resume button.
  *  - `tailAwaitsAgent` — the big one. It excludes the orchestrator's ordinary
  *    `→ user` answer (idle awaiting the operator, nothing wrong), the
  *    `onWorkerFailed` path (which writes its own `cebab → user` row first, and
  *    parks a Retry/Abandon slot), and the budget-exhaust row addressed to
- *    `_sink`.
+ *    `_sink`. It also names the one agent the whole question is about, which is
+ *    why it runs BEFORE the gate check.
+ *  - `gateHeldForAgent(awaitingAgent)` — the pause-on-dangerous hold or an
+ *    operator pause, but keyed on the AGENT THE TAIL AWAITS, not on any held
+ *    gate (`Cebab-6fax.41.2`). A held gate on the awaited agent means its own
+ *    turn will resume and move the run, and the operator has a Continue/Resume
+ *    button — so silence is correct. A gate held on some UNRELATED agent says
+ *    nothing about whether the awaited one will ever reply: a run stranded on a
+ *    muted worker while a different agent sits on a permission prompt is
+ *    genuinely wedged, and that is exactly the case this note exists for. The
+ *    old holder-agnostic `anyGateHeld` silenced it. This is not a plain
+ *    inversion: a gate that is later released could send to the awaited agent,
+ *    but only the awaited agent's OWN gate is a promise that this run moves
+ *    again, and the note re-arms on the next settle if it does not.
  *
  * `AskUserQuestion` needs no conjunct: a parked question keeps the turn open,
- * so `turnsInFlight` never reaches zero while the operator is being asked.
+ * so `turnsInFlight` never reaches zero while the operator is being asked. Note
+ * that a parked question is against the awaited agent's own turn, so even if it
+ * did reach a settle the gate check would key on that same agent and stay
+ * silent.
  */
 export function decideStrandedRun(input: {
   turnsInFlight: number;
   ended: boolean;
-  anyGateHeld: boolean;
+  gateHeldForAgent: (agentName: string) => boolean;
   tail: BusTailEvent | null | undefined;
   cause: StrandedCause | null;
 }): StrandedRunDecision | null {
   if (input.turnsInFlight > 0) return null;
   if (input.ended) return null;
-  if (input.anyGateHeld) return null;
   if (!tailAwaitsAgent(input.tail)) return null;
-  return { awaitingAgent: input.tail!.destination, cause: input.cause };
+  const awaitingAgent = input.tail!.destination;
+  if (input.gateHeldForAgent(awaitingAgent)) return null;
+  return { awaitingAgent, cause: input.cause };
 }
 
 /**

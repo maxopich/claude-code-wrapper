@@ -50,7 +50,22 @@ afterEach(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
-function makeRouter(opts: { anyGateHeld?: () => boolean } = {}) {
+/**
+ * `anyGateHeld` is the PRE-FIX agent-agnostic projection of a held gate, wired
+ * through the reverted router's `isAnyGateHeld`. It is here only so the
+ * revert-check is real: a test whose scenario has a gate held somewhere must
+ * make the reverted (agent-agnostic) code suppress, or a "still strands" case
+ * would fire under both versions and pass without the change. Post-fix code
+ * ignores it and reads `gateHeldForAgent` instead. Both spreads are
+ * `...(cond ? {…} : {})` so neither trips excess-property checking against
+ * whichever field the current `createChainRouter` actually declares.
+ */
+function makeRouter(
+  opts: {
+    gateHeldForAgent?: (agentName: string) => boolean;
+    anyGateHeld?: () => boolean;
+  } = {},
+) {
   const paths = computeSessionPaths(SESSION_ID);
   fs.mkdirSync(paths.iterationDir('iter-1'), { recursive: true });
   const deliver = vi.fn();
@@ -64,6 +79,7 @@ function makeRouter(opts: { anyGateHeld?: () => boolean } = {}) {
     deliver,
     hopBudget: 1000,
     sendNotification: vi.fn(),
+    ...(opts.gateHeldForAgent ? { isGateHeldForAgent: opts.gateHeldForAgent } : {}),
     ...(opts.anyGateHeld ? { isAnyGateHeld: opts.anyGateHeld } : {}),
   });
   return { router, deliver };
@@ -141,9 +157,11 @@ describe('a chain hop that goes nowhere (Cebab-vie.8)', () => {
     expect(strandedRows()).toHaveLength(0);
   });
 
-  test('a held queue is not a stranded run', () => {
+  test('a hold on the AWAITED agent is not a stranded run', () => {
+    // The tail awaits `coder`; a gate held on `coder` means its own turn will
+    // resume and move the run, and the operator has a Continue button.
     let held = true;
-    const { router } = makeRouter({ anyGateHeld: () => held });
+    const { router } = makeRouter({ gateHeldForAgent: (name) => held && name === 'coder' });
     router.forwardCebabEvent({
       ts: Date.now(),
       source: CEBAB_SOURCE,
@@ -158,6 +176,35 @@ describe('a chain hop that goes nowhere (Cebab-vie.8)', () => {
     // Positive control on the premise — lift the hold and the same router
     // reports, so the silence above was the gate rather than a dead fixture.
     held = false;
+    router.onTurnSettled('coder');
+    expect(strandedRows()).toHaveLength(1);
+  });
+
+  test('a hold on a DIFFERENT agent still strands the run (Cebab-6fax.41.2)', () => {
+    // The tail awaits `coder`, but `reviewer` is the one sitting on a gate. A
+    // held `reviewer` will resume `reviewer`, not `coder` — so the run really
+    // is wedged and the note must fire. The old holder-agnostic check silenced
+    // exactly this.
+    //
+    // Both projections of the one world state are supplied so this is a real
+    // revert-check: `anyGateHeld: () => true` is what the pre-fix router reads
+    // (a gate IS held), and it makes that reverted router suppress — so this
+    // "still strands" assertion reddens when the fix is stripped. The post-fix
+    // router reads `gateHeldForAgent` and, seeing `coder` unheld, fires. Supply
+    // only the per-agent projection and the reverted router would find no
+    // `isAnyGateHeld`, fire anyway, and pass without the change.
+    const { router } = makeRouter({
+      gateHeldForAgent: (name) => name === 'reviewer',
+      anyGateHeld: () => true,
+    });
+    router.forwardCebabEvent({
+      ts: Date.now(),
+      source: CEBAB_SOURCE,
+      destination: 'coder',
+      kind: 'prompt',
+      text: 'start the chain',
+    });
+    router.onTurnStarted();
     router.onTurnSettled('coder');
     expect(strandedRows()).toHaveLength(1);
   });

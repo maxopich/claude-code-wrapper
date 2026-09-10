@@ -21,7 +21,7 @@ const DROP: StrandedCause = {
 const WEDGED = {
   turnsInFlight: 0,
   ended: false,
-  anyGateHeld: false,
+  gateHeldForAgent: () => false,
   tail: { destination: 'scribe', kind: 'prompt' },
   cause: DROP,
 };
@@ -45,11 +45,38 @@ describe('decideStrandedRun', () => {
     expect(decideStrandedRun({ ...WEDGED, ended: true })).toBeNull();
   });
 
-  test('does not fire while any turn queue is held', () => {
+  test('does not fire while the AWAITED agent is held', () => {
     // The pause-on-dangerous hold ends the worker's turn with the tail still
     // pointing at that worker. The operator has Continue/Abandon; telling them
-    // the run is wedged would be false and would bury the real affordance.
-    expect(decideStrandedRun({ ...WEDGED, anyGateHeld: true })).toBeNull();
+    // the run is wedged would be false and would bury the real affordance. The
+    // predicate is called with the awaited agent's name, so this reddens if the
+    // gate check is dropped OR if it stops keying on that agent.
+    expect(
+      decideStrandedRun({ ...WEDGED, gateHeldForAgent: (name) => name === 'scribe' }),
+    ).toBeNull();
+  });
+
+  test('FIRES when the held agent is not the one the tail awaits (Cebab-6fax.41.2)', () => {
+    // Today's bug, made a case: a run stranded on `scribe` while some UNRELATED
+    // agent (`reviewer`) sits on a permission prompt is genuinely wedged — the
+    // held gate will move `reviewer`, not `scribe`.
+    //
+    // The fixture models ONE world state through BOTH projections a router can
+    // read of it, which is what makes this a real revert-check rather than a
+    // vacuous assertion. `anyGateHeld: true` is the pre-fix agent-agnostic
+    // question ("is ANY gate held?" — yes, reviewer's), and it is true precisely
+    // because a gate is held. `gateHeldForAgent` is the post-fix per-agent
+    // question. Strip the fix and the code reads `anyGateHeld` and suppresses,
+    // so this "fires" assertion reddens; keep it and the code reads
+    // `gateHeldForAgent('scribe') === false` and fires. Passing only the new
+    // projection would let the reverted code fall through to a fire and pass
+    // without the change.
+    const unrelatedHeld = {
+      ...WEDGED,
+      anyGateHeld: true,
+      gateHeldForAgent: (name: string) => name === 'reviewer',
+    };
+    expect(decideStrandedRun(unrelatedHeld)).toEqual({ awaitingAgent: 'scribe', cause: DROP });
   });
 
   describe('does not fire when the tail is not awaiting an agent', () => {

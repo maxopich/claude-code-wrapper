@@ -399,12 +399,15 @@ export function createChainRouter(params: {
    *  dangerous-mutation safety toast. */
   sendServerMsg?: BusSink['sendServerMsg'];
   /**
-   * `Cebab-vie.8`: is any agent's turn queue held right now? Injected because
-   * the gates live on the `AgentRunner` and this module is pure routing — the
-   * same reason the security tests can build this router standalone. Absent
-   * means "no gates", which for a router with no runner is the truth.
+   * `Cebab-vie.8` / `Cebab-6fax.41.2`: is THIS agent's turn queue held right
+   * now? Injected because the gates live on the `AgentRunner` and this module
+   * is pure routing — the same reason the security tests can build this router
+   * standalone. The stranded-run check calls it on the agent the tail awaits,
+   * so a gate held on an unrelated participant cannot silence a run genuinely
+   * stranded on the awaited one. Absent means "no gates", which for a router
+   * with no runner is the truth.
    */
-  isAnyGateHeld?: () => boolean;
+  isGateHeldForAgent?: (agentName: string) => boolean;
 }): ChainRouter {
   const { sessionId, iterationId, agentNames, paths, onTeardown, onFinalize, deliver, hopBudget } =
     params;
@@ -1197,7 +1200,7 @@ export function createChainRouter(params: {
     const decision = decideStrandedRun({
       turnsInFlight,
       ended,
-      anyGateHeld: params.isAnyGateHeld?.() ?? false,
+      gateHeldForAgent: params.isGateHeldForAgent ?? (() => false),
       tail: getLastMultiAgentEvent(sessionId),
       cause: lastDrop,
     });
@@ -2008,7 +2011,7 @@ export function wireChainSession(p: {
     iterationId,
     agentNames,
     paths,
-    isAnyGateHeld: () => runner.anyGateHeld(),
+    isGateHeldForAgent: (agentName) => runner.agentGateHeld(agentName),
     onEvent: p.onEvent,
     onEnded: p.onEnded,
     onTeardown,
