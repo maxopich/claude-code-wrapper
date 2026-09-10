@@ -46,8 +46,45 @@ export type RedactResult = {
   fields: string[];
 };
 
+/**
+ * Options that change what a redaction pass omits, beyond the always-on
+ * credential rules.
+ */
+export type RedactOptions = {
+  /**
+   * `Cebab-6fax.32` [security]. When true, the BODY of a hook-output system
+   * message (`system/hook_response` and `system/hook_progress` — their
+   * `stdout`/`stderr`/`output` fields) is replaced WHOLESALE with
+   * `HOOK_OUTPUT_OMITTED`, not redacted value-by-value.
+   *
+   * Hook output is arbitrary text from a program the project chose to run — an
+   * auth helper's stderr, a `gcloud`/`aws` wrapper's stdout — and it is exactly
+   * where a credential that matches no vendor pattern (a plain password) shows
+   * up. Keying the redactor on those field NAMES was rejected by the maintainer
+   * (2026-09-10, Option C): `output` is also an ordinary tool_result field, so a
+   * name rule would blank every tool's output in every payload. So the omission
+   * is scoped to the hook MESSAGE shape and is OPT-IN: only the surfaces that
+   * ship content off the machine (the redacted session-log export and the
+   * cross-session search projector) pass this. The operator's own local Logs
+   * view does NOT, so it keeps showing hook output with only the ordinary
+   * credential rules applied.
+   *
+   * Deliberately NOT added to `SENSITIVE_KEY_PATTERNS`.
+   */
+  omitHookOutput?: boolean;
+};
+
 const REDACTED_TOKEN = '<redacted>';
 const MAX_DEPTH = 12;
+
+/**
+ * `Cebab-6fax.32`. The marker that stands in for hook output dropped from a
+ * share-safe artifact. An explicit sentence, never a silent gap: a reader can
+ * tell "a hook ran and its output is in the raw export" from "no hook ran".
+ * The complete text stays in `format=raw`, behind the acknowledge-raw gate.
+ */
+export const HOOK_OUTPUT_OMITTED =
+  '[hook output omitted from the shared log -- use the raw export]';
 
 /**
  * Reported path for a mask applied to the payload ROOT — a top-level string
@@ -554,6 +591,31 @@ function isToolResultBlock(obj: Record<string, unknown>): boolean {
 }
 
 /**
+ * `Cebab-6fax.32`. The body fields of a hook-output system message. Masked
+ * WHOLESALE with `HOOK_OUTPUT_OMITTED` (not `<redacted>`), and only when
+ * `omitHookOutput` is set AND the object is a hook message (below) — never by
+ * key name alone, because `output` is also an ordinary tool_result field.
+ */
+const HOOK_OUTPUT_FIELDS: ReadonlySet<string> = new Set(['stdout', 'stderr', 'output']);
+
+/**
+ * Is this object a hook-output system message — `system/hook_response` or the
+ * `system/hook_progress` sibling, both of which carry `stdout`/`stderr`/`output`
+ * verbatim from a project-controlled program?
+ *
+ * A structural `type` + `subtype` check, matching `isToolResultBlock`'s reason:
+ * the message shape is API-stable, while the ENVELOPE around it differs between
+ * the export (hook message at the payload root) and the search projector
+ * (nested under `payload`). `walk` reaches this object at whatever depth the
+ * envelope puts it, so one predicate covers both.
+ */
+function isHookOutputMessage(obj: Record<string, unknown>): boolean {
+  return (
+    obj.type === 'system' && (obj.subtype === 'hook_response' || obj.subtype === 'hook_progress')
+  );
+}
+
+/**
  * Register of0, the second half. Does ANY object in this payload declare a
  * sensitive file path?
  *
@@ -611,7 +673,13 @@ function payloadDeclaresSensitivePath(value: unknown, depth: number): boolean {
  * put a second full traversal on every line of every exported transcript to
  * answer a question most of them never ask.
  */
-type WalkScope = { readonly root: unknown; cached: boolean | undefined };
+type WalkScope = {
+  readonly root: unknown;
+  cached: boolean | undefined;
+  /** `Cebab-6fax.32`: opt-in hook-output omission, threaded so `walk` needn't
+   *  carry a second parameter through every recursion. */
+  readonly omitHookOutput: boolean;
+};
 
 function scopeHasSensitivePath(scope: WalkScope): boolean {
   if (scope.cached === undefined) {
@@ -628,9 +696,13 @@ function scopeHasSensitivePath(scope: WalkScope): boolean {
  * are by definition acyclic — but we bound recursion at `MAX_DEPTH` to be
  * defensive against malformed inputs).
  */
-export function redactSensitive(payload: unknown): RedactResult {
+export function redactSensitive(payload: unknown, options: RedactOptions = {}): RedactResult {
   const fields: string[] = [];
-  const scope: WalkScope = { root: payload, cached: undefined };
+  const scope: WalkScope = {
+    root: payload,
+    cached: undefined,
+    omitHookOutput: options.omitHookOutput === true,
+  };
   const redacted = walk(payload, '', 0, fields, scope);
   return { redacted, fields };
 }
@@ -715,6 +787,10 @@ function walk(
   // said out loud rather than dressed up as a guarantee), and even in that case
   // filePath, tool_use_id, the tool name and `fields` all stay readable.
   const maskToolResultBody = isToolResultBlock(obj) && scopeHasSensitivePath(scope);
+  // Cebab-6fax.32: a hook-output message's body leaves the share-safe surfaces
+  // entirely, replaced by a marker. Gated on `omitHookOutput` (opt-in, so the
+  // local Logs view is unchanged) AND the message shape, never the field name.
+  const maskHookOutput = scope.omitHookOutput && isHookOutputMessage(obj);
   const out: Record<string, unknown> = {};
   for (const key of Object.keys(obj)) {
     const childPath = path ? `${path}.${key}` : key;
@@ -736,6 +812,18 @@ function walk(
       // being fixed here. A single token is depth-independent, and matches
       // what the sibling-masking branch below already does.
       out[key] = REDACTED_TOKEN;
+      continue;
+    }
+
+    if (maskHookOutput && HOOK_OUTPUT_FIELDS.has(key)) {
+      // ANY TYPE, not only strings (the D05 precedent above): an array or object
+      // body would otherwise fall through to the value walk, which cannot
+      // recognise a plain password, and ship it.
+      // Cebab-6fax.32: BEFORE the value-pattern walk below, so a plain password
+      // in hook stdout — which matches no vendor shape — is dropped rather than
+      // shipped, and the marker (not `<redacted>`) is what a reader sees.
+      fields.push(childPath);
+      out[key] = HOOK_OUTPUT_OMITTED;
       continue;
     }
 

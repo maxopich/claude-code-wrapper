@@ -250,6 +250,69 @@ describe('[security] searchSessions — containment / redaction invariant (C4-5 
     expect(results[0]!.snippet).toContain(SECRET);
   });
 
+  test('[Cebab-6fax.32] hook output is omitted, so a plain password in it never snippets', () => {
+    const pid = seedProject('p');
+    createSession('hk1', pid);
+    // A plain password (no vendor shape) in a hook_response stdout. The row's
+    // raw column holds it, so the coarse LIKE matches — but the search projector
+    // opts into the same omission as the export, so the redacted haystack carries
+    // the marker, not the secret, and the row drops.
+    const PASSWORD = 'hunter2' + '-prod';
+    insertEvent(
+      'hk1',
+      nextSeq('hk1'),
+      'system',
+      'hook_response',
+      JSON.stringify({
+        type: 'system',
+        subtype: 'hook_response',
+        hook_name: 'SessionStart',
+        outcome: 'success',
+        stdout: `credential resolved: ${PASSWORD}`,
+        stderr: '',
+        output: `token=${PASSWORD}`,
+      }),
+    );
+    expect(searchSessions({ query: PASSWORD, scope: 'all_projects' }).results).toEqual([]);
+
+    // The raw opt-in proves the row is otherwise matchable — the empty redacted
+    // result is the omission, not a missing row.
+    const raw = searchSessions({ query: PASSWORD, scope: 'all_projects', raw: true });
+    expect(raw.results).toHaveLength(1);
+    expect(raw.results[0]!.snippet).toContain(PASSWORD);
+  });
+
+  test('[Cebab-6fax.32] the omission marker is not searchable: its words match no hook row', () => {
+    const pid = seedProject('p');
+    createSession('hk2', pid);
+    insertEvent(
+      'hk2',
+      nextSeq('hk2'),
+      'system',
+      'hook_response',
+      JSON.stringify({
+        type: 'system',
+        subtype: 'hook_response',
+        hook_name: 'SessionStart',
+        outcome: 'success',
+        stdout: 'please export DB_PASS before running',
+        stderr: '',
+        output: '',
+      }),
+    );
+    // Reddens: dropping the marker skip in the haystack. The raw LIKE matches the
+    // hidden stdout ('export') or the key name ('output'), and the marker's own
+    // words then satisfy the redacted haystack -- a hook row whose snippet is
+    // Cebab's marker, and a hint at what the hidden body said.
+    expect(searchSessions({ query: 'export', scope: 'all_projects' }).results).toEqual([]);
+    expect(searchSessions({ query: 'output', scope: 'all_projects' }).results).toEqual([]);
+    // CONTROL (folded): the raw opt-in still finds the row, so the empty result
+    // above is the marker skip, not a missing row.
+    expect(
+      searchSessions({ query: 'export', scope: 'all_projects', raw: true }).results,
+    ).toHaveLength(1);
+  });
+
   test('multi-agent text secrets (Tier-3 inline) never surface in snippets', () => {
     const pid = seedProject('p');
     const sid = 'bus-1';

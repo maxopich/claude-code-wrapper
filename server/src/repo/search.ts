@@ -46,7 +46,12 @@
  * pure DB+redaction function: same DB → same output, no I/O beyond reads, no
  * WS, no audit.
  */
-import { redactSensitive, type SearchResult, type SearchScope } from '@cebab/shared';
+import {
+  HOOK_OUTPUT_OMITTED,
+  redactSensitive,
+  type SearchResult,
+  type SearchScope,
+} from '@cebab/shared';
 import { getDb } from '../db.js';
 
 export type SearchSessionsQuery = {
@@ -154,6 +159,10 @@ function collectStringValues(
 ): void {
   if (state.len >= MAX_HAYSTACK_CHARS) return;
   if (typeof value === 'string') {
+    // `Cebab-6fax.32`: the hook-output marker is Cebab's own text, not the row's.
+    // Searchable, it made every hook row match "output"/"export" and hinted that
+    // the hidden body contained one of the marker's words.
+    if (value === HOOK_OUTPUT_OMITTED) return;
     out.push(value);
     state.len += value.length;
     return;
@@ -318,7 +327,11 @@ function eventRowToHit(
   if (useRaw) {
     haystack = haystackFor(target);
   } else {
-    const { redacted, fields } = redactSensitive(target);
+    // Cebab-6fax.32: hook output leaves the share surfaces via the same omission
+    // as the export. A snippet built over the marker can never centre on a
+    // secret that lived in hook stdout — the query won't match it, so the row
+    // drops, matching the containment invariant. `raw` (audited) keeps it.
+    const { redacted, fields } = redactSensitive(target, { omitHookOutput: true });
     haystack = haystackFor(redacted);
     if (fields.length > 0) redactedFields = fields;
   }

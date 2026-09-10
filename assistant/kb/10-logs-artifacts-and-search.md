@@ -91,6 +91,8 @@ Every SDK message in a session is persisted twice: to a row in a SQLite `events`
 Session-log exports come in two forms:
 
 - **redacted** (the default) — a share-safe export. It carries only the durable message classes and masks sensitive fields, so a secret can't leak through a partial fragment.
+  Hook output — what a project's hook scripts printed — is left out of it and
+  replaced by a marker; the complete text is only in the raw export.
 - **raw** — the only complete trace, and gated behind an explicit acknowledgment because it's unredacted.
 
 For how this data is stored, where the data directory lives, and how to manage or delete it, see `12-settings-storage-and-data.md`. For the classifier, dangerous-path handling, and the redaction rules themselves, see `08-safety-controls.md`.
