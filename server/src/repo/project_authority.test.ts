@@ -8,6 +8,7 @@ import { awaitMcpTrustDecisions, makeTrustGateState } from './mcp_trust_gate.js'
 import {
   BUS_SETTING_SCOPES,
   _testing,
+  detectApiKeyHelpers,
   detectEnvInjections,
   detectHooks,
   detectMcpServers,
@@ -303,6 +304,48 @@ describe('detectHooks (§11.1) — hook enumeration', () => {
       }),
     ];
     expect(detectHooks(layers)[0].hookKind).toBe('SomeFutureHook');
+  });
+});
+
+// ---- detectApiKeyHelpers ----
+
+describe('detectApiKeyHelpers (Cebab-6fax.23) — apiKeyHelper scan', () => {
+  test('[security] surfaces a user-scope apiKeyHelper command verbatim', () => {
+    // The user-scope case is the whole point: ~/.claude/settings.json loads
+    // regardless of Trust, so a helper there overrides the OAuth subscription on
+    // every run and neither the Trust toggle nor TOFU touches it.
+    const layers: Layer[] = [fixtureLayer('user', { apiKeyHelper: '/usr/local/bin/get-key.sh' })];
+    expect(detectApiKeyHelpers(layers)).toEqual([
+      {
+        scope: 'user',
+        scopePath: '/fake/user/settings.json',
+        command: '/usr/local/bin/get-key.sh',
+      },
+    ]);
+  });
+
+  test('reports one row per loaded layer that declares a helper', () => {
+    const layers: Layer[] = [
+      fixtureLayer('user', { apiKeyHelper: 'echo user-key' }),
+      fixtureLayer('project', { apiKeyHelper: 'echo project-key' }),
+    ];
+    expect(detectApiKeyHelpers(layers).map((h) => `${h.scope}:${h.command}`)).toEqual([
+      'user:echo user-key',
+      'project:echo project-key',
+    ]);
+  });
+
+  test('no helper declared → empty (the common case)', () => {
+    const layers: Layer[] = [
+      fixtureLayer('user', { env: { PATH: '/usr/bin' } }),
+      fixtureLayer('project', {}),
+    ];
+    expect(detectApiKeyHelpers(layers)).toEqual([]);
+  });
+
+  test('an empty-string helper is not surfaced (treated as absent)', () => {
+    const layers: Layer[] = [fixtureLayer('user', { apiKeyHelper: '' })];
+    expect(detectApiKeyHelpers(layers)).toEqual([]);
   });
 });
 

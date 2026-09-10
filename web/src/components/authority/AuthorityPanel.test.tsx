@@ -65,6 +65,7 @@ function mkAuthority(over: Partial<ProjectAuthority> = {}): ProjectAuthority {
     plugins: [],
     hooks: [],
     detectedEnvInjections: [],
+    detectedApiKeyHelpers: [],
     ...over,
   };
 }
@@ -375,6 +376,32 @@ describe('AuthorityPanel — ready state', () => {
     expect(envSection.open).toBe(true);
     // Accent stripe applied.
     expect(envSection.className).toContain('authority-section-stripe-accent');
+  });
+
+  test('[security] API key helper section force-opens and names the helper when one is declared (Cebab-6fax.23)', () => {
+    const { handlerRef } = mountPanel({ mode: 'in-session', projectId: 1, noAutoRequest: true });
+    act(() => {
+      handlerRef.current!({
+        type: 'project_authority',
+        projectId: 1,
+        authority: mkAuthority({
+          detectedApiKeyHelpers: [
+            {
+              scope: 'user',
+              scopePath: '/home/op/.claude/settings.json',
+              command: '/usr/local/bin/get-key.sh',
+            },
+          ],
+        }),
+      });
+    });
+    const section = Array.from(
+      container.querySelectorAll<HTMLDetailsElement>('details.authority-section'),
+    ).find((s) => s.querySelector('.authority-section-title')?.textContent === 'API key helper')!;
+    expect(section.open).toBe(true);
+    expect(section.className).toContain('authority-section-stripe-accent');
+    // The helper command is surfaced verbatim so the operator can see it.
+    expect(section.textContent).toContain('/usr/local/bin/get-key.sh');
   });
 
   test('Hooks section force-opens with warn stripe when a local hook is present', () => {

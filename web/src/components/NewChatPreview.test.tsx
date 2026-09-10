@@ -50,6 +50,7 @@ function mkAuthority(over: Partial<ProjectAuthority> = {}): ProjectAuthority {
     plugins: [],
     hooks: [],
     detectedEnvInjections: [],
+    detectedApiKeyHelpers: [],
     ...over,
   };
 }

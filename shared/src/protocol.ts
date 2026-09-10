@@ -4194,6 +4194,31 @@ export type EnvInjection = {
 };
 
 /**
+ * `Cebab-6fax.23` [security]: an `apiKeyHelper` command declared in any loaded
+ * `.claude/settings*.json` layer.
+ *
+ * `apiKeyHelper` makes the CLI resolve an API key by RUNNING a command, and
+ * that key overrides the OAuth subscription every spawn — the same exposure as
+ * a credential-class `env:` injection, but through a settings key rather than a
+ * variable, and typically at USER scope (`~/.claude/settings.json`), which
+ * always loads regardless of Trust. `subscriptionOnlyEnv()` cannot touch it
+ * (it is a setting, not an env var) and Cebab writes nothing into the
+ * operator's own settings, so the posture here is SURFACE-ONLY: the authority
+ * panel names it beside the hook and env-injection rows so the operator can see
+ * that runs on this project may authenticate as the helper's key rather than
+ * the subscription.
+ *
+ * `command` is the verbatim helper command, shown the same way a `HookView`'s
+ * `command` is. It is configuration, not the resolved key — Cebab never runs it
+ * and never reads the key it would print.
+ */
+export type ApiKeyHelperView = {
+  scope: 'user' | 'project' | 'local';
+  scopePath: string;
+  command: string;
+};
+
+/**
  * Cluster B Phase 3 (BE-B3 / §4.2): the top-level snapshot the
  * AuthorityPanel renders. Merges:
  *   1. Effective state (model, tools, mcp_servers, slash_commands, skills,
@@ -4247,6 +4272,14 @@ export type ProjectAuthority = {
   plugins: { name: string; path: string }[];
   hooks: HookView[];
   detectedEnvInjections: EnvInjection[];
+  /**
+   * `Cebab-6fax.23` [security]: `apiKeyHelper` commands found in any LOADED
+   * settings layer. A helper resolves an API key that overrides the OAuth
+   * subscription; it usually sits at user scope, which loads regardless of
+   * Trust. Empty for the common case. Surface-only — Cebab reports it, it does
+   * not strip it (see `ApiKeyHelperView`).
+   */
+  detectedApiKeyHelpers: ApiKeyHelperView[];
   /**
    * Cebab-66y: what this project DECLARES on disk in a scope the resolve's
    * scope set does not load. Empty for a trusted single-agent project and for

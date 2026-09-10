@@ -55,6 +55,7 @@ function mkAuthority(overrides: Partial<ProjectAuthority> = {}): ProjectAuthorit
     plugins: [],
     hooks: [],
     detectedEnvInjections: [],
+    detectedApiKeyHelpers: [],
     ...overrides,
   };
 }

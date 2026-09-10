@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import type {
+  ApiKeyHelperView,
   EnvInjection,
   HookView,
   McpServerView,
@@ -86,6 +87,13 @@ import { getDb } from '../db.js';
 type RawSettings = {
   permissions?: { allow?: string[]; deny?: string[] };
   env?: Record<string, string | null | undefined>;
+  /**
+   * `Cebab-6fax.23` [security]: a command the CLI runs to resolve an API key.
+   * The key it prints overrides the OAuth subscription, so a helper declared at
+   * user scope (which loads regardless of Trust) silently re-authenticates every
+   * run. Read for `detectApiKeyHelpers` — surfaced, never executed.
+   */
+  apiKeyHelper?: string;
   mcpServers?: Record<
     string,
     | {
@@ -738,6 +746,39 @@ export function detectHooks(layers: SettingsLayer[]): HookView[] {
 }
 
 /**
+ * `Cebab-6fax.23` [security]: scan every LOADED settings layer for an
+ * `apiKeyHelper` command.
+ *
+ * `apiKeyHelper` makes the CLI resolve an API key by running the named command,
+ * and that key overrides the OAuth subscription — the same exposure the
+ * `env:`-injection scan (`detectEnvInjections`) covers for a variable, but
+ * through a settings key. It is typically declared at USER scope
+ * (`~/.claude/settings.json`), which the SDK loads regardless of Trust, so
+ * unlike a project's own hooks/`.mcp.json` it is NOT gated by the Trust toggle
+ * and there is no TOFU brake on it.
+ *
+ * Scans the loaded layers only (the same `layers` the hook/env scans use): a
+ * helper in an unloaded project-scope layer does not override anything until
+ * Trust is on, and the loaded set always includes user scope, where the
+ * concern lives.
+ *
+ * SURFACE-ONLY by decision. Cebab cannot strip a setting the way
+ * `subscriptionOnlyEnv()` strips an env var — it is a file the operator owns,
+ * and Cebab writes nothing into operator config. So the panel names it (command
+ * verbatim, like a `HookView`); Cebab never runs it and never reads the key it
+ * would print.
+ */
+export function detectApiKeyHelpers(layers: SettingsLayer[]): ApiKeyHelperView[] {
+  const out: ApiKeyHelperView[] = [];
+  for (const layer of layers) {
+    const helper = layer.data?.apiKeyHelper;
+    if (typeof helper !== 'string' || helper === '') continue;
+    out.push({ scope: layer.scope, scopePath: layer.scopePath, command: helper });
+  }
+  return out;
+}
+
+/**
  * Project MCP servers from each settings layer into McpServerView rows.
  * Phase 3 attributes scope via SDK precedence (deepest wins) so a server
  * declared at user AND local gets one row attributed to local — matching
@@ -1266,6 +1307,7 @@ export function resolveProjectAuthority(input: ResolverInput): ProjectAuthority 
     plugins: input.latestSessionStarted?.plugins ?? [],
     hooks: detectHooks(layers),
     detectedEnvInjections: detectEnvInjections(layers),
+    detectedApiKeyHelpers: detectApiKeyHelpers(layers),
     unloadedHooks,
     unloadedMcpServers,
   };

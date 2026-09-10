@@ -13,6 +13,7 @@ import { ToolsList, type UsageToggle } from './ToolsList';
 import { McpServersList } from './McpServersList';
 import { AllowDenyView } from './AllowDenyView';
 import { EnvScrubInspector } from './EnvScrubInspector';
+import { ApiKeyHelperList } from './ApiKeyHelperList';
 import { HooksList } from './HooksList';
 import { SlashCommandsList } from './SlashCommandsList';
 import { SkillsList } from './SkillsList';
@@ -300,6 +301,9 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode, busScopes: bo
 
   const declaredHooks = authority.unloadedHooks ?? [];
   const declaredMcpServers = authority.unloadedMcpServers ?? [];
+  // Cebab-6fax.23: apiKeyHelper commands found in the LOADED layers. Absent is
+  // treated as empty for a snapshot produced before this field existed.
+  const apiKeyHelpers = authority.detectedApiKeyHelpers ?? [];
   const unloadedHooks = busScopes ? [] : declaredHooks;
   const unloadedMcpServers = busScopes ? [] : declaredMcpServers;
   const shownHooks = busScopes ? [...authority.hooks, ...declaredHooks] : authority.hooks;
@@ -392,6 +396,22 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode, busScopes: bo
         stripe={authority.detectedEnvInjections.length > 0 ? 'accent' : 'none'}
       >
         <EnvScrubInspector injections={authority.detectedEnvInjections} />
+      </AuthoritySection>
+      <AuthoritySection
+        title="API key helper"
+        count={apiKeyHelpers.length}
+        sublabel={
+          apiKeyHelpers.length === 0
+            ? 'none declared'
+            : `${apiKeyHelpers.length} would resolve an API key — overrides subscription`
+        }
+        // Force-open and stripe when present: a helper authenticates every run
+        // as its own key rather than the OAuth subscription, and (unlike the
+        // project's hooks) a user-scope one is NOT gated by Trust.
+        defaultOpen={apiKeyHelpers.length > 0}
+        stripe={apiKeyHelpers.length > 0 ? 'accent' : 'none'}
+      >
+        <ApiKeyHelperList helpers={apiKeyHelpers} />
       </AuthoritySection>
       <AuthoritySection
         title="Hooks"

@@ -9409,6 +9409,78 @@ pre {
   flex-direction: column;
   gap: 6px;
 }
+/* Cebab-6fax.23: apiKeyHelper surfacing. Reuses the env-scrub warn banner
+ * language — same credential-exposure family. */
+.apikey-helper-empty {
+  padding: 12px;
+  font-size: var(--t-sm);
+  color: var(--fg-2);
+}
+.apikey-helper-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.apikey-helper-banner {
+  padding: 8px 12px;
+  background: var(--warn-soft);
+  border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--line-3));
+  border-left: 3px solid var(--warn);
+  border-radius: var(--r-sm);
+  color: var(--fg-0);
+  font-size: var(--t-sm);
+}
+.apikey-helper-banner strong {
+  color: var(--warn-ink);
+}
+.apikey-helper-rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.apikey-helper-row {
+  background: var(--bg-3);
+  border: 1px solid var(--line-3);
+  border-radius: var(--r-sm);
+  padding: 6px 8px;
+}
+.apikey-helper-row-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+.apikey-helper-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+}
+.apikey-helper-facts {
+  margin: 0;
+}
+.apikey-helper-fact {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+.apikey-helper-fact dt {
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.apikey-helper-fact dd {
+  margin: 0;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
 .hook-card {
   background: var(--bg-3);
   border: 1px solid var(--line-3);
