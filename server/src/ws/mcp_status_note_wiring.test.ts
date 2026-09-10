@@ -101,17 +101,43 @@ afterEach(() => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
+/**
+ * The note as it reaches the RUNNER.
+ *
+ * `Cebab-6s27`: Cebab's contribution to the system prompt now travels as
+ * `systemPromptAppend`, a field that can only ever be APPENDED to Claude Code's
+ * preset. It used to be `systemPrompt`, a full replacement, which was safe only
+ * while an ordinary turn had no system prompt to replace — a premise that
+ * stopped holding.
+ *
+ * WHAT THIS FILE DOES AND DOES NOT PROVE. It mocks the runner, so it sees
+ * `RunOptions` and never the SDK's `Options`. It answers "does the note reach
+ * the spawn, and only when it should". That the runner then turns the note into
+ * `{ type: 'preset', preset: 'claude_code', append }` — and that the preset
+ * survives beside it — is `runner/build_sdk_options.test.ts`'s job, and the two
+ * must not be conflated: a change that carried the note here while dropping the
+ * preset there would leave this file green.
+ */
+function noteOf(opts: { systemPromptAppend?: unknown }): string | undefined {
+  return typeof opts.systemPromptAppend === 'string' ? opts.systemPromptAppend : undefined;
+}
+
+/** No note at all — the key must be ABSENT, not present-and-empty, so a healthy
+ *  spawn carries nothing Cebab added. */
+function expectNoNote(opts: Record<string, unknown>): void {
+  expect('systemPromptAppend' in opts).toBe(false);
+}
+
 describe('a turn carries the MCP status note', () => {
   test('an unhealthy server in the cache reaches the spawn', async () => {
     const opts = await sendOneTurn(connWith([{ name: 'ledger', status: 'failed' }]));
-    expect(typeof opts.systemPrompt).toBe('string');
-    expect(String(opts.systemPrompt)).toContain('ledger');
-    expect(String(opts.systemPrompt)).toContain('failed');
+    expect(noteOf(opts)).toContain('ledger');
+    expect(noteOf(opts)).toContain('failed');
   });
 
-  test('a healthy cache spawns with no systemPrompt at all', async () => {
+  test('a healthy cache spawns the bare preset, with nothing appended', async () => {
     const opts = await sendOneTurn(connWith([{ name: 'ledger', status: 'connected' }]));
-    expect('systemPrompt' in opts).toBe(false);
+    expectNoNote(opts);
   });
 
   test('NO cache entry — the probe has not landed — spawns with no systemPrompt', async () => {
@@ -119,12 +145,12 @@ describe('a turn carries the MCP status note', () => {
     // that defaults the lookup (`?? []` over a whole-map read, or a `get()`
     // without the optional chain) would turn into a crash or an override.
     const opts = await sendOneTurn(connWith(undefined));
-    expect('systemPrompt' in opts).toBe(false);
+    expectNoNote(opts);
   });
 
-  test('an empty server list spawns with no systemPrompt', async () => {
+  test('an empty server list spawns the bare preset', async () => {
     const opts = await sendOneTurn(connWith([]));
-    expect('systemPrompt' in opts).toBe(false);
+    expectNoNote(opts);
   });
 });
 
@@ -136,7 +162,7 @@ describe('the note is recomputed per turn, not fixed at session creation', () =>
     // telling the model about a server that is now fine — reddens here.
     const conn = connWith([{ name: 'ledger', status: 'failed' }]);
     const first = await sendOneTurn(conn);
-    expect(String(first.systemPrompt)).toContain('ledger');
+    expect(noteOf(first)).toContain('ledger');
 
     // What `cacheSessionStartedIfNeeded` does when the next init reports health.
     (conn.authorityCache as Map<number, { capturedAt: number; mcpServers: unknown }>).set(
@@ -145,7 +171,7 @@ describe('the note is recomputed per turn, not fixed at session creation', () =>
     );
 
     const second = await sendOneTurn(conn, String(first.sessionId ?? '') || undefined);
-    expect('systemPrompt' in second).toBe(false);
+    expectNoNote(second);
   });
 
   test('and a server that BREAKS between turns starts being mentioned', async () => {
@@ -153,7 +179,7 @@ describe('the note is recomputed per turn, not fixed at session creation', () =>
     // above (it never attaches on turn 2 either) and fails here.
     const conn = connWith([{ name: 'ledger', status: 'connected' }]);
     const first = await sendOneTurn(conn);
-    expect('systemPrompt' in first).toBe(false);
+    expectNoNote(first);
 
     (conn.authorityCache as Map<number, { capturedAt: number; mcpServers: unknown }>).set(
       projectId,
@@ -161,6 +187,6 @@ describe('the note is recomputed per turn, not fixed at session creation', () =>
     );
 
     const second = await sendOneTurn(conn, String(first.sessionId ?? '') || undefined);
-    expect(String(second.systemPrompt)).toContain('ledger');
+    expect(noteOf(second)).toContain('ledger');
   });
 });

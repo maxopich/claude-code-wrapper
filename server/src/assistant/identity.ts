@@ -33,12 +33,18 @@ export const ASSISTANT_PROJECT_NAME = 'cebab/assistant';
 export const ASSISTANT_MAX_TURNS = 12;
 
 /**
- * The assistant's own system prompt — one of the two production paths that set
- * a real value (the other is `mcpStatusNoteSpec` in `runner/mcp_status_note.ts`;
- * see `RunOptions.systemPrompt`). Every ORDINARY project turn sets none
- * (Cebab-ws0.15), so on those turns writing to `systemPrompt` fills a blank
- * rather than replacing a preset — measured, and the claim
- * `src/system_prompt_smoke.ts` keeps honest.
+ * The assistant's own system prompt, and the ONLY production path that REPLACES
+ * one (`RunOptions.systemPrompt`).
+ *
+ * That is deliberate and it is the exception, not the pattern. The assistant is
+ * a different product with its own identity and wants none of Claude Code's
+ * instructions; every ORDINARY project turn runs the `claude_code` preset with
+ * Cebab's own text APPENDED instead (`Cebab-6s27`), because appending cannot
+ * discard the agent's instructions and replacing can.
+ *
+ * If you are here looking for somewhere to add a line to a turn's prompt, this
+ * is the wrong field — use `RunOptions.systemPromptAppend`. The MCP status note
+ * used to live here and moved for exactly that reason.
  *
  * It states the identity and the hard boundary the posture below enforces
  * mechanically: read-only, answers from the bundled knowledge base, never

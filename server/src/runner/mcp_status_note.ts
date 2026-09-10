@@ -81,7 +81,7 @@ function quoteFlat(raw: string): string {
  * from before this existed.
  */
 export function mcpStatusNoteSpec(servers: readonly McpServerStatus[] | undefined): {
-  systemPrompt?: string;
+  systemPromptAppend?: string;
 } {
   const unhealthy = notConnected(servers);
   if (unhealthy.length === 0) return {};
@@ -94,7 +94,7 @@ export function mcpStatusNoteSpec(servers: readonly McpServerStatus[] | undefine
   if (omitted > 0) lines.push(`  - (and ${omitted} further server(s), not listed)`);
 
   return {
-    systemPrompt: [
+    systemPromptAppend: [
       "MCP server status, from Cebab's most recent session start in this project",
       '(not a live reading of the session you are in now):',
       '',

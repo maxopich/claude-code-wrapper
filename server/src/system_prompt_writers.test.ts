@@ -6,21 +6,24 @@ import { describe, expect, test } from 'vitest';
 import { stripComments } from './test_support/strip_comments.js';
 
 /**
- * Cebab-y65z — the `systemPrompt:` writer set has exactly three members, and
- * the comments describing it must not re-assert the false absolute.
+ * Cebab-y65z, rewritten for `Cebab-6s27` — who may REPLACE an agent's system
+ * prompt, and who may only add to it.
  *
- * The claim that makes writing to `Options.systemPrompt` safe (Cebab-ws0.15) is
- * QUALIFIED: an ORDINARY project turn sets no system prompt, so a note added
- * there fills a blank. Two production paths DO set a real value — the built-in
- * help assistant (`ASSISTANT_SYSTEM_PROMPT` in `assistant/identity.ts`) and the
- * MCP status note (`mcpStatusNoteSpec` in `runner/mcp_status_note.ts`) — and
- * both reach the spawn through the ternary in `ws/server.ts`.
+ * The original invariant was "exactly three files write a systemPrompt", which
+ * mattered because writing there was believed additive: an ordinary turn had no
+ * system prompt, so a note filled a blank. That premise stopped holding, and the
+ * distinction the set was tracking turned out to be the wrong one — the risk was
+ * never HOW MANY files write, it was that ANY of them replaces.
  *
- * Four comments once asserted the absolute ("Cebab sets no system prompt
- * anywhere"); a later reader who greps finds several votes for a wrong answer.
- * This test pins the truth two ways: the writer SET (so a fourth writer cannot
- * land silently) and the CORRECTED comments (so none drifts back to the
- * absolute).
+ * So the field split. `systemPrompt` is now a complete replacement and
+ * `systemPromptAppend` is additive by construction, reaching the SDK as the
+ * `append` of `{ type: 'preset', preset: 'claude_code' }`. This file pins the
+ * REPLACEMENT set, because that is the one where a new member is dangerous;
+ * an append writer can only ever add a paragraph.
+ *
+ * The comment cases below are unchanged in spirit: four comments once asserted
+ * the absolute "Cebab sets no system prompt anywhere", and a reader who greps
+ * must not find votes for a wrong answer.
  */
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -62,9 +65,19 @@ function scannedFiles(dir: string): string[] {
  * A line that writes (or spreads) a `systemPrompt` value onto an options object.
  */
 const WRITER = /^\s*(\.\.\.)?\s*systemPrompt:\s*\S/m;
+/** The additive field. Safe by construction, but tracked so the two sets can be
+ *  told apart — and so a reader can see that the note MOVED rather than went. */
+const APPENDER = /^\s*(\.\.\.)?\s*systemPromptAppend:\s*\S/m;
+
+function matching(files: string[], re: RegExp): string[] {
+  return files
+    .filter((f) => re.test(stripComments(fs.readFileSync(f, 'utf8'))))
+    .map((f) => path.relative(SERVER_SRC, f))
+    .sort();
+}
 
 describe('the systemPrompt writer set', () => {
-  test('exactly three files write a systemPrompt value, and claude.ts names them', () => {
+  test('exactly two files REPLACE a system prompt, and claude.ts names the seam', () => {
     const files = scannedFiles(SERVER_SRC);
 
     // Anti-vacuity on the WALK: a walker that returns nothing would pass the
@@ -72,29 +85,34 @@ describe('the systemPrompt writer set', () => {
     // a standalone case) so it cannot read as a guard that never reddens.
     expect(files.length).toBeGreaterThan(80);
 
-    const writers = files
-      .filter((f) => WRITER.test(stripComments(fs.readFileSync(f, 'utf8'))))
-      .map((f) => path.relative(SERVER_SRC, f))
-      .sort();
-
     // Anti-vacuity on the SET, both directions: assert the count BEFORE comparing,
     // so an empty or broken scan fails loudly rather than an empty array happening
-    // to equal an empty expectation. Add a fifth writer under `server/src` and
-    // this reddens — the direction that stops the next writer landing silently.
-    expect(writers.length).toBe(3);
+    // to equal an empty expectation. Add a third replacement writer under
+    // `server/src` and this reddens — the direction that matters, because a
+    // replacement silently discards Claude Code's whole prompt.
+    const writers = matching(files, WRITER);
+    expect(writers.length).toBe(2);
     expect(writers).toEqual([
+      // The help assistant's own identity: a different product that deliberately
+      // does not want Claude Code's instructions.
       path.join('assistant', 'identity.ts'),
-      path.join('runner', 'mcp_status_note.ts'),
+      // The ternary that hands the assistant posture to the spawn. Ordinary
+      // turns take the other arm and pass no replacement at all.
       path.join('ws', 'server.ts'),
     ]);
 
-    // Criterion 1, tied to the set: `runner/claude.ts` (the file that documents
-    // the field, deliberately excluded from the scan) must NAME the two real
-    // writers, not restate the false absolute. The pre-fix JSDoc named neither,
-    // so restoring it reddens this — coupling the set to the comment it explains.
+    // `runner/mcp_status_note.ts` is deliberately NOT in that list any more, and
+    // asserting where it went is the point: it used to replace the prompt and now
+    // appends. A change that moved it back would redden the set above; this makes
+    // the reason legible instead of leaving a bare count change.
+    expect(matching(files, APPENDER)).toEqual([path.join('runner', 'mcp_status_note.ts')]);
+
+    // Tied to the set: `runner/claude.ts` (the file that documents both fields,
+    // deliberately excluded from the scan) must NAME the replacement writer and
+    // point at the additive alternative, rather than restating the old absolute.
     const claudeDoc = fs.readFileSync(path.join(SERVER_SRC, 'runner', 'claude.ts'), 'utf8');
     expect(claudeDoc).toContain('identity.ts');
-    expect(claudeDoc).toContain('mcp_status_note.ts');
+    expect(claudeDoc).toContain('systemPromptAppend');
   });
 });
 
