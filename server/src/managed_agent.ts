@@ -76,7 +76,7 @@ export function isManagedProjectPath(projectPath: string): boolean {
 
 export type WalkEntry =
   | { kind: 'dir'; abs: string; rel: string }
-  | { kind: 'file'; abs: string; rel: string; size: number; mode: number }
+  | { kind: 'file'; abs: string; rel: string; size: number }
   | { kind: 'symlink'; abs: string; rel: string; target: string; escapes: boolean }
   | { kind: 'excluded'; abs: string; rel: string }
   | { kind: 'unreadable'; abs: string; rel: string }
@@ -191,7 +191,7 @@ export async function* walkTree(
       }
       try {
         const st = await fsp.lstat(abs);
-        yield { kind: 'file', abs, rel, size: st.size, mode: st.mode };
+        yield { kind: 'file', abs, rel, size: st.size };
       } catch {
         yield { kind: 'other', abs, rel };
       }
@@ -516,23 +516,21 @@ export async function copyTree(
           break;
         }
         if (modesApply()) {
-          // Two modes, and the difference is the point (Cebab-ws0.11).
-          //
-          // An ordinary file keeps its OWNER bits: the executable bit survives
-          // so a project's scripts still run, and group/other are stripped so
-          // the copy can never GRANT access the source did not have.
-          //
-          // A file whose NAME says it carries credentials gets exactly
-          // `FILE_MODE`. That also strips a stray exec bit off a `.env`, which
-          // `& 0o700` would have kept.
-          //
-          // What actually carries the security here is the 0700 TREE — no other
-          // account can traverse in regardless of what a file inside is set to.
-          // These modes are defence in depth, and worth having for exactly that
-          // reason: the tree's mode is one chmod away from being wrong.
-          const wanted = pathLooksSensitive(entry.rel) ? FILE_MODE : entry.mode & 0o700;
+          // Every copied file becomes exactly `FILE_MODE` — 0600, uniformly
+          // (Cebab-6fax.43.2). A managed agent's tree is config and source: read
+          // by an interpreter, never invoked, so nothing in it needs the owner
+          // exec bit. The copy used to keep an ordinary file's owner bits
+          // (`entry.mode & 0o700`) to preserve that bit, while a credential file
+          // was forced to `FILE_MODE`; that was two mechanisms encoding opposite
+          // intents. `hardenDataDir` sweeps this tree to owner-only like any
+          // other data-dir path, and an exec exception would be a hole in
+          // exactly the sweep that exists to have none. Group/other are stripped
+          // here too, so the copy still can never GRANT access the source did
+          // not have — the 0700 TREE is what actually carries the confidentiality
+          // (no other account can traverse in regardless), and this per-file mode
+          // is defence in depth behind it.
           try {
-            await fsp.chmod(dest, wanted);
+            await fsp.chmod(dest, FILE_MODE);
           } catch {
             // Previously swallowed with no record anywhere, so a copy that left
             // group/other bits on a credential file still returned ok with an
