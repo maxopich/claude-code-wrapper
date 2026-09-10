@@ -69,6 +69,7 @@ import {
   listPendingMutations,
   recordSessionHops,
   recordSessionTeardown,
+  setExecuteMode,
   setMutationPromoted,
   setPauseOnDangerous,
   setPendingRetry,
@@ -190,6 +191,12 @@ export type StartChainOpts = {
   /** Item #5: opt-in pause-on-dangerous (see orchestrator.ts for the
    *  full docstring; same semantics in chain mode). Default false. */
   pauseOnDangerous?: boolean;
+  /** `Cebab-6fax.4`: execute mode — threaded into `renderChainBriefing` so a
+   *  chain participant is told it may implement changes within its own project
+   *  folder instead of only advising. Persisted at session start so R-B
+   *  reconstruct re-briefs a first-time-after-restart participant in the same
+   *  mode. Default false (consultant). Mirrors `StartOrchestratorOpts`. */
+  executeMode?: boolean;
   /** Item #5: per-mutation hook → `multi_agent_mutation` ServerMsg. */
   onMutation?: (sessionId: string, mutation: MutationRecord) => void;
   /** Item #5: the set of workers halted by the pause-on-dangerous gate changed
@@ -233,6 +240,10 @@ export type ChainSessionHandle = {
   hopBudget: number;
   /** Item #5: resolved pause-on-dangerous flag for this session. */
   pauseOnDangerous: boolean;
+  /** `Cebab-6fax.4`: resolved execute-mode flag for this session, surfaced so
+   *  the WS layer can put it on `multi_agent_started` (mirrors the
+   *  orchestrator handle). */
+  executeMode: boolean;
   /** Stop the session and tear it down. Idempotent. */
   stop: (reason: MultiAgentEndedReason) => Promise<void>;
   /** Detach the WS sink without tearing down — agents keep running
@@ -1416,6 +1427,17 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     }
   }
 
+  // `Cebab-6fax.4`: persist execute mode at start so R-B reconstruct re-briefs
+  // a first-time-after-restart participant in the same mode (reconstruct reads
+  // execute_mode back off the row). Mirrors the orchestrator path.
+  if (opts.executeMode) {
+    try {
+      setExecuteMode(sessionId, true);
+    } catch (err) {
+      console.error('[chain] persist execute_mode failed', err);
+    }
+  }
+
   return wireChainSession({
     sessionId,
     iterationId,
@@ -1437,6 +1459,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     hopBudget,
     maxTurns: opts.maxTurns,
     pauseOnDangerous: opts.pauseOnDangerous,
+    executeMode: opts.executeMode,
   }).handle;
 }
 
@@ -1482,6 +1505,11 @@ export function wireChainSession(p: {
    *  check carries over the restart. Defaults to 0 (fresh start). */
   initialHopsCount?: number;
   pauseOnDangerous?: boolean;
+  /** `Cebab-6fax.4`: execute mode, threaded into `renderChainBriefing`.
+   *  Fresh-start callers pass `opts.executeMode`; R-B reconstruct seeds it from
+   *  the persisted `execute_mode` row so a participant first briefed after the
+   *  restart gets the same clause the run started with. Default false. */
+  executeMode?: boolean;
   /** R-B seed: each participant's persisted `--resume` checkpoint so its next
    *  turn continues its real CLI transcript. */
   seededSessions?: ReadonlyArray<{ agentName: string; cliSessionId: string }>;
@@ -1543,6 +1571,7 @@ export function wireChainSession(p: {
         selfAgent: part.agentName,
         participantNames: agentNames,
         nextHop,
+        executeMode: p.executeMode ?? false,
       }),
     );
     projectRules.set(part.agentName, readProjectClaudeMd(part.cwd));
@@ -1992,6 +2021,7 @@ export function wireChainSession(p: {
     sessionFolder: paths.folder,
     hopBudget,
     pauseOnDangerous: p.pauseOnDangerous ?? false,
+    executeMode: p.executeMode ?? false,
     async stop(reason) {
       // Clear any pending-retry / pause-on-dangerous slot first so the
       // teardown leaves a clean row — otherwise a crashed-but-with-non-null-

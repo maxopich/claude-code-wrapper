@@ -5753,6 +5753,11 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
           hopBudget,
           maxTurns,
           pauseOnDangerous: msg.pauseOnDangerous === true,
+          // `Cebab-6fax.4`: execute mode now reaches chain participants too —
+          // it flips each `renderChainBriefing` from consultant to "may change
+          // your own project folder". Persisted + survives R-B, same as the
+          // orchestrator path above.
+          executeMode: msg.executeMode === true,
           // PR-7: stamp template provenance onto the row.
           templateId: typeof msg.templateId === 'string' ? msg.templateId : undefined,
         });
@@ -5779,9 +5784,10 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
           hopBudget: handle.hopBudget,
           hopsUsed: currentHopsUsed(handle.sessionId),
           pauseOnDangerous: handle.pauseOnDangerous,
-          // Execute mode is orchestrator-only (chain briefings have no
-          // consultant clause to relax) — always false for chain sessions.
-          executeMode: false,
+          // `Cebab-6fax.4`: chain participants now carry a consultant/execute
+          // clause, so this echoes the operator's choice (mirrors the
+          // orchestrator branch) rather than being hard-coded false.
+          executeMode: handle.executeMode,
           mutations: [],
           pendingMutations: [],
           // As the orchestrator branch. Chain mode additionally refuses all

@@ -721,6 +721,11 @@ export function reconstructChainSession(
       maxTurns: callbacks.maxTurns,
       initialHopsCount,
       pauseOnDangerous: row.pause_on_dangerous === 1,
+      // `Cebab-6fax.4`: re-seed execute mode from the persisted row so a chain
+      // participant briefed for the first time after the restart gets the same
+      // execute/consultant clause the session started with (mirrors the
+      // orchestrator reconstruct path above).
+      executeMode: row.execute_mode === 1,
     });
   } catch (err) {
     console.error(`[reconstruct] wireChainSession failed for ${row.id}`, err);
