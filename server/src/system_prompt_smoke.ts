@@ -76,6 +76,9 @@ const { buildSdkOptions } = await import('./runner/claude.js');
 const { query } = await import('@anthropic-ai/claude-agent-sdk');
 
 const SENTINEL = 'PINEAPPLE';
+/** The append probe's marker. A word no ordinary answer contains, so its
+ *  presence can only come from the appended text having reached the model. */
+const APPEND_MARKER = 'MARMALADE';
 const RESUME_SENTINEL = 'KUMQUAT';
 
 /** Answerable only from the preset's dynamic sections. "Do not use any tools"
@@ -104,25 +107,43 @@ type Case = {
 };
 
 const CASES: Case[] = [
-  // The subject: what an ordinary project turn ships (the help assistant and
-  // the MCP status note are the two paths that set a real prompt instead).
-  { label: 'omitted (ordinary project turn)', expect: 'UNKNOWN' },
-  // The equivalence partner. If this matches the subject, "omitted == empty
-  // override" is established behaviourally rather than by reading `sdk.mjs`.
-  { label: "explicit ''", systemPrompt: '', expect: 'UNKNOWN' },
-  // The contrast. If this ALSO says UNKNOWN the question does not discriminate
-  // and no row above means anything.
+  // THE POSTURE CEBAB SHIPS (`Cebab-6s27`). Every ordinary project turn now
+  // states this explicitly rather than omitting the option and inheriting
+  // whatever the SDK's normalizer does that release.
   {
     label: "preset 'claude_code'",
     systemPrompt: { type: 'preset', preset: 'claude_code' },
     expect: '<cwd>',
   },
-  // Positive control: proves the field reaches the model at all.
+  // THE SAFETY PROPERTY, and the reason `systemPromptAppend` exists as its own
+  // field. Cebab's text must ADD to the preset, not replace it — so this row
+  // must contain BOTH the marker and a working directory. If it ever carries
+  // the marker alone, the MCP status note is once again discarding the agent's
+  // instructions, which is exactly the defect this design removed.
+  {
+    label: 'preset + append',
+    systemPrompt: {
+      type: 'preset',
+      preset: 'claude_code',
+      append: `Always begin your reply with the single token ${APPEND_MARKER}, then answer normally.`,
+    },
+    expect: `${APPEND_MARKER} + <cwd>`,
+  },
+  // WHY THE TWO FIELDS ARE SEPARATE. A plain string REPLACES everything, so
+  // this row must say the sentinel and must NOT know the cwd. It doubles as the
+  // positive control that `systemPrompt` reaches the model at all: if this row
+  // fails, no row above means anything.
   {
     label: 'sentinel string',
     systemPrompt: `Whatever you are asked, reply with exactly the single word ${SENTINEL} and nothing else.`,
     expect: SENTINEL,
   },
+  // OBSERVATIONAL, not a posture Cebab relies on any more, and recorded for
+  // exactly that reason. Omission used to be believed equivalent to an empty
+  // override; it stopped being so between two SDK releases and took a
+  // documented safety property with it. Kept so the next reader can see whether
+  // it has moved again — never so anything can depend on it.
+  { label: 'omitted (nothing Cebab ships)', expect: '(observational)' },
 ];
 
 /**
@@ -228,9 +249,11 @@ async function main(): Promise<void> {
 
   const by = (k: string) => rows.find((r) => r.label.startsWith(k))?.answer ?? '';
   const sentinelWorked = by('sentinel').includes(SENTINEL);
-  const presetKnowsCwd = by('preset').includes('/');
-  const omitted = by('omitted').toUpperCase();
-  const explicitEmpty = by('explicit').toUpperCase();
+  const presetKnowsCwd = by("preset 'claude").includes('/');
+  const appended = by('preset + append');
+  const appendReached = appended.toUpperCase().includes(APPEND_MARKER);
+  const appendKeptPreset = appended.includes('/');
+  const overrideReplaces = !by('sentinel').includes('/');
 
   console.log('\n[sysprompt] verdict');
   if (!sentinelWorked) {
@@ -249,32 +272,46 @@ async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  const equivalent = omitted === explicitEmpty && omitted.includes('UNKNOWN');
-  console.log(`  control: sentinel honoured        → yes`);
-  console.log(`  preset supplies the cwd           → yes`);
-  console.log(`  omitted == explicit ''            → ${equivalent ? 'yes' : 'NO'}`);
+  console.log(`  control: sentinel honoured           → yes`);
+  console.log(`  preset supplies the cwd              → yes`);
+  console.log(`  append REACHES the model             → ${appendReached ? 'yes' : 'NO'}`);
+  console.log(`  append KEEPS the preset beside it    → ${appendKeptPreset ? 'yes' : 'NO'}`);
+  console.log(`  a string override replaces the preset → ${overrideReplaces ? 'yes' : 'NO'}`);
   const resumeBinds = by('resumed').includes(RESUME_SENTINEL);
   const freshBinds = by('fresh +').includes(RESUME_SENTINEL);
-  console.log(`  control: same prompt on a FRESH    → ${freshBinds ? 'yes' : 'NO'}`);
-  console.log(`  resumed turn honours a new prompt → ${resumeBinds ? 'yes' : 'NO'}`);
+  console.log(`  control: same prompt on a FRESH       → ${freshBinds ? 'yes' : 'NO'}`);
+  console.log(`  resumed turn honours a new prompt    → ${resumeBinds ? 'yes' : 'NO'}`);
   if (!freshBinds) {
     console.error(
       '  (the resume row is uninterpretable: the prompt it used did not bind on a ' +
         'fresh session either, so its answer says nothing about resume)',
     );
   }
-  if (!equivalent) {
+
+  if (!appendReached || !appendKeptPreset) {
     console.error(
-      '\n  STOP: omitting `systemPrompt` is NOT equivalent to an empty override. ' +
-        'Attaching a note to `Options.systemPrompt` would replace a real system ' +
-        'prompt — re-open the seam choice before shipping Cebab-ws0.15.',
+      '\n  STOP: `append` is no longer additive. Cebab puts the MCP status note ' +
+        'there (`mcpStatusNoteSpec`) precisely because it cannot replace the ' +
+        "agent's instructions — if that stopped holding, a paragraph about one " +
+        'broken MCP server is now the whole system prompt, on the turns where ' +
+        'something is already wrong. Do not ship until this row is green again.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (!overrideReplaces) {
+    console.error(
+      '\n  NOTE: a plain-string `systemPrompt` no longer replaces the preset. That ' +
+        'is the premise behind splitting `systemPrompt` from `systemPromptAppend`; ' +
+        'if a string is now additive too, the split may be unnecessary — but do not ' +
+        'merge the fields without re-reading why the assistant wants a replacement.',
     );
     process.exitCode = 1;
     return;
   }
   console.log(
-    '\n  Ordinary Cebab project turns run with an EMPTY system prompt. A note written to ' +
-      '`Options.systemPrompt` adds text where there was none.',
+    '\n  Ordinary Cebab project turns run the claude_code preset, stated explicitly, ' +
+      "with Cebab's own text APPENDED. Appending cannot replace the agent's instructions.",
   );
 }
 

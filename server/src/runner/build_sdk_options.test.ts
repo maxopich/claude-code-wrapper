@@ -45,36 +45,68 @@ describe('buildSdkOptions — model', () => {
   });
 });
 
-describe('buildSdkOptions — systemPrompt (Cebab-ws0.15)', () => {
-  test('a run with nothing to say has NO systemPrompt key at all', () => {
-    // This is the assertion the whole feature rests on. Cebab ships no system
-    // prompt today, and the SDK turns an OMITTED one into an explicit empty
-    // override — measured in `src/system_prompt_smoke.ts`. So "absent" here is
-    // not tidiness: it is the difference between every healthy project
-    // spawning as it always has and every healthy project newly carrying an
-    // override. `systemPrompt: opts.systemPrompt` in the always-present
-    // literal above reddens here.
-    expect('systemPrompt' in buildSdkOptions(MINIMAL)).toBe(false);
+describe('buildSdkOptions — systemPrompt (Cebab-6s27)', () => {
+  /**
+   * THIS BLOCK IS THE REVERSE OF WHAT IT USED TO ASSERT, deliberately.
+   *
+   * It previously pinned "a run with nothing to say has NO systemPrompt key at
+   * all", on the measured premise that an omitted option meant an empty prompt,
+   * so absence kept every healthy spawn byte-identical. That premise stopped
+   * holding (`Cebab-6s27`) and absence silently became "whatever this SDK
+   * release decides", which is how a note meant to ADD a paragraph came within
+   * one release of REPLACING the agent's instructions.
+   *
+   * So the invariant is now the opposite one: the key is ALWAYS present, because
+   * a posture Cebab states cannot be moved by someone else's default. The old
+   * cases are rewritten rather than deleted — see
+   * `project_a_test_can_defend_the_bug`.
+   */
+  test('every ordinary run states the preset explicitly', () => {
+    const o = buildSdkOptions(MINIMAL);
+    expect(o.systemPrompt).toEqual({ type: 'preset', preset: 'claude_code' });
   });
 
-  test('a note is passed through verbatim', () => {
+  test('a run with nothing to add sends the bare preset, with no append key', () => {
+    // `append: undefined` would be a present-but-empty key on every healthy
+    // spawn. Truthiness at the call site is what keeps it absent; `!== undefined`
+    // there reddens here.
+    const o = buildSdkOptions(MINIMAL);
+    expect('append' in (o.systemPrompt as object)).toBe(false);
+    expect(
+      'append' in (buildSdkOptions({ ...MINIMAL, systemPromptAppend: '' }).systemPrompt as object),
+    ).toBe(false);
+  });
+
+  test("Cebab's note is APPENDED, and the preset survives beside it", () => {
+    // The whole point of the change. Both halves are asserted together on
+    // purpose: a fix that carried the note but dropped the preset would satisfy
+    // a test that only looked for the note.
     const note = "MCP server status, from Cebab's most recent session start...";
-    expect(buildSdkOptions({ ...MINIMAL, systemPrompt: note }).systemPrompt).toBe(note);
+    const o = buildSdkOptions({ ...MINIMAL, systemPromptAppend: note });
+    expect(o.systemPrompt).toEqual({
+      type: 'preset',
+      preset: 'claude_code',
+      append: note,
+    });
   });
 
-  test('an empty note is treated as nothing to say', () => {
-    // Truthiness, matching `model` directly above it. `!== undefined` would
-    // send an empty-string override on any turn whose builder returned ''.
-    expect('systemPrompt' in buildSdkOptions({ ...MINIMAL, systemPrompt: '' })).toBe(false);
+  test("a full override replaces everything, and is the assistant's alone", () => {
+    // The help assistant is a different product with its own identity and wants
+    // none of Claude Code's prompt. It is the ONLY caller that may do this.
+    const o = buildSdkOptions({ ...MINIMAL, systemPrompt: 'You are the Cebab help assistant.' });
+    expect(o.systemPrompt).toBe('You are the Cebab help assistant.');
   });
 
-  test('it never becomes the preset object, whatever a caller passes', () => {
-    // `RunOptions.systemPrompt` is a plain string on purpose: the SDK's preset
-    // arm would swap the run onto Claude Code's entire system prompt, which is
-    // a posture change and not a variation on this feature. Widening the field
-    // to `Options['systemPrompt']` reddens here.
-    const o = buildSdkOptions({ ...MINIMAL, systemPrompt: 'a note' });
-    expect(typeof o.systemPrompt).toBe('string');
+  test('an override wins over an append — there is nothing to append to', () => {
+    // Anti-vacuity for the branch: if both arrive, the result must not silently
+    // become a preset carrying the override as its append, which would give the
+    // assistant Claude Code's instructions it deliberately declines.
+    const o = buildSdkOptions({
+      ...MINIMAL,
+      systemPrompt: 'assistant identity',
+      systemPromptAppend: 'a note that must not resurrect the preset',
+    });
+    expect(o.systemPrompt).toBe('assistant identity');
   });
 });
 

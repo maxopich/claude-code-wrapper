@@ -32,30 +32,41 @@ export type RunOptions = {
    */
   model?: string;
   /**
-   * Text Cebab contributes to this turn's SYSTEM prompt (Cebab-ws0.15).
+   * A COMPLETE REPLACEMENT for this turn's system prompt. One caller: the
+   * built-in help assistant (`ASSISTANT_SYSTEM_PROMPT` in
+   * `assistant/identity.ts`), which is a different product with its own
+   * identity and deliberately does not want Claude Code's instructions.
    *
-   * NARROW ON PURPOSE. The SDK's `Options.systemPrompt` also accepts a
-   * `string[]` and a `{ type: 'preset', preset: 'claude_code', append }`
-   * object; this accepts a plain string only, because the preset arm is not a
-   * variation on what Cebab does — it would swap every run onto Claude Code's
-   * full system prompt, a change no caller should be able to make by passing a
-   * differently-shaped value to an options field.
+   * DO NOT reach for this to add a line. It replaces everything — measured:
+   * `system_prompt_smoke.ts`'s sentinel case sets a string here and the agent
+   * then answers only the sentinel, having lost the tool guidance, the working
+   * directory and the rest. Use `systemPromptAppend` instead, which cannot do
+   * that.
    *
-   * WHY WRITING HERE IS ADDITIVE RATHER THAN DESTRUCTIVE. Every ORDINARY
-   * project turn runs with NO system prompt (Cebab-ws0.15), and an omitted
-   * `systemPrompt` is not "use the CLI's default" — the SDK normalizes it to the
-   * empty string, an explicit override. So on those turns text put here fills a
-   * blank instead of replacing the agent's instructions. Two production paths do
-   * set a real value and are the whole writer set: the built-in help assistant
-   * (`ASSISTANT_SYSTEM_PROMPT` in `assistant/identity.ts`) and the MCP
-   * status note (`mcpStatusNoteSpec` in `runner/mcp_status_note.ts`); both reach
-   * the spawn through the ternary at `ws/server.ts`. The additivity claim is
-   * measured, not inferred: `src/system_prompt_smoke.ts` re-runs the measurement
-   * against the live CLI, and `system_prompt_writers.test.ts` pins the writer
-   * set so a third one cannot land silently. That is the claim that has to hold
-   * for this field to be safe.
+   * WHY THAT WARNING IS NOT THEORETICAL (`Cebab-6s27`). This field's previous
+   * doc said writing here was ADDITIVE, on the measured premise that an ordinary
+   * turn ran with an empty system prompt so there was nothing to destroy. That
+   * premise stopped holding: an ordinary turn now carries Claude Code's real
+   * prompt, and the MCP status note — a paragraph about one broken server — was
+   * on course to replace the agent's entire instruction set on exactly the turns
+   * where something was already wrong. The lesson kept here on purpose: a safety
+   * property that rests on a measured external behaviour needs the measurement
+   * re-run, not remembered.
    */
   systemPrompt?: string;
+  /**
+   * Text Cebab ADDS to this turn's system prompt, after Claude Code's own.
+   *
+   * Reaches the SDK as the `append` field of
+   * `{ type: 'preset', preset: 'claude_code', append }`, so it is structurally
+   * incapable of replacing anything — which is the entire reason it exists as a
+   * separate field from `systemPrompt` above rather than as a convention about
+   * how that one is used.
+   *
+   * Ignored when `systemPrompt` is set: a full override has nothing to append
+   * to. The help assistant is the only caller that does so, and it wants none.
+   */
+  systemPromptAppend?: string;
   /**
    * The base set of built-in tools this turn may use (SDK `Options.tools`).
    *
@@ -316,10 +327,28 @@ export function buildSdkOptions(opts: RunOptions): Options {
   // Truthiness, not `!== undefined`: an empty string is not a model, and the
   // key must stay ABSENT rather than become `undefined` when nothing is chosen.
   if (opts.model) options.model = opts.model;
-  // Same truthiness idiom, same reason: a turn with nothing to say must leave
-  // the key ABSENT, not present-and-empty. `''` is not a note, and sending it
-  // would mean every healthy spawn newly carries a system-prompt override.
-  if (opts.systemPrompt) options.systemPrompt = opts.systemPrompt;
+  // `Cebab-6s27`: the system prompt is now always set EXPLICITLY, and that is
+  // the point of the change rather than a detail of it. Omitting the option was
+  // never "use the CLI's default" — it resolved to whatever the SDK's normalizer
+  // did that release, which moved under us once already and took a documented
+  // safety property with it. Cebab states its posture instead of inheriting one.
+  //
+  // Two shapes, and only the assistant gets the first:
+  //   a string  → a COMPLETE replacement (the help assistant's own identity)
+  //   otherwise → Claude Code's preset, with Cebab's text APPENDED if any
+  //
+  // The append arm is what makes the MCP status note safe: it can add a
+  // paragraph and cannot remove the agent's instructions, whatever a future
+  // normalizer decides an absent value means.
+  options.systemPrompt = opts.systemPrompt
+    ? opts.systemPrompt
+    : {
+        type: 'preset',
+        preset: 'claude_code',
+        // Truthiness, not `!== undefined`: `''` is not a note. A turn with
+        // nothing to add must send the bare preset rather than an empty append.
+        ...(opts.systemPromptAppend ? { append: opts.systemPromptAppend } : {}),
+      };
   // `!== undefined`, NOT truthiness: an empty array is a meaningful value for
   // both (tools `[]` = no built-ins; skills `[]` = every skill hidden) and is
   // truthy, so it survives either way — but the intent reads correctly only
