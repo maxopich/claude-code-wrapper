@@ -123,7 +123,7 @@ import {
   type ResolvedAgent,
 } from './runtime.js';
 import { fenceRelayedMessage } from './message_fence.js';
-import { AgentRunner, type AgentRunnerDeps, type BusEvent } from './runner.js';
+import { AgentRunner, type AgentRunnerDeps, type BusEvent, type BusRouteResult } from './runner.js';
 import { parkQuestion, rejectQuestionsForSession } from './pending_questions.js';
 import { createAgentActivityObserver, type ActivitySnapshot } from './activity.js';
 import { DEFAULT_HOP_BUDGET } from './orchestrator.js';
@@ -289,7 +289,7 @@ export type ChainSessionHandle = {
 
 type ChainRouter = {
   teardown: (reason: MultiAgentEndedReason) => Promise<void>;
-  handleEvent: (ev: BusEvent) => void;
+  handleEvent: (ev: BusEvent) => BusRouteResult;
   forwardCebabEvent: (ev: BusEvent) => void;
   /** Register B01: no-op unless `epoch` still owns the sink. */
   detach: (epoch?: number) => void;
@@ -553,7 +553,7 @@ export function createChainRouter(params: {
     kind: string;
     title: string;
     message: string;
-  }) => {
+  }): BusRouteResult => {
     // `Cebab-vie.8`: one set site — every drop in this router funnels through
     // here. Recorded unconditionally; a drop that did NOT strand the run is
     // simply overwritten by the next `onTurnStarted`.
@@ -597,6 +597,11 @@ export function createChainRouter(params: {
     } else {
       console.error('[chain] router_drop dispatcher.emit failed', result.error);
     }
+    // `Cebab-x4rn`: relay the drop back to the sender truthfully, keyed on the
+    // shared reason code so the chain and orchestrator routers cannot tell an
+    // identically-classified drop two different stories (see
+    // `busSendResultText`).
+    return { delivered: false, reasonCode: params.reasonCode };
   };
 
   /**
@@ -861,13 +866,13 @@ export function createChainRouter(params: {
     return checkBudgetExhausted() ? 'budget' : null;
   };
 
-  const handleEvent = (ev: BusEvent) => {
-    if (ended) return;
+  const handleEvent = (ev: BusEvent): BusRouteResult => {
+    if (ended) return { delivered: false, reasonCode: null };
     // F3: source=cebab is Cebab's own traffic, routed in-process via
     //     forwardCebabEvent — never legitimately arriving through an agent.
     if (ev.source === CEBAB_SOURCE) {
       console.warn(`[chain] drop forged source=cebab dest=${ev.destination} kind=${ev.kind}`);
-      dispatchRouterDrop({
+      const drop = dispatchRouterDrop({
         reasonCode: 'forged_source',
         source: ev.source,
         destination: ev.destination,
@@ -879,12 +884,12 @@ export function createChainRouter(params: {
         'forged_source',
         `it claimed to come from \`${CEBAB_SOURCE}\`, which no agent may.`,
       );
-      return;
+      return drop;
     }
     // F2: chain terminates at `_sink`, never at `user`. dest=user is a spoof.
     if (ev.destination === USER_RECIPIENT) {
       console.warn(`[chain] drop dest=user from ${ev.source}`);
-      dispatchRouterDrop({
+      const drop = dispatchRouterDrop({
         reasonCode: 'worker_to_user',
         source: ev.source,
         destination: ev.destination,
@@ -896,13 +901,13 @@ export function createChainRouter(params: {
         'worker_to_user',
         `it was addressed to \`${USER_RECIPIENT}\`, and a chain terminates at \`${SINK_RECIPIENT}\`, never at the user.`,
       );
-      return;
+      return drop;
     }
     // F2: source must be a known participant. (Defense-in-depth — the
     //     in-process tool already pins an unspoofable source.)
     if (!participantSet.has(ev.source)) {
       console.warn(`[chain] drop event from non-participant source=${ev.source}`);
-      dispatchRouterDrop({
+      const drop = dispatchRouterDrop({
         reasonCode: 'unknown_source',
         source: ev.source,
         destination: ev.destination,
@@ -914,7 +919,7 @@ export function createChainRouter(params: {
         'unknown_source',
         `it claimed to come from \`${ev.source}\`, who is not in this chain.`,
       );
-      return;
+      return drop;
     }
     // Register B24: an agent addressing itself. Nothing rejected this, so
     // `deliver` woke the sender again with its own text — a loop bounded only
@@ -927,7 +932,7 @@ export function createChainRouter(params: {
     // attempted.
     if (ev.source === ev.destination) {
       console.warn(`[chain] drop self-addressed event from ${ev.source}`);
-      dispatchRouterDrop({
+      const drop = dispatchRouterDrop({
         reasonCode: 'self_addressed',
         source: ev.source,
         destination: ev.destination,
@@ -936,7 +941,7 @@ export function createChainRouter(params: {
         message: `${ev.source} sent to itself — the message was dropped rather than waking the sender again`,
       });
       noteStall('self_addressed', `it was addressed to \`${ev.source}\` — that is you.`);
-      return;
+      return drop;
     }
 
     let dbId = 0;
@@ -1003,7 +1008,7 @@ export function createChainRouter(params: {
       // rule has to be enforced.
       if (ev.source !== terminalAgent) {
         console.warn(`[chain] drop dest=_sink from non-terminal source=${ev.source}`);
-        dispatchRouterDrop({
+        const drop = dispatchRouterDrop({
           reasonCode: 'unauthorized_sink',
           source: ev.source,
           destination: ev.destination,
@@ -1015,7 +1020,7 @@ export function createChainRouter(params: {
           'unauthorized_sink',
           `it was addressed to \`${SINK_RECIPIENT}\`, which only the last participant in the chain may do.`,
         );
-        return;
+        return drop;
       }
       try {
         const idir = paths.iterationDir(iterationId);
@@ -1025,18 +1030,19 @@ export function createChainRouter(params: {
         console.error('[chain] write final.md failed', err);
       }
       void teardown('completed');
-      return;
+      // The terminal hop's `_sink` message WAS accepted — it became `final.md`
+      // and completed the run — so the sender is told the truth: delivered.
+      return { delivered: true };
     }
     if (!participantSet.has(ev.destination)) {
       // Register B16: this was a bare `console.warn` while its three sibling
       // drops above all went through `dispatchRouterDrop`. By the time we
       // get here the event has been persisted, counted against the hop
-      // budget and folded into `lastPromptForAgent` — and `handleBusSend`
-      // already answered the sending agent "delivered". So the message was
-      // gone with no audit row and no operator notification, in a session
-      // whose hop count silently moved.
+      // budget and folded into `lastPromptForAgent`. `Cebab-x4rn`: the sender
+      // now reads a truthful "NOT delivered … not in this chain" so it can
+      // correct the routing mistake, rather than the old "delivered" lie.
       console.warn(`[chain] event for non-participant: ${ev.destination}`);
-      dispatchRouterDrop({
+      const drop = dispatchRouterDrop({
         reasonCode: 'unknown_destination',
         source: ev.source,
         destination: ev.destination,
@@ -1048,11 +1054,14 @@ export function createChainRouter(params: {
         'unknown_destination',
         `it was addressed to \`${ev.destination}\`, who is not in this chain.`,
       );
-      return;
+      return drop;
     }
     // Hop-budget enforcement: the hop we just persisted is in the trail; if
-    // it pushed us to the cap, refuse to wake the next agent.
-    if (checkBudgetExhausted()) return;
+    // it pushed us to the cap, refuse to wake the next agent. The message
+    // reached the bus (persisted + archived above); the budget brake is a
+    // run-level stop, not a per-message drop, so the sender is told the
+    // truth about the delivery that did happen.
+    if (checkBudgetExhausted()) return { delivered: true };
     // Fire-and-forget: must NOT block the sending agent's in-flight turn
     // (this runs inside its bus_send tool call). Mirrors the old
     // `sendKeys(...).catch(...)`.
@@ -1068,6 +1077,7 @@ export function createChainRouter(params: {
     // turn ever woken anyone".
     deliveries += 1;
     deliver?.(ev.destination, ev.text, ev.source);
+    return { delivered: true };
   };
 
   // Cebab-originated events (per-participant briefings, the "injected

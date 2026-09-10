@@ -167,7 +167,7 @@ describe('runMock — in-process tool dispatch', () => {
     const messages = await drain(
       runMock(
         chainRun({
-          mcpServers: { cebab_bus: makeBusToolServer('alpha', (ev) => events.push(ev)) },
+          mcpServers: { cebab_bus: makeBusToolServer('alpha', (ev) => void events.push(ev)) },
         }),
       ),
     );
@@ -197,7 +197,7 @@ describe('runMock — in-process tool dispatch', () => {
     const messages = await drain(
       runMock(
         chainRun({
-          mcpServers: { cebab_bus: makeBusToolServer('alpha', (ev) => events.push(ev)) },
+          mcpServers: { cebab_bus: makeBusToolServer('alpha', (ev) => void events.push(ev)) },
           // `kind` is a zod enum; a fixture that drifts off it must surface as
           // a failed call, not as a message that silently never sends.
           mockVars: { ...CHAIN_VARS, KIND: 'not-a-kind' },
@@ -219,7 +219,7 @@ describe('runMock — in-process tool dispatch', () => {
       runMock(
         chainRun({
           mcpServers: {
-            cebab_bus: makeBusToolServer('alpha', (ev) => events.push(ev)),
+            cebab_bus: makeBusToolServer('alpha', (ev) => void events.push(ev)),
             other: spyServer('other', calls),
           },
         }),
@@ -273,7 +273,7 @@ describe('runMock — canUseTool', () => {
       runMock(
         chainRun({
           canUseTool,
-          mcpServers: { cebab_bus: makeBusToolServer('alpha', (ev) => events.push(ev)) },
+          mcpServers: { cebab_bus: makeBusToolServer('alpha', (ev) => void events.push(ev)) },
         }),
       ),
     );
@@ -296,7 +296,7 @@ describe('runMock — canUseTool', () => {
             behavior: 'allow' as const,
             updatedInput: { ...input, destination: 'rewritten' },
           }),
-          mcpServers: { cebab_bus: makeBusToolServer('alpha', (ev) => events.push(ev)) },
+          mcpServers: { cebab_bus: makeBusToolServer('alpha', (ev) => void events.push(ev)) },
         }),
       ),
     );

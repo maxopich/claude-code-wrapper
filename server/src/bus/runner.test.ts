@@ -29,8 +29,10 @@ import {
 describe('handleBusSend', () => {
   test('valid send stamps the caller-supplied source and forwards the event', () => {
     const events: BusEvent[] = [];
-    const res = handleBusSend('alpha', { destination: 'beta', kind: 'reply', text: 'hi' }, (e) =>
-      events.push(e),
+    const res = handleBusSend(
+      'alpha',
+      { destination: 'beta', kind: 'reply', text: 'hi' },
+      (e) => void events.push(e),
     );
     expect(res.isError).toBeFalsy();
     expect(events).toHaveLength(1);
@@ -52,8 +54,10 @@ describe('handleBusSend', () => {
     // value that lands on `BusEvent.destination`. On the pre-N20 handler (which
     // read `args.recipient`) this same input stamped `destination: undefined`.
     const events: BusEvent[] = [];
-    const ok = handleBusSend('alpha', { destination: 'beta', kind: 'reply', text: 'hi' }, (e) =>
-      events.push(e),
+    const ok = handleBusSend(
+      'alpha',
+      { destination: 'beta', kind: 'reply', text: 'hi' },
+      (e) => void events.push(e),
     );
     expect(ok.isError).toBeFalsy();
     expect(events).toHaveLength(1);
@@ -62,11 +66,15 @@ describe('handleBusSend', () => {
 
   test('accepts the user and _sink sentinels as destinations', () => {
     const events: BusEvent[] = [];
-    handleBusSend('orchestrator', { destination: 'user', kind: 'final', text: 'done' }, (e) =>
-      events.push(e),
+    handleBusSend(
+      'orchestrator',
+      { destination: 'user', kind: 'final', text: 'done' },
+      (e) => void events.push(e),
     );
-    handleBusSend('last', { destination: '_sink', kind: 'final', text: 'end' }, (e) =>
-      events.push(e),
+    handleBusSend(
+      'last',
+      { destination: '_sink', kind: 'final', text: 'end' },
+      (e) => void events.push(e),
     );
     expect(events.map((e) => e.destination)).toEqual(['user', '_sink']);
   });
@@ -140,7 +148,7 @@ describe('handleBusSend', () => {
         kind: string;
         text: string;
       },
-      (e) => events.push(e),
+      (e) => void events.push(e),
     );
     expect(events).toHaveLength(1);
     expect(events[0]!.source).toBe('worker-trusted');

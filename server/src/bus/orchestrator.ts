@@ -113,7 +113,7 @@ import {
   type ResolvedAgent,
 } from './runtime.js';
 import { fenceRelayedMessage } from './message_fence.js';
-import { AgentRunner, type AgentRunnerDeps, type BusEvent } from './runner.js';
+import { AgentRunner, type AgentRunnerDeps, type BusEvent, type BusRouteResult } from './runner.js';
 import { parkQuestion, rejectQuestionsForSession } from './pending_questions.js';
 import { createAgentActivityObserver, type ActivitySnapshot } from './activity.js';
 import {
@@ -357,9 +357,11 @@ export type OrchestratorSessionHandle = {
    * (per_agent_control.setParticipantMuted) so the durable source of
    * truth and the hot-path mirror stay aligned.
    *
-   * isMuted is a read-only probe — used by the bus_send oracle-suppression
-   * branch (`bus/runner.ts`) to decide whether to short-circuit with the
-   * "delivered to <recipient>" white lie.
+   * isMuted is a read-only probe reflecting the router's in-memory mute set —
+   * used to verify the durable state reseeds correctly across an R-B restart
+   * (`reconstruct.test.ts`). It no longer gates any bus_send "oracle": since
+   * `Cebab-x4rn` a muted worker's drop is reported truthfully (AE-3's oracle
+   * suppression was retired), so there is nothing to short-circuit.
    */
   setMute: (agentName: string, muted: boolean) => boolean;
   isMuted: (agentName: string) => boolean;
@@ -408,9 +410,10 @@ export type OrchestratorSessionHandle = {
    * Drain semantics (drain mode, the only v1-supported mode):
    *   - In-flight turn at kick time keeps running — `AgentRunner` is NOT
    *     told to abort. That is the ONE turn kick does not stop.
-   *   - bus_send calls the draining turn issues return their "delivered to
-   *     <recipient>" white lie (same oracle-suppression pattern as mute,
-   *     by-construction in `bus/runner.ts:handleBusSend`).
+   *   - bus_send calls the draining turn issues are dropped at the router and
+   *     (`Cebab-x4rn`) reported truthfully to the kicked agent ("NOT delivered
+   *     … removed from this session"), same as mute — AE-3's old "delivered to
+   *     <recipient>" white lie was retired.
    *   - No new turns ever start for the kicked agent. That sentence has been
    *     here since Phase 4d and was false three times over, because the router
    *     drops EVENTS and the claim is about TURNS:
@@ -442,7 +445,7 @@ export type OrchestratorSessionHandle = {
 
 type OrchestratorRouter = {
   teardown: (reason: MultiAgentEndedReason) => Promise<void>;
-  handleEvent: (ev: BusEvent) => void;
+  handleEvent: (ev: BusEvent) => BusRouteResult;
   forwardCebabEvent: (ev: BusEvent) => void;
   sendUserPrompt: (text: string) => Promise<void>;
   /** Register B01: no-op unless `epoch` still owns the sink. Bare call
@@ -933,7 +936,7 @@ export function createOrchestratorRouter(params: {
     kind: string;
     title: string;
     message: string;
-  }) => {
+  }): BusRouteResult => {
     // `Cebab-vie.8`: one set site, because every drop in this router already
     // funnels through here. Recording it unconditionally is deliberate — a
     // drop that did NOT strand the run is simply overwritten by the next
@@ -982,17 +985,22 @@ export function createOrchestratorRouter(params: {
       // early from handleEvent below regardless).
       console.error('[orchestrator] router_drop dispatcher.emit failed', result.error);
     }
+    // `Cebab-x4rn`: relay the drop back to the sender truthfully. The reason
+    // code (not the operator-facing forensic `message` above) keys the
+    // sender-facing sentence in `busSendResultText`, so both routers tell an
+    // identically-classified drop the same story.
+    return { delivered: false, reasonCode: params.reasonCode };
   };
 
-  const handleEvent = (ev: BusEvent) => {
-    if (ended) return;
+  const handleEvent = (ev: BusEvent): BusRouteResult => {
+    if (ended) return { delivered: false, reasonCode: null };
     // F3: source=cebab arriving through an agent is a forgery (Cebab routes
     //     its own traffic in-process via forwardCebabEvent).
     if (ev.source === CEBAB_SOURCE) {
       console.warn(
         `[orchestrator] drop forged source=cebab dest=${ev.destination} kind=${ev.kind}`,
       );
-      dispatchRouterDrop({
+      return dispatchRouterDrop({
         reasonCode: 'forged_source',
         source: ev.source,
         destination: ev.destination,
@@ -1000,12 +1008,11 @@ export function createOrchestratorRouter(params: {
         title: 'Forged source=cebab dropped',
         message: `dest=${ev.destination} kind=${ev.kind}`,
       });
-      return;
     }
     // F2: only the orchestrator may address the user.
     if (ev.destination === USER_RECIPIENT && ev.source !== ORCHESTRATOR_AGENT_NAME) {
       console.warn(`[orchestrator] drop dest=user from non-orchestrator source=${ev.source}`);
-      dispatchRouterDrop({
+      return dispatchRouterDrop({
         reasonCode: 'worker_to_user',
         source: ev.source,
         destination: ev.destination,
@@ -1013,12 +1020,11 @@ export function createOrchestratorRouter(params: {
         title: 'Worker tried to address user directly',
         message: `from=${ev.source}`,
       });
-      return;
     }
     // F2: workers must reply via the orchestrator — no worker→worker.
     if (workerSet.has(ev.source) && workerSet.has(ev.destination)) {
       console.warn(`[orchestrator] drop worker→worker ${ev.source}→${ev.destination}`);
-      dispatchRouterDrop({
+      return dispatchRouterDrop({
         reasonCode: 'worker_to_worker',
         source: ev.source,
         destination: ev.destination,
@@ -1026,7 +1032,6 @@ export function createOrchestratorRouter(params: {
         title: 'Worker→worker bypass dropped',
         message: `${ev.source} → ${ev.destination}`,
       });
-      return;
     }
     // Register B24: an agent addressing itself, which used to fall through to
     // the orchestrator/worker deliver branches and wake the sender again with
@@ -1041,7 +1046,7 @@ export function createOrchestratorRouter(params: {
     // the budget, so a message that goes nowhere must not advance the counter.
     if (ev.source === ev.destination) {
       console.warn(`[orchestrator] drop self-addressed event from ${ev.source}`);
-      dispatchRouterDrop({
+      return dispatchRouterDrop({
         reasonCode: 'self_addressed',
         source: ev.source,
         destination: ev.destination,
@@ -1049,12 +1054,11 @@ export function createOrchestratorRouter(params: {
         title: 'Agent addressed itself',
         message: `${ev.source} sent to itself — the message was dropped rather than waking the sender again`,
       });
-      return;
     }
     // F2 round-2: source must be the orchestrator or a known worker.
     if (ev.source !== ORCHESTRATOR_AGENT_NAME && !workerSet.has(ev.source)) {
       console.warn(`[orchestrator] drop event from non-participant source=${ev.source}`);
-      dispatchRouterDrop({
+      return dispatchRouterDrop({
         reasonCode: 'unknown_source',
         source: ev.source,
         destination: ev.destination,
@@ -1062,7 +1066,6 @@ export function createOrchestratorRouter(params: {
         title: 'Unknown source on bus',
         message: `source=${ev.source}`,
       });
-      return;
     }
     // Cluster C Phase 4d (spec §5.1 kick semantics): kick drop. Runs
     // BEFORE the mute drop so a participant that is both muted AND
@@ -1079,16 +1082,15 @@ export function createOrchestratorRouter(params: {
     // drop-row carries the cleaner reason — "this is the kicked
     // agent talking" vs "someone tried to talk to the kicked agent."
     //
-    // Same oracle-suppression invariant as mute: the kicked agent's
-    // `bus_send` returns the white-lie "delivered to <recipient>"
-    // by-construction at `bus/runner.ts:handleBusSend`, so the
-    // draining turn has no visible signal that its outbound was
-    // dropped. AE-3 [security] still holds.
+    // `Cebab-x4rn` [security]: the kicked agent's `bus_send` is now told the
+    // truth — its draining turn reads "NOT delivered … removed from this
+    // session" rather than the old white-lie "delivered to <recipient>". Same
+    // change as mute below; the AE-3 oracle-suppression property was retired.
     if (kickedSet.has(ev.source)) {
       console.warn(
         `[orchestrator] drop kicked source=${ev.source} dest=${ev.destination} kind=${ev.kind}`,
       );
-      dispatchRouterDrop({
+      return dispatchRouterDrop({
         reasonCode: 'kicked_source',
         source: ev.source,
         destination: ev.destination,
@@ -1096,13 +1098,12 @@ export function createOrchestratorRouter(params: {
         title: `Kicked ${ev.source} tried to emit ${ev.kind}`,
         message: `${ev.source} → ${ev.destination}: ${ev.text.slice(0, 80)}`,
       });
-      return;
     }
     if (kickedSet.has(ev.destination)) {
       console.warn(
         `[orchestrator] drop event to kicked dest=${ev.destination} source=${ev.source} kind=${ev.kind}`,
       );
-      dispatchRouterDrop({
+      return dispatchRouterDrop({
         reasonCode: 'kicked_destination',
         source: ev.source,
         destination: ev.destination,
@@ -1110,7 +1111,6 @@ export function createOrchestratorRouter(params: {
         title: `Stale routing to kicked ${ev.destination}`,
         message: `${ev.source} → ${ev.destination}: ${ev.text.slice(0, 80)}`,
       });
-      return;
     }
     // Cluster C Phase 4b (spec §3 invariant 1 + AE-1): mute drop. Runs
     // AFTER the F2/F3 forgery + topology checks (those are defense-in-
@@ -1119,18 +1119,22 @@ export function createOrchestratorRouter(params: {
     // event is conceptually "as if it never happened" from the routing
     // perspective, so it doesn't bump hopsCount and doesn't render in
     // the operator's transcript. The router_drop dispatch + safety_audit
-    // addendum DO fire so the operator can still see "muted X tried to
-    // emit a kind=reply" in the forensics view, but the muted agent's
-    // bus_send call returns the "delivered to <recipient>" white lie
-    // (oracle suppression — spec AE-3 [security]) so the agent itself
-    // has no signal that its outbound was dropped. That separation
-    // lives in `bus/runner.ts`'s bus_send wiring — this handler is just
-    // the routing-layer drop point.
+    // addendum fire so the operator can see "muted X tried to emit a
+    // kind=reply" in the forensics view.
+    //
+    // `Cebab-x4rn` [security]: the muted agent's `bus_send` now returns a
+    // truthful "NOT delivered … you have been muted by the operator" rather
+    // than the old white-lie "delivered to <recipient>". This RETIRES spec
+    // AE-3's oracle-suppression goal (see `docs/safety-and-security.md`): the
+    // maintainer decided on 2026-09-10 that a drop must be reported honestly,
+    // accepting that a muted worker can now detect its mute by reading the
+    // reply. Mute still drops the outbound here and still writes the audit
+    // row; only the sender-facing answer changed, in `bus/runner.ts`.
     if (mutedSet.has(ev.source)) {
       console.warn(
         `[orchestrator] drop muted source=${ev.source} dest=${ev.destination} kind=${ev.kind}`,
       );
-      dispatchRouterDrop({
+      return dispatchRouterDrop({
         reasonCode: 'muted_source',
         source: ev.source,
         destination: ev.destination,
@@ -1138,7 +1142,6 @@ export function createOrchestratorRouter(params: {
         title: `Muted ${ev.source} tried to emit ${ev.kind}`,
         message: `${ev.source} → ${ev.destination}: ${ev.text.slice(0, 80)}`,
       });
-      return;
     }
 
     let dbId = 0;
@@ -1186,7 +1189,7 @@ export function createOrchestratorRouter(params: {
       // agent. Don't trip the budget here — the session keeps going (the
       // operator may send a follow-up). The next deliver path (user prompt
       // or worker reply) is where enforcement kicks in.
-      return;
+      return { delivered: true };
     }
     if (ev.destination === SINK_RECIPIENT) {
       // Register B08: this was the last bare `console.warn` drop in the
@@ -1199,7 +1202,7 @@ export function createOrchestratorRouter(params: {
       // there, only the terminal participant may end the run; here, `_sink`
       // is not a routable recipient at all, so nobody may.
       console.warn(`[orchestrator] unexpected destination=_sink from ${ev.source}`);
-      dispatchRouterDrop({
+      return dispatchRouterDrop({
         reasonCode: 'unauthorized_sink',
         source: ev.source,
         destination: ev.destination,
@@ -1207,32 +1210,35 @@ export function createOrchestratorRouter(params: {
         title: 'Agent addressed the chain terminator',
         message: `${ev.source} addressed _sink, which has no meaning in orchestrator mode — the message was dropped`,
       });
-      return;
     }
-    if (checkBudgetExhausted()) return;
+    // The message reached the bus (persisted + counted above); the budget
+    // brake tears the run down without waking the recipient, but it is a
+    // run-level stop, not a per-message drop — so the sender is not lied to
+    // by reporting the delivery that did happen.
+    if (checkBudgetExhausted()) return { delivered: true };
     // `ev.source` is pinned per-agent in `makeBusToolServer`'s closure and has
     // already passed the F2/F3 allowlist above, so it is a trustworthy label
     // for who wrote `ev.text` — which is what the fence needs.
     if (ev.destination === ORCHESTRATOR_AGENT_NAME) {
       deliver?.(ORCHESTRATOR_AGENT_NAME, ev.text, ev.source);
-      return;
+      return { delivered: true };
     }
     if (workerSet.has(ev.destination)) {
       deliver?.(ev.destination, ev.text, ev.source);
-      return;
+      return { delivered: true };
     }
     // Register B16 (filed against chain.ts; this router had it too). The
-    // event is already persisted and counted against the hop budget, and
-    // `handleBusSend` has already told the sending agent "delivered" — so a
-    // bare warn here lost the message with no audit row and no operator
-    // signal. Every other drop in this router goes through
-    // `dispatchRouterDrop`; so does this one now.
+    // event is already persisted and counted against the hop budget — a bare
+    // warn here lost the message with no audit row and no operator signal.
+    // Every other drop in this router goes through `dispatchRouterDrop`; so
+    // does this one, and (`Cebab-x4rn`) the sender now reads a truthful "NOT
+    // delivered … not a participant" so it can correct the routing mistake.
     //
     // The `_sink` case above stays a plain warn: it is a worker addressing a
     // recipient that exists in the protocol but has no meaning in
     // orchestrator mode, which is a different (and unmapped) category.
     console.warn(`[orchestrator] event for unknown destination: ${ev.destination}`);
-    dispatchRouterDrop({
+    return dispatchRouterDrop({
       reasonCode: 'unknown_destination',
       source: ev.source,
       destination: ev.destination,

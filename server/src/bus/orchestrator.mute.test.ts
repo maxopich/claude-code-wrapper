@@ -14,12 +14,15 @@ import {
 } from '../repo/multi_agent.js';
 import { handleBusSend, type BusEvent } from './runner.js';
 
-// Cluster C Phase 4b (spec §3 invariant 1 + §5.10 + AE-1 + AE-3): router
-// mute-drop tests + the `[security]` oracle-suppression invariant. The
-// drop logic is the spec's "all control verbs enforce at the router,
+// Cluster C Phase 4b (spec §3 invariant 1 + §5.10 + AE-1): router mute-drop
+// tests. The drop logic is the spec's "all control verbs enforce at the router,
 // never UI-only" mandate — a refactor that moves the mute check out of
 // `handleEvent` MUST fail one of these tests, or we've re-introduced the
 // silent-safety regression Cluster C exists to close.
+//
+// AE-3's `[security]` oracle-suppression invariant was RETIRED on 2026-09-10
+// (`Cebab-x4rn`); the drop-reporting tests below now pin the truthful-reply
+// contract that replaced it.
 
 let tmpRoot: string;
 let originalDataDir: string;
@@ -170,70 +173,86 @@ describe('createOrchestratorRouter — mute drop filter (AE-1)', () => {
   });
 });
 
-// [security] AE-3: muted worker's bus_send returns "delivered to <recipient>"
-// — the agent has no oracle that its outbound was dropped. The current
-// architecture satisfies this BY-CONSTRUCTION: handleBusSend returns the
-// success text unconditionally before any router decision. These tests pin
-// the invariant so a future refactor that surfaces router decisions into
-// the tool result fails CI.
-describe('[security] bus_send oracle suppression (AE-3)', () => {
-  test('bus_send returns "delivered to <recipient>" verbatim regardless of router decision', () => {
-    // Simulate the worker calling bus_send — we DON'T need the orchestrator
-    // router for this test; the invariant is that handleBusSend's return
-    // text is independent of what onEvent decides downstream.
-    const routerSawEvent = { observed: false };
-    const result = handleBusSend(
+// [security] `Cebab-x4rn`: spec AE-3's oracle-suppression property was RETIRED
+// on 2026-09-10. `bus_send` used to answer "delivered to <recipient>" for every
+// call whatever the router did with the event, so a muted worker had no signal
+// its outbound was dropped. That white lie is gone: a drop is now reported
+// truthfully, and a muted worker can detect its own mute by reading the reply —
+// the accepted, foreseen cost of making mute overt.
+//
+// These tests are the REWRITE of the old AE-3 uniformity tests (which pinned
+// "delivered regardless" and "accept + drop produce IDENTICAL text"). They now
+// pin the OPPOSITE contract: a drop's reply differs from a delivery's, and the
+// muted-drop reply names the mute. See `project_a_test_can_defend_the_bug` —
+// the `not.toBe` below is the anti-vacuity control, and the different answer IS
+// the overtness the change delivers.
+//
+// Every case below is a REVERT-CHECK: each fails on the old code (which
+// answered "delivered to <recipient>" for every call). The delivered path is
+// asserted as the CONTRAST inside a case whose drop assertion reddens on
+// revert, deliberately not as a standalone case — a standalone "a delivered
+// route answers delivered" passes on the old code too, so it would pin nothing
+// (see `project_gates_pass_vacuously`).
+describe('[security] bus_send drop reporting (Cebab-x4rn, AE-3 retired)', () => {
+  test('[security] a delivered route reads "delivered"; a muted-source drop reads its mute', () => {
+    const delivered = handleBusSend(
       'reviewer',
       { destination: ORCHESTRATOR_AGENT_NAME, kind: 'reply', text: 'hello' },
-      () => {
-        // Simulate the router silently dropping (e.g. because reviewer is muted)
-        // by NOT recording anything. The tool result should still report success.
-        // (Intentionally leaving `routerSawEvent.observed` as false — that's
-        // the drop scenario; the assertion below verifies the agent still sees
-        // success regardless.)
-      },
+      () => ({ delivered: true }),
     );
-    expect(result.isError).toBeFalsy();
-    expect(result.content[0]?.text).toBe(`delivered to ${ORCHESTRATOR_AGENT_NAME}`);
-    expect(routerSawEvent.observed).toBe(false);
+    const deliveredText = delivered.content[0]?.text ?? '';
+    // The delivered path is the contrast — asserted here, where the drop
+    // assertion below is what reddens on revert (on the old code BOTH calls
+    // return this same "delivered to X", so the /muted/i assertion fails).
+    expect(deliveredText).toBe(`delivered to ${ORCHESTRATOR_AGENT_NAME}`);
+
+    const dropped = handleBusSend(
+      'reviewer',
+      { destination: ORCHESTRATOR_AGENT_NAME, kind: 'reply', text: 'hello' },
+      () => ({ delivered: false, reasonCode: 'muted_source' }),
+    );
+    const droppedText = dropped.content[0]?.text ?? '';
+    // The reply plainly names the mute — the agent is TOLD, not left to infer.
+    expect(droppedText).toMatch(/muted/i);
+    expect(droppedText).toMatch(/not delivered/i);
+    // Anti-vacuity / the whole point: a drop no longer reads like a delivery,
+    // which is exactly how a muted worker can now detect its mute.
+    expect(droppedText).not.toBe(deliveredText);
   });
 
-  test('throwing onEvent does NOT bubble into the tool result', () => {
-    // Even a router that throws (would never happen in production — the
-    // router has its own try/catch) must not surface the throw as a tool
-    // error visible to the agent. If this test fails, it means a future
-    // refactor wrapped the bus_send return path in a try/catch that
-    // surfaces router-side state to the agent — directly breaking AE-3.
-    expect(() =>
-      handleBusSend(
-        'reviewer',
-        { destination: ORCHESTRATOR_AGENT_NAME, kind: 'reply', text: 'hi' },
-        () => {
-          throw new Error('router internal');
-        },
-      ),
-    ).toThrow('router internal');
-    // The agent does NOT see this error — it's caught by the SDK's tool
-    // dispatch layer above bus_send. handleBusSend's success-return path
-    // is unreachable when onEvent throws, so the agent gets the SDK's
-    // generic "tool failed" rather than any specific routing detail.
+  test('[security] end-to-end: a muted worker reads its mute through the real router', () => {
+    const { router, sessionId, onEvent } = buildRouter();
+    router.setMute('reviewer', true);
+    const result = handleBusSend(
+      'reviewer',
+      { destination: ORCHESTRATOR_AGENT_NAME, kind: 'reply', text: 'am I muted?' },
+      (ev) => router.handleEvent(ev),
+    );
+    // The agent is told the truth...
+    expect(result.content[0]?.text).toMatch(/muted/i);
+    // ...while mute's operator-facing behaviour is UNCHANGED: the run does not
+    // advance on the muted worker's output (no event persisted, sink not woken).
+    expect(listMultiAgentEvents(sessionId)).toHaveLength(0);
+    expect(onEvent).not.toHaveBeenCalled();
   });
 
-  test('successful onEvent + drop produce IDENTICAL tool result text', () => {
-    // Two scenarios — one where the router accepted the event, one where
-    // it dropped — must produce byte-identical tool results so the agent
-    // has zero side-channel signal.
-    const acceptResult = handleBusSend(
+  test('correctable routing mistakes (unknown_destination, unauthorized_sink) are truthful too', () => {
+    const unknown = handleBusSend(
       'reviewer',
-      { destination: 'editor', kind: 'reply', text: 'msg' },
-      () => undefined,
+      { destination: 'ghost', kind: 'reply', text: 'msg' },
+      () => ({ delivered: false, reasonCode: 'unknown_destination' }),
     );
-    const dropResult = handleBusSend(
+    expect(unknown.content[0]?.text).toMatch(/not delivered/i);
+    expect(unknown.content[0]?.text).toContain('ghost');
+
+    const sink = handleBusSend(
       'reviewer',
-      { destination: 'editor', kind: 'reply', text: 'msg' },
-      () => undefined, // could be a drop branch — onEvent is the same shape
+      { destination: '_sink', kind: 'final', text: 'done' },
+      () => ({ delivered: false, reasonCode: 'unauthorized_sink' }),
     );
-    expect(acceptResult).toEqual(dropResult);
+    expect(sink.content[0]?.text).toMatch(/not delivered/i);
+    // Not the success text (which is exactly "delivered to _sink", no prefix).
+    expect(sink.content[0]?.text).not.toBe('delivered to _sink');
   });
 });
 
