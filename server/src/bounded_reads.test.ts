@@ -65,6 +65,10 @@ const ALLOWED: ReadonlyMap<string, string> = new Map([
   ['runner/mock.ts', 'mock-mode fixtures shipped inside the repo'],
   ['live_smoke.ts', "dev smoke script reading Cebab's own auth-token file"],
   ['ws_smoke.ts', "dev smoke script reading Cebab's own auth-token file"],
+  [
+    'probe_no_model_turn_smoke.ts',
+    "dev smoke script reading the CLI's own transcript under ~/.claude/projects",
+  ],
 ]);
 
 type Site = { file: string; line: number; call: string };
