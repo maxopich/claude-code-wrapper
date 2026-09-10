@@ -86,13 +86,13 @@ describe('relPathIsContained', () => {
     }
   });
 
-  test('every editable kind is contained — the guard on a future fourth entry', () => {
+  test('every editable kind is contained — the guard on a future fifth entry', () => {
     for (const kind of MANAGED_FILE_KINDS) {
       expect(relPathIsContained(MANAGED_EDITABLE[kind])).toBe(true);
     }
-    // And the set really is the three documented ones; a silent addition
+    // And the set really is the four documented ones; a silent addition
     // should have to update this line and think about it.
-    expect(MANAGED_FILE_KINDS.sort()).toEqual(['claude_md', 'mcp', 'settings']);
+    expect(MANAGED_FILE_KINDS.sort()).toEqual(['claude_md', 'mcp', 'settings', 'settings_local']);
   });
 });
 
@@ -177,10 +177,16 @@ describe('reading', () => {
     const { id } = makeManagedProject('agent-sensitive');
     const mcp = readManagedFile(id, 'mcp');
     const settings = readManagedFile(id, 'settings');
+    const settingsLocal = readManagedFile(id, 'settings_local');
     const md = readManagedFile(id, 'claude_md');
     expect(mcp.ok && mcp.read.sensitive).toBe(true);
     expect(settings.ok && settings.read.sensitive).toBe(true);
+    expect(settingsLocal.ok && settingsLocal.read.sensitive).toBe(true);
     expect(md.ok && md.read.sensitive).toBe(false);
+    // The fourth kind resolves to the local-settings path Trust loads.
+    expect(settingsLocal.ok && settingsLocal.read.relPath).toBe(
+      path.join('.claude', 'settings.local.json'),
+    );
   });
 });
 
@@ -285,13 +291,22 @@ describe('[security] file modes and the audit row', () => {
     writeManagedFile(id, 'mcp', '{}', 0, sink);
     writeManagedFile(id, 'settings', '{}', 0, sink);
     writeManagedFile(id, 'claude_md', 'hi', 0, sink);
+    // `Cebab-6fax.43.1`: settings.local.json is the fourth kind, and it carries
+    // hooks/MCP/env that Trust loads, so its 0600 matters most of all.
+    writeManagedFile(id, 'settings_local', '{}', 0, sink);
     const mode = (p: string): number => fs.statSync(p).mode & 0o777;
     expect(mode(path.join(dir, '.mcp.json'))).toBe(0o600);
     expect(mode(path.join(dir, '.claude', 'settings.json'))).toBe(0o600);
     expect(mode(path.join(dir, 'CLAUDE.md'))).toBe(0o600);
+    expect(mode(path.join(dir, '.claude', 'settings.local.json'))).toBe(0o600);
     // Nothing is group- or world-readable, stated as the property rather than
-    // as three equalities.
-    for (const rel of ['.mcp.json', path.join('.claude', 'settings.json'), 'CLAUDE.md']) {
+    // as four equalities.
+    for (const rel of [
+      '.mcp.json',
+      path.join('.claude', 'settings.json'),
+      'CLAUDE.md',
+      path.join('.claude', 'settings.local.json'),
+    ]) {
       expect(mode(path.join(dir, rel)) & 0o077).toBe(0);
     }
   });

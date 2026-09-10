@@ -10,8 +10,9 @@
  * is load-bearing rather than stylistic.
  *
  * THE WIRE CARRIES A KIND, NEVER A PATH. `MANAGED_EDITABLE` is a closed set of
- * three, so there is no traversal to defend against: the operator cannot ask
- * for `../../.ssh/id_rsa` because there is no field in which to name it. That is
+ * four fixed literals, so there is no traversal to defend against: the operator
+ * cannot ask for `../../.ssh/id_rsa` because there is no field in which to name
+ * it. That is
  * a stronger property than sanitising a path would be, and it is the reason
  * `relPathIsContained` below guards the CONSTANT rather than the request.
  *
@@ -51,14 +52,24 @@ import { readFileBounded, writeFileAtomicBounded } from './safe_fs.js';
 /**
  * The closed set. Paths are POSIX-style and joined per-platform below.
  *
- * `.claude/settings.json` rather than `settings.local.json`: the local file is
- * the one a checkout is not supposed to share, and an agent Cebab owns has no
- * second author to hide anything from.
+ * FOUR FIXED LITERALS, not a pattern (`Cebab-6fax.43.1`). Each is a constant
+ * relative path, so the wire still carries a KIND and never a path — there is
+ * nothing to sanitise. `settings_local` was added by decision, not mechanism:
+ * a `settings*.json` glob would put a path back on the wire and undo exactly
+ * the property that makes three (now four) safe.
+ *
+ * WHY `settings.local.json` is here now. It was deliberately excluded at first
+ * — the local file is the one a checkout is not supposed to share, and an agent
+ * Cebab owns has no second author to hide from. But the copy engine duplicates
+ * it and Trust LOADS it, so it is the one copied file that can change the
+ * agent's posture (hooks, MCP servers, env injections) while being the one the
+ * operator cannot see or edit. The audited write below is what makes that safe.
  */
 export const MANAGED_EDITABLE: Readonly<Record<ManagedFileKind, string>> = {
   settings: '.claude/settings.json',
   mcp: '.mcp.json',
   claude_md: 'CLAUDE.md',
+  settings_local: '.claude/settings.local.json',
 };
 
 export const MANAGED_FILE_KINDS = Object.keys(MANAGED_EDITABLE) as ManagedFileKind[];

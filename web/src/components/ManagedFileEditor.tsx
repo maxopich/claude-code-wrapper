@@ -16,15 +16,15 @@ import type { ManagedEditorMode } from '../store';
  * server refuses it and nothing lands, which is a recoverable mistake. The cost
  * of silently rewriting someone's config is not.
  *
- * WHY IT SAYS THESE ARE SECRETS. `pathLooksSensitive` is true for `.mcp.json`
- * and `.claude/settings.json` — Cebab's own rule already treats their whole
- * bodies as credentials. `Cebab-ws0.11` wanted this warning and had nowhere to
+ * WHY IT SAYS THESE ARE SECRETS. `pathLooksSensitive` is true for `.mcp.json`,
+ * `.claude/settings.json` and `.claude/settings.local.json` — Cebab's own rule
+ * already treats their whole bodies as credentials. `Cebab-ws0.11` wanted this warning and had nowhere to
  * put it, so it went into the COPY dialog instead ("you are about to duplicate
  * these"). This is its real home, and the wording is the other one: what is on
  * screen right now is live.
  *
  * MANAGED AGENTS ONLY. There is no path on the wire — only a kind from a closed
- * set of three — so this cannot be pointed at an operator's own repository even
+ * set of four — so this cannot be pointed at an operator's own repository even
  * by a client that tried.
  */
 
@@ -49,6 +49,7 @@ export type ManagedFileEditorProps = {
 
 const TABS: { kind: ManagedFileKind; label: string }[] = [
   { kind: 'settings', label: 'settings.json' },
+  { kind: 'settings_local', label: 'settings.local.json' },
   { kind: 'mcp', label: '.mcp.json' },
   { kind: 'claude_md', label: 'CLAUDE.md' },
 ];

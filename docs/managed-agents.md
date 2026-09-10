@@ -9,8 +9,8 @@ What is here is mechanism and the measurements behind it. The two rules an agent
 wrongly on are stated where they cannot be missed — in the always-loaded `CLAUDE.md`, and
 repeated here so a reader of this page alone has them: **Cebab owns every byte under
 `managedAgentsRoot()` and none outside it**, and **the wire carries a KIND, never a path**
-(`MANAGED_EDITABLE` in `managed_file.ts` is a closed set of three, so there is no traversal
-input to validate). Everything below explains how those are enforced. Note this page used
+(`MANAGED_EDITABLE` in `managed_file.ts` is a closed set of four fixed literals, so there is
+no traversal input to validate). Everything below explains how those are enforced. Note this page used
 to send the reader to `SECURITY.md` for them; that file states Cebab's runtime posture and
 threat model and has never carried these two.
 
@@ -36,7 +36,7 @@ threat model and has never carried these two.
 
 ## Editing a managed agent's config
 
-**Cebab WRITES into that tree as well as creating it** (`Cebab-ws0.10`). A managed agent's `.claude/settings.json`, `.mcp.json` and `CLAUDE.md` are editable from the app; an ordinary project offers no affordance at all, because Cebab owns every byte under `managedAgentsRoot()` and none outside it. **The wire carries a KIND, never a path** — `MANAGED_EDITABLE` in `managed_file.ts` is a closed set of three — so there is no traversal input to validate and no sanitiser to get wrong; `relPathIsContained` guards the CONSTANT against a future fourth entry, not a hostile request, and is tested directly for that reason. The editor shows **raw bytes**: `pathLooksSensitive` is true for two of the three files, so what is on screen is live credentials, and it says so rather than masking — a structured editor would reformat the file, reorder its keys and drop what it did not model, on files whose whole purpose is to be read by another program.
+**Cebab WRITES into that tree as well as creating it** (`Cebab-ws0.10`). A managed agent's `.claude/settings.json`, `.claude/settings.local.json`, `.mcp.json` and `CLAUDE.md` are editable from the app; an ordinary project offers no affordance at all, because Cebab owns every byte under `managedAgentsRoot()` and none outside it. **The wire carries a KIND, never a path** — `MANAGED_EDITABLE` in `managed_file.ts` is a closed set of four fixed literals — so there is no traversal input to validate and no sanitiser to get wrong; `relPathIsContained` guards the CONSTANT against a future fifth entry, not a hostile request, and is tested directly for that reason. `settings.local.json` is the fourth kind (`Cebab-6fax.43.1`): it was excluded at first, but the copy engine duplicates it and Trust LOADS it, so it is the one copied file that can change the agent's posture (hooks, MCP servers, env) while being the one the operator cannot otherwise see or edit — added by decision, as a literal, never a `settings*.json` glob. The editor shows **raw bytes**: `pathLooksSensitive` is true for all but `CLAUDE.md`, so what is on screen is live credentials, and it says so rather than masking — a structured editor would reformat the file, reorder its keys and drop what it did not model, on files whose whole purpose is to be read by another program.
 
 ## Why the edit is audited and the model choice is not
 

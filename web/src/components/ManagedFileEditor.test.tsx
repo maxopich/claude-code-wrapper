@@ -172,7 +172,7 @@ describe('[a11y] the tab strip', () => {
   test('exactly one tab is in the tab order', () => {
     render({ kind: 'mcp' });
     const tabs = [...container.querySelectorAll('[role="tab"]')] as HTMLButtonElement[];
-    expect(tabs).toHaveLength(3);
+    expect(tabs).toHaveLength(4);
     expect(tabs.filter((t) => t.tabIndex === 0)).toHaveLength(1);
     expect(tabs.find((t) => t.tabIndex === 0)!.getAttribute('aria-selected')).toBe('true');
   });
@@ -187,7 +187,7 @@ describe('[a11y] the tab strip', () => {
   });
 
   test.each([
-    ['ArrowRight', 'settings', 'mcp'],
+    ['ArrowRight', 'settings', 'settings_local'],
     ['ArrowLeft', 'settings', 'claude_md'],
     ['End', 'settings', 'claude_md'],
     ['Home', 'claude_md', 'settings'],
