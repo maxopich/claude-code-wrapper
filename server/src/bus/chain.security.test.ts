@@ -660,11 +660,13 @@ describe('[security] a chain replay seam refuses a turn the router would not sta
 
   test('Continue past the hop cap starts no turn and leaves the banner pending', async () => {
     // The other replay seam, and it needs a session that is AT the cap while
-    // still holding a pending mutation. `hopBudget: 1` gets there during
-    // startup: the briefings and the initial prompt go through
-    // `forwardCebabEvent`, which bumps the counter and does NOT check it, so
-    // the first participant's turn still runs and its `rm -rf` still parks a
-    // banner — with the budget already spent underneath.
+    // still holding a pending mutation. `hopBudget: 0` gets there: the kick to
+    // the first participant is Cebab's own delivery — not an agent-to-agent
+    // hop — so it runs unbudgeted and its `rm -rf` parks a banner while the
+    // counter sits at 0, already at the cap. (Before `Cebab-6fax.19` the
+    // briefings and initial prompt bumped the counter through
+    // `forwardCebabEvent`, so `hopBudget: 1` reached the cap during startup;
+    // that framing is no longer charged, so the cap has to be 0 now.)
     const workspace = path.join(tmpRoot, 'ws-continue-cap');
     fs.mkdirSync(workspace, { recursive: true });
     const dispatched: string[] = [];
@@ -675,7 +677,7 @@ describe('[security] a chain replay seam refuses a turn the router would not sta
       onEvent: vi.fn(),
       onEnded: vi.fn(),
       pauseOnDangerous: true,
-      hopBudget: 1,
+      hopBudget: 0,
       runnerFactory: dangerousRunnerFactory(dispatched),
     });
     await new Promise((r) => setImmediate(r));

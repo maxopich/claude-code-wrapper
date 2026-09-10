@@ -446,7 +446,7 @@ export function renderRosterPrompt(opts: {
     ``,
     UNTRUSTED_INPUT_FRAMING,
     ``,
-    `Hop budget: ${hopBudget} hops total for this session (Cebab will hard-stop when reached — do a periodic progress self-check; the intro handshake counts toward the total).`,
+    `Hop budget: ${hopBudget} hops total for this session (Cebab will hard-stop when reached — do a periodic progress self-check). A hop is a message between agents; the intro handshake and Cebab's own framing rows do NOT count, so the full budget is available for real routing.`,
     ``,
     `When you have a complete answer for the user, call \`bus_send\` with kind=final to destination \`user\` — Cebab forwards that to the operator's chat UI.`,
   ].join('\n');

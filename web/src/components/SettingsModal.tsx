@@ -311,7 +311,9 @@ export function SettingsModal(props: {
             />
           </label>
           <p className="hint">
-            Hard cap on multi-agent hops per session. Cebab stops a run when this is reached and
+            Hard cap on multi-agent hops per session. A hop is a message between agents; the intro
+            handshake and Cebab's own framing rows are not counted, so the whole budget is available
+            for routing regardless of roster size. Cebab stops a run when this is reached and
             appends a <code>cebab → _sink</code> error event explaining the stop. Per-launch
             override: <code>CEBAB_HOP_BUDGET</code>. Takes effect on the next session start.
           </p>

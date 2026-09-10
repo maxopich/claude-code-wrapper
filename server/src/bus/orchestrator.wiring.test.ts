@@ -419,9 +419,12 @@ describe('wireOrchestratorSession — project CLAUDE.md injection', () => {
 
   // Register B14: `addWorker` was a hand-rolled copy of `sendUserPrompt` —
   // the same cebab→orchestrator prompt event followed by the same deliver —
-  // minus its `ended` and hop-budget guards. Since `forwardCebabEvent` bumps
-  // the counter, the roster update could be the very hop that reached the cap
-  // and still wake the orchestrator, defeating the runaway brake.
+  // minus its `ended` and hop-budget guards. Its `sendUserPrompt` re-route is
+  // what restored those guards, and this pins that the hop-budget one is still
+  // honored: a roster update must not wake the orchestrator once the budget is
+  // exhausted. `Cebab-6fax.19`: the roster update is Cebab's own framing and no
+  // longer bumps the counter itself, so the guard is seeded already AT the cap
+  // rather than one hop below it.
   function addNewWorker(name: string) {
     const dir = path.join(tmpRoot, name);
     fs.mkdirSync(dir, { recursive: true });
@@ -433,11 +436,13 @@ describe('wireOrchestratorSession — project CLAUDE.md injection', () => {
   test('addWorker at the hop cap refuses to wake the orchestrator', async () => {
     const captured: Array<{ cwd: string; prompt: string }> = [];
     const onEnded = vi.fn();
-    // Seeded one hop below the cap: the roster event addWorker persists is
-    // the hop that reaches it.
+    // Seeded already at the cap: `sendUserPrompt`'s post-forward budget check
+    // must refuse the wake. (The roster event itself is Cebab framing and
+    // costs no hop — `Cebab-6fax.19` — so it is the pre-existing count, not the
+    // roster update, that sits at the ceiling.)
     const { handle } = wire([worker('coder', null)], captured, undefined, undefined, {
       hopBudget: 3,
-      initialHopsCount: 2,
+      initialHopsCount: 3,
       onEnded,
     });
 

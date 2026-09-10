@@ -1242,12 +1242,21 @@ export function createOrchestratorRouter(params: {
     });
   };
 
-  // Cebab-originated events (briefings, roster prompts, user prompts):
-  // persist + forward. Bumps `hopsCount` — register B25 moved the bump out of
-  // the persist `try` so a failed write can no longer stall the brake; see
-  // `handleEvent`. `Cebab-v85`: it does NOT keep the counter in lockstep with
-  // `run.events.length`, and never did — the four sites that persist a row
-  // without calling this are exactly the gap the chip used to render.
+  // Cebab-originated events (roster prompts, user prompts, the per-worker
+  // "injected CLAUDE.md" marker): persist + forward for the operator's
+  // scrollback + DB transcript, but do NOT bump `hopsCount`.
+  //
+  // `Cebab-6fax.19`: a hop is an agent-to-agent message — the thing `hopsCount`
+  // is the runaway brake against — and every one of those arrives through
+  // `handleEvent`, which is the only caller of `bumpHops`. A row Cebab writes
+  // itself is framing, not a hop the run took: the same principle `Cebab-v85`
+  // already applied to the five explanatory classes it persists directly
+  // (worker-failed, budget-exhausted, chain's terminal note, the stranded-run
+  // note, the operator's ask-user answer). The handshake rows go THROUGH this
+  // helper rather than being persisted inline, so they used to be charged —
+  // 2 start prompts + one marker per worker, ~14 of a 30-hop budget spent on a
+  // 4-worker roster before the first task was routed. Now the count moves only
+  // when one agent messages another.
   const forwardCebabEvent = (ev: BusEvent) => {
     if (ended) return;
     let dbId = 0;
@@ -1263,8 +1272,9 @@ export function createOrchestratorRouter(params: {
     } catch (err) {
       console.error('[orchestrator] persist cebab event failed', err);
     }
-    // Register B25: outside the persist try — see `handleEvent`.
-    bumpHops();
+    // No `bumpHops()` — see the header. The row carries the CURRENT (unchanged)
+    // count so the client renders "a row arrived, the budget did not move",
+    // exactly as the directly-persisted explanatory rows already do.
     try {
       sink.onEvent(sessionId, ev, dbId, hopsCount);
     } catch (err) {

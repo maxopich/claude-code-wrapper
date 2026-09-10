@@ -1070,12 +1070,19 @@ export function createChainRouter(params: {
     deliver?.(ev.destination, ev.text, ev.source);
   };
 
-  // Cebab-originated events (briefings, initial prompt): persist + forward so
-  // the operator's scrollback + DB transcript include them. No routing — the
-  // briefing/prompt is delivered as the agent's actual turn separately.
-  // Bumps `hopsCount` — register B25 moved the bump out
-  // of the persist `try` so a failed write can no longer stall the brake;
-  // see `handleEvent` for the reasoning.
+  // Cebab-originated events (per-participant briefings, the "injected
+  // CLAUDE.md" markers, the initial prompt): persist + forward so the
+  // operator's scrollback + DB transcript include them. No routing — the
+  // briefing/prompt is delivered as the agent's actual turn separately, and it
+  // does NOT bump `hopsCount`.
+  //
+  // `Cebab-6fax.19`: a hop is an agent-to-agent message, and those all arrive
+  // through `handleEvent` — the only caller of `bumpHops`. A row Cebab writes
+  // itself is framing, not a hop the run took (the same principle `Cebab-v85`
+  // applied to the explanatory rows it persists inline). Charging the startup
+  // rows made a 2-participant chain begin at `hopsUsed 5` (two briefings, two
+  // markers, one prompt) before any real work; the count now moves only when
+  // one agent messages another.
   const forwardCebabEvent = (ev: BusEvent) => {
     if (ended) return;
     let dbId = 0;
@@ -1091,7 +1098,8 @@ export function createChainRouter(params: {
     } catch (err) {
       console.error('[chain] persist cebab event failed', err);
     }
-    bumpHops();
+    // No `bumpHops()` — see the header. The row carries the CURRENT (unchanged)
+    // count, as the directly-persisted explanatory rows already do.
     try {
       sink.onEvent(sessionId, ev, dbId, hopsCount);
     } catch (err) {

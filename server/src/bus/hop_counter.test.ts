@@ -27,6 +27,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { ORCHESTRATOR_AGENT_NAME, wireOrchestratorSession } from './orchestrator.js';
+import { startChainSession } from './chain.js';
 import { computeSessionPaths } from './paths.js';
 import { resolveInitialHopsCount } from './reconstruct.js';
 import { CEBAB_SOURCE, USER_RECIPIENT, type ResolvedAgent } from './runtime.js';
@@ -43,6 +44,9 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 let tmpRoot: string;
 let originalDataDir: string;
 let warnSpy: ReturnType<typeof vi.spyOn>;
+/** Session ids created via `startOrchestratorSession` (their own UUIDs), so
+ *  the live-session registry is cleaned even though they are not SESSION_ID. */
+let started: string[];
 
 const SESSION_ID = 'test-hop-counter';
 
@@ -55,15 +59,31 @@ beforeEach(() => {
   getDb();
   createMultiAgentSession(SESSION_ID, 'orchestrator', 'iter-1');
   warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+  started = [];
 });
 
 afterEach(() => {
   unregisterLiveSession(SESSION_ID);
+  for (const sid of started) unregisterLiveSession(sid);
   warnSpy.mockRestore();
   closeDb();
   config.dataDir = originalDataDir;
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
+
+/** A turn that yields one assistant + one result and routes NOTHING — no
+ *  `bus_send`, so no `handleEvent`, so no hop. Fresh generator per call. */
+function noopRunner(): Runner {
+  async function* gen(): AsyncGenerator<SDKMessage> {
+    yield {
+      type: 'assistant',
+      message: { content: [{ type: 'text', text: 'noop' }] },
+    } as unknown as SDKMessage;
+    yield { type: 'result', subtype: 'success', session_id: 'noop' } as unknown as SDKMessage;
+  }
+  const it = gen();
+  return { [Symbol.asyncIterator]: () => it, close: () => undefined };
+}
 
 const flush = async (times = 16) => {
   for (let i = 0; i < times; i++) await new Promise((r) => setImmediate(r));
@@ -218,5 +238,112 @@ describe('resolveInitialHopsCount — what an R-B restart re-seeds the brake wit
     // The column is unconstrained INTEGER; a hand-edited or corrupt value
     // must not become the budget seed.
     expect(resolveInitialHopsCount(Number.NaN, 6)).toBe(6);
+  });
+});
+
+/**
+ * `Cebab-6fax.19` — the hop budget used to charge Cebab's own handshake. A
+ * hop is an agent-to-agent message; every row Cebab writes to frame a run —
+ * the roster + user start prompts, each participant's briefing, and the
+ * per-worker "injected CLAUDE.md" marker — goes through `forwardCebabEvent`
+ * and must NOT bump the counter. The live measurement that filed this: a
+ * 4-worker orchestrator run spent 14 of a 30-hop budget before the first task
+ * was routed, and half of that 14 was Cebab's own framing.
+ *
+ * The number these tests pin — 0 counted hops after startup, for any roster
+ * size — is the thing that must not drift back.
+ */
+describe('the startup handshake is not charged against the hop budget', () => {
+  /** A fixed-size chain roster whose participants each carry a CLAUDE.md, so
+   *  startup emits, per participant, a briefing AND an "injected CLAUDE.md"
+   *  marker — plus one initial prompt. For N participants that is `2N + 1`
+   *  Cebab-authored rows (the issue's 2-participant chain "started at hopsUsed
+   *  5"). A no-op runner means participant[0]'s first turn sends nothing, so
+   *  no agent-to-agent hop follows the handshake. */
+  async function startChainRoster(participantCount: number) {
+    const participants = Array.from({ length: participantCount }, (_, i) => {
+      const w = makeWorker(`p${participantCount}_${i}`);
+      fs.writeFileSync(path.join(w.cwd, 'CLAUDE.md'), `# ${w.agentName} rules\n`, 'utf8');
+      return w;
+    });
+    const handle = await startChainSession({
+      participants,
+      initialPrompt: 'do the task',
+      workspaceRoot: tmpRoot,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      hopBudget: 30,
+      runnerFactory: noopRunner,
+    });
+    started.push(handle.sessionId);
+    await flush();
+    return handle.sessionId;
+  }
+
+  test('briefings, markers and the initial prompt cost zero hops, for a 2- and a 4-participant chain', async () => {
+    const twoParts = await startChainRoster(2);
+    const fourParts = await startChainRoster(4);
+
+    // ANTI-VACUITY: the handshake really happened. A 2-participant chain writes
+    // 2 briefings + 2 markers + 1 prompt = 5 Cebab handshake rows — the exact
+    // `hopsUsed 5` the issue measured. (The no-op first turn also leaves the
+    // run stranded, which adds Cebab's own `→ user` explanatory note; that is
+    // likewise uncounted, so we key on the handshake rows only.) If these rows
+    // were absent, "0 hops" would be trivially true.
+    const handshakeRows = (sid: string) =>
+      listMultiAgentEvents(sid).filter(
+        (e) => e.source === CEBAB_SOURCE && (e.kind === 'intro' || e.kind === 'prompt'),
+      );
+    expect(handshakeRows(twoParts)).toHaveLength(5);
+    expect(handshakeRows(fourParts)).toHaveLength(9);
+
+    // The pin: no counted hop yet (the column is only written on a bump), and
+    // it is the SAME for both roster sizes — the handshake does not scale the
+    // consumed budget. THIS is the number that must not drift.
+    expect(getMultiAgentSession(twoParts)!.hops_used).toBeNull();
+    expect(getMultiAgentSession(fourParts)!.hops_used).toBeNull();
+  });
+
+  test('the per-worker "injected CLAUDE.md" marker rides a real hop without adding one', async () => {
+    // A worker WITH a root CLAUDE.md, so `deliver` emits the compact marker on
+    // its first turn (readProjectClaudeMd returns non-null).
+    const worker = makeWorker('coder');
+    fs.writeFileSync(path.join(worker.cwd, 'CLAUDE.md'), '# coder rules\n', 'utf8');
+
+    const wired = wireOrchestratorSession({
+      sessionId: SESSION_ID,
+      iterationId: 'iter-1',
+      lifecycle: 'persistent',
+      paths: computeSessionPaths(SESSION_ID),
+      workers: [worker],
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      hopBudget: 30,
+      runnerFactory: noopRunner,
+    });
+
+    // One genuine agent-to-agent message: the orchestrator's intro to the
+    // worker. Routing it wakes the worker, and that first wake emits the
+    // marker row inside `deliver`.
+    wired.router.handleEvent({
+      ts: Date.now(),
+      source: ORCHESTRATOR_AGENT_NAME,
+      destination: 'coder',
+      kind: 'intro',
+      text: 'you are on the bus',
+    });
+    await flush();
+
+    const rows = listMultiAgentEvents(SESSION_ID);
+    // ANTI-VACUITY: the marker really was written — so its non-contribution is
+    // a measured 0, not an absent row.
+    const marker = rows.filter(
+      (e) => e.source === CEBAB_SOURCE && e.destination === 'coder' && /injected/.test(e.text),
+    );
+    expect(marker).toHaveLength(1);
+
+    // The one real hop counts; the marker beside it does not. Reddens the
+    // moment the marker's `forwardCebabEvent` bumps the counter again.
+    expect(getMultiAgentSession(SESSION_ID)!.hops_used).toBe(1);
   });
 });
