@@ -172,10 +172,11 @@ describe('[security][BE-9] chain router-drop → safety_audit + envelope', () =>
   });
 
   // Register B16. Unlike the three above, this drop is reached AFTER the
-  // event has been persisted and the hop counted — and after `handleBusSend`
-  // told the sending agent "delivered". It used to be a bare `console.warn`,
-  // so the message vanished with no audit row and no operator notification
-  // while the session's hop count had silently moved.
+  // event has been persisted and the hop counted. It used to be a bare
+  // `console.warn`, so the message vanished with no audit row and no operator
+  // notification while the session's hop count had silently moved. (`Cebab-x4rn`:
+  // the sender now reads a truthful "NOT delivered … not in this chain" instead
+  // of the old "delivered" lie.)
   test('a chain participant addressing a name nobody has drops as unknown_destination', () => {
     const { router, captured } = makeRouter();
     router.handleEvent(ev({ source: 'coder', destination: 'ghost' }));

@@ -189,10 +189,11 @@ describe('[security][BE-9] orchestrator router-drop → safety_audit + envelope'
 
   // Register B16. Note what makes this one different from the four above:
   // they all reject before the event is persisted. This one is reached
-  // AFTER `sink.onEvent` has run and the hop has been counted, and after
-  // `handleBusSend` already answered the sending agent "delivered" — so
-  // before this it was a bare `console.warn` and the message was simply
-  // gone, with no audit row and nothing for the operator to see.
+  // AFTER `sink.onEvent` has run and the hop has been counted — so before
+  // B16 it was a bare `console.warn` and the message was simply gone, with
+  // no audit row and nothing for the operator to see. (`Cebab-x4rn`: the
+  // sender is now also told the truth — "NOT delivered … not in the roster"
+  // — rather than the old "delivered" lie.)
   test('a real worker addressing a name nobody has drops as unknown_destination', () => {
     const { router, captured } = makeRouter();
     router.handleEvent(ev({ source: ORCHESTRATOR_AGENT_NAME, destination: 'ghost' }));

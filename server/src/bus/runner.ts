@@ -21,7 +21,11 @@
 import { createSdkMcpServer, tool, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { BUS_SEND_TOOL, classifyToolCall } from '@cebab/shared';
-import type { AskUserQuestionOption, AskUserQuestionView } from '@cebab/shared/protocol';
+import type {
+  AskUserQuestionOption,
+  AskUserQuestionView,
+  RouterDropReasonCode,
+} from '@cebab/shared/protocol';
 import { config } from '../config.js';
 import { pickRunner, type MockOptions, type RunOptions, type Runner } from '../runner/index.js';
 import type { SettingSource } from '../runner/claude.js';
@@ -212,8 +216,78 @@ export type BusEvent = {
   text: string;
 };
 
+/**
+ * The router's verdict on one `bus_send`, returned from `onEvent` back through
+ * `handleBusSend` so the sending agent is told the truth about its message.
+ *
+ * `Cebab-x4rn` [security]: this retires spec AE-3's oracle-suppression
+ * property. `bus_send` used to answer "delivered to <destination>" for EVERY
+ * call whatever the router did with the event — a deliberate, audited white lie
+ * (see `docs/safety-and-security.md`) whose sole purpose was to stop a muted
+ * worker from learning it was muted. The maintainer retired that property on
+ * 2026-09-10: a drop is now reported truthfully, through both routers. The
+ * accepted, foreseen cost is that a muted worker can detect its own mute by
+ * sending a message and reading the reply — mute stops being covert. What does
+ * NOT change: the run still does not advance on a muted worker's output and the
+ * `safety_audit` trail is unchanged. Mute remains an operator control; it is no
+ * longer a secret one.
+ *
+ * `reasonCode: null` means the router made no routing classification — the run
+ * had already ended when the event arrived.
+ */
+export type BusRouteResult =
+  { delivered: true } | { delivered: false; reasonCode: RouterDropReasonCode | null };
+
 /** Minimal MCP tool-result shape (structurally a `CallToolResult`). */
 type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean };
+
+/**
+ * The truthful `bus_send` tool result the sending agent reads, given the
+ * router's verdict. A `void`/absent verdict (a caller that does not classify —
+ * unit scaffolds, the single-agent path) defaults to "delivered", preserving
+ * the pre-classification behaviour for those callers only.
+ *
+ * Centralized here, and keyed on the shared `RouterDropReasonCode`, so the two
+ * routers cannot drift into telling the same drop two different stories.
+ */
+export function busSendResultText(routing: BusRouteResult | void, destination: string): string {
+  if (!routing || routing.delivered) return `delivered to ${destination}`;
+  return busDropSenderText(routing.reasonCode, destination);
+}
+
+function busDropSenderText(reasonCode: RouterDropReasonCode | null, destination: string): string {
+  switch (reasonCode) {
+    case 'muted_source':
+      return `NOT delivered to ${destination}: you have been muted by the operator, so your outbound bus messages are not being routed to anyone.`;
+    case 'kicked_source':
+      return `NOT delivered to ${destination}: you have been removed from this session by the operator; your messages are no longer routed.`;
+    case 'kicked_destination':
+      return `NOT delivered to ${destination}: ${destination} has been removed from this session by the operator.`;
+    case 'unknown_destination':
+      return `NOT delivered: "${destination}" is not a participant in this session — address a name from the roster.`;
+    case 'unauthorized_sink':
+      return `NOT delivered to ${destination}: you are not permitted to end the run this way.`;
+    case 'self_addressed':
+      return `NOT delivered: ${destination} is you — a participant cannot address itself.`;
+    case 'worker_to_worker':
+      return `NOT delivered to ${destination}: route your reply through the orchestrator, not directly to another worker.`;
+    case 'worker_to_user':
+      return `NOT delivered to ${destination}: you are not permitted to address the user directly.`;
+    case 'forged_source':
+    case 'unknown_source':
+      return `NOT delivered to ${destination}: the bus rejected your message's source.`;
+    case null:
+      return `NOT delivered to ${destination}: this run has ended.`;
+    default: {
+      // Exhaustiveness fence: a new RouterDropReasonCode must add its wording
+      // above, or this stops compiling. A drop with no sender-facing sentence
+      // would silently reopen the AE-3 lie for that one code.
+      const _exhaustive: never = reasonCode;
+      void _exhaustive;
+      return `NOT delivered to ${destination}.`;
+    }
+  }
+}
 
 /**
  * One content block off a raw `assistant` SDKMessage, narrowed only as far as
@@ -270,7 +344,7 @@ export const BUS_SEND_TEXT_MAX_BYTES = 128 * 1024;
 export function handleBusSend(
   source: string,
   args: { destination: string; kind: string; text: string },
-  onEvent: (ev: BusEvent) => void,
+  onEvent: (ev: BusEvent) => BusRouteResult | void,
 ): ToolResult {
   if (!isValidBusDestination(args.destination)) {
     return toolError(`bus_send rejected: invalid destination ${JSON.stringify(args.destination)}`);
@@ -298,8 +372,12 @@ export function handleBusSend(
     kind: args.kind,
     text: args.text,
   };
-  onEvent(ev);
-  return { content: [{ type: 'text', text: `delivered to ${args.destination}` }] };
+  // `Cebab-x4rn` [security]: the router's verdict now decides the tool result.
+  // Before, `bus_send` answered "delivered to <destination>" here whatever the
+  // router did with the event (spec AE-3 oracle suppression, retired). A drop
+  // is reported truthfully now — see `BusRouteResult`.
+  const routing = onEvent(ev);
+  return { content: [{ type: 'text', text: busSendResultText(routing, args.destination) }] };
 }
 
 /**
@@ -313,7 +391,10 @@ export function handleBusSend(
  * once `settingSources` widens to `['user', 'project', 'local']` for
  * workers/chain participants.
  */
-export function makeBusToolServer(agentName: string, onEvent: (ev: BusEvent) => void) {
+export function makeBusToolServer(
+  agentName: string,
+  onEvent: (ev: BusEvent) => BusRouteResult | void,
+) {
   return createSdkMcpServer({
     name: 'cebab_bus',
     version: '0.0.0',
@@ -414,8 +495,12 @@ export type AgentSpec = {
 };
 
 export type AgentRunnerDeps = {
-  /** Router input: called in-process whenever an agent emits `bus_send`. */
-  onEvent: (ev: BusEvent) => void;
+  /**
+   * Router input: called in-process whenever an agent emits `bus_send`. Its
+   * `BusRouteResult` verdict is relayed back to the sending agent as the tool
+   * result (`Cebab-x4rn`) — a `void` return defaults to "delivered".
+   */
+  onEvent: (ev: BusEvent) => BusRouteResult | void;
   /** Per-message hook for transcript persistence + WS live forwarding. */
   onMessage?: (agentName: string, msg: SDKMessage) => void;
   /**

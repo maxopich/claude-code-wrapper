@@ -360,8 +360,12 @@ export function buildParticipantMuteChangedMsg(args: {
 // tripwire wired to nothing is worse than no tripwire, because it is counted.
 //
 // It could not have done the job in any case: the oracle it claimed to guard is
-// `handleBusSend`'s RETURN TEXT, which this function never reads. AE-3 pins that
-// invariant where it lives — by construction, in `orchestrator.mute.test.ts`.
+// `handleBusSend`'s RETURN TEXT, which this function never reads.
+//
+// `Cebab-x4rn`: that oracle no longer exists. AE-3's oracle-suppression goal was
+// retired on 2026-09-10 — a muted worker's `bus_send` now reads a truthful "NOT
+// delivered … you have been muted", and `orchestrator.mute.test.ts` pins that
+// truthful-reply contract in AE-3's place. See `docs/safety-and-security.md`.
 
 // ---------- Cluster C Phase 4c: pause + resume ----------
 //
