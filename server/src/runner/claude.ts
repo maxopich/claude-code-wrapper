@@ -140,7 +140,20 @@ export type RunOptions = {
  * ANTHROPIC_FOUNDRY_API_KEY, ANTHROPIC_FOUNDRY_AUTH_TOKEN, ANTHROPIC_AWS_API_KEY]`
  * and its backend-flag check covers `CLAUDE_CODE_USE_{BEDROCK,VERTEX,FOUNDRY,
  * ANTHROPIC_AWS,ANTHROPIC_GOOGLE_CLOUD,MANTLE,GATEWAY}` plus the OAuth-token
- * file descriptor, the WIF pair and the unix socket.
+ * file descriptor, the API-key file descriptor, the WIF pair and the unix
+ * socket.
+ *
+ * `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR` WAS MISSING UNTIL `Cebab-iira` (split out of `Cebab-6fax.23`). It
+ * is the file-descriptor sibling of `ANTHROPIC_API_KEY`: the CLI reads an API
+ * key from the numbered fd it names, which overrides the OAuth subscription
+ * exactly as an inline key would. It lives in the bundle's env-name registry
+ * (not the `CLI credential array` the backend-switch test walks), so
+ * `claude.env_scrubbed.test.ts` grew a second bundle-derived extraction — the
+ * credential FILE_DESCRIPTOR names — to keep it honest. Its settings.json
+ * counterpart, `apiKeyHelper` (a command the CLI runs to print a key), is the
+ * same exposure through a file rather than an env var. Cebab writes nothing to
+ * the operator's settings, so it cannot scrub that one; the maintainer decided
+ * the run is REFUSED while it is set (`Cebab-6fax.23`), not merely shown.
  *
  * `GATEWAY` WAS MISSING UNTIL Cebab-m99x, and the way it was missed is the
  * reason the test beside this list changed shape. The claim above — "the CLI's
@@ -176,6 +189,9 @@ export const SCRUBBED_ENV_VAR_NAMES: ReadonlyArray<string> = [
   'ANTHROPIC_AUTH_TOKEN',
   'CLAUDE_CODE_OAUTH_TOKEN',
   'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR',
+  // File-descriptor sibling of ANTHROPIC_API_KEY: the CLI reads a key from the
+  // named fd and it overrides OAuth just as an inline key would (Cebab-iira).
+  'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR',
   'AWS_BEARER_TOKEN_BEDROCK',
   'ANTHROPIC_FOUNDRY_API_KEY',
   'ANTHROPIC_FOUNDRY_AUTH_TOKEN',
@@ -220,6 +236,8 @@ export const SCRUBBED_ENV_POSTURES: Readonly<Record<string, string>> = {
   CLAUDE_CODE_OAUTH_TOKEN: 'Subscription auth (setup-token would override OAuth)',
   CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR:
     'Subscription auth (setup-token FD would override OAuth)',
+  CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR:
+    'Subscription auth (API key read from an fd would override OAuth)',
   AWS_BEARER_TOKEN_BEDROCK: 'Bedrock backend (bearer token re-routes off Anthropic API)',
   ANTHROPIC_FOUNDRY_API_KEY: 'Foundry backend (API key re-routes off Anthropic API)',
   ANTHROPIC_FOUNDRY_AUTH_TOKEN: 'Foundry backend (bearer token re-routes off Anthropic API)',
