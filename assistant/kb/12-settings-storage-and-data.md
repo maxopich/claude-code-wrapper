@@ -93,6 +93,10 @@ if you place it inside a checkout.
   prompts and replies, transcripts, and iteration files for a multi-agent run.
   (Sessions created before these moved here stay where they were written, because
   each session records its own absolute path.)
+- **Managed agents** — `~/.cebab/agents/<slug>/`. Full copies of the projects
+  you turned into managed agents, usually the largest thing Cebab stores.
+  Settings > Storage shows their total size; if it says not everything could be
+  counted, the real size may be larger.
 - **Original Claude session transcripts** — `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`.
   These belong to the `claude` CLI and are what `--resume` reads. They are keyed
   by the project's absolute working directory, which is why moving a project's

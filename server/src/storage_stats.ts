@@ -95,10 +95,9 @@ export function computeLogsDirSizeBytes(): number {
 }
 
 /**
- * Entry budget for the managed-agent size walk. Matches the per-agent copy cap
- * (`DEFAULT_MAX_FILES` in `managed_agent.ts`), so a single fully-sized managed
- * agent measures exactly while an aggregate beyond one agent's worth of entries
- * reports as truncated. Bounded on purpose: the walk runs against the operator's
+ * Entry budget for the managed-agent size walk. It counts EVERY directory entry
+ * (folders as well as files), so it is not comparable to the copy's per-agent
+ * file cap; past it the reading is reported as a floor, never as a total. Bounded on purpose: the walk runs against the operator's
  * real data dir on every Settings open, and the tree it sizes is the one this
  * feature deliberately lets grow to gigabytes — an unbounded walk there is the
  * hazard, not a nicety.
@@ -107,8 +106,8 @@ export const MANAGED_SIZE_ENTRY_BUDGET = 300_000;
 
 /**
  * On-disk size of every managed-agent tree under `<dataDir>/agents/`, via the
- * shared bounded async `dirSizeBytes`. `truncated` is true when the walk hit
- * its entry or depth cap, in which case `bytes` is a floor. A missing/empty
+ * shared bounded async `dirSizeBytes`. `truncated` is true when the walk skipped
+ * something (the entry budget ran out, the depth cap, an unreadable folder), in which case `bytes` is a floor. A missing/empty
  * `agents/` dir reports `{ bytes: 0, truncated: false }` — `dirSizeBytes`
  * swallows the ENOENT and returns 0 without touching the budget.
  *
@@ -119,9 +118,9 @@ export const MANAGED_SIZE_ENTRY_BUDGET = 300_000;
 export async function computeManagedAgentsSize(
   entryBudget = MANAGED_SIZE_ENTRY_BUDGET,
 ): Promise<{ bytes: number; truncated: boolean }> {
-  const budget = { entries: entryBudget };
+  const budget: { entries: number; truncated?: boolean } = { entries: entryBudget };
   const bytes = await dirSizeBytes(managedAgentsRoot(), budget);
-  return { bytes, truncated: budget.entries <= 0 };
+  return { bytes, truncated: budget.truncated === true };
 }
 
 /**

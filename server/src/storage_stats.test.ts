@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { ServerMsg } from '@cebab/shared';
 import { config } from './config.js';
 import { closeDb, getDb } from './db.js';
@@ -232,5 +232,86 @@ describe('executeStorageStats — autoReclaim (P0-C part 2b)', () => {
     // Same reason as the two tests above: the `await` is load-bearing only if
     // the envelope's managed-agent size is actually asserted.
     expect(lastStats().managedAgentsSizeBytes).toBe(0);
+  });
+});
+
+// Cebab-6fax.43.3 validation: the edges the first version got wrong.
+describe('managed-agents size: counts honestly at the edges', () => {
+  function put(rel: string, bytes: number): void {
+    const abs = path.join(config.dataDir, 'agents', rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, 'x'.repeat(bytes));
+  }
+  const deepChain = (): string =>
+    path.join('deep', ...Array.from({ length: 14 }, (_, i) => `d${i}`), 'bottom.txt');
+
+  test('exactly as many entries as the budget: counted in full, NOT truncated', async () => {
+    // Reddens: reading truncation off `budget.entries <= 0` after the walk -- the
+    // budget lands on exactly 0 with nothing skipped, and the UI then claimed the
+    // real size was larger.
+    put('solo/a.txt', 100);
+    put('solo/b.txt', 50); // three entries: solo/, a.txt, b.txt
+    expect(await computeManagedAgentsSize(3)).toEqual({ bytes: 150, truncated: false });
+    // CONTROL: one entry fewer really does skip something.
+    expect((await computeManagedAgentsSize(2)).truncated).toBe(true);
+  });
+
+  test('a too-deep subtree is flagged without zeroing its siblings', async () => {
+    // Result, whatever the readdir order: the too-deep file is flagged, the
+    // sibling is counted. The DETERMINISTIC guard against draining the budget is
+    // the dirSizeBytes test in stray_session_folders.test.ts -- readdir order is
+    // the filesystem's to choose, so this case alone cannot always see a drain.
+    put(deepChain(), 500);
+    put('zz/shallow.txt', 700);
+    expect(await computeManagedAgentsSize()).toEqual({ bytes: 700, truncated: true });
+  });
+
+  test.runIf(process.platform !== 'win32' && process.getuid?.() !== 0)(
+    'an unreadable folder is flagged, never silently left out',
+    async () => {
+      // Reddens: treating EACCES like a vanished folder -- the total shrank and
+      // `truncated` stayed false.
+      put('a/ok.txt', 10);
+      put('a/locked/secret.bin', 9000);
+      const locked = path.join(config.dataDir, 'agents', 'a', 'locked');
+      fs.chmodSync(locked, 0o000);
+      try {
+        expect(await computeManagedAgentsSize()).toEqual({ bytes: 10, truncated: true });
+      } finally {
+        fs.chmodSync(locked, 0o755);
+      }
+    },
+  );
+
+  test('the walked size and its flag reach the storage_stats message', async () => {
+    // Reddens: an envelope that hardcodes 0 / false and never uses the walk.
+    put('a/x.txt', 150);
+    await executeStorageStats({ send: (m) => sent.push(m) });
+    expect(lastStats().managedAgentsSizeBytes).toBe(150);
+    expect(lastStats().managedAgentsSizeTruncated).toBe(false);
+    sent = [];
+    put(deepChain(), 1);
+    await executeStorageStats({ send: (m) => sent.push(m) });
+    expect(lastStats().managedAgentsSizeTruncated).toBe(true);
+  });
+
+  test('the walk never makes a synchronous fs call on the managed trees', async () => {
+    // Reddens: a readdirSync/statSync walk. It would park the event loop on the
+    // gigabyte trees this reading exists to measure, and every other test here
+    // would still pass.
+    put('a/x.txt', 1);
+    put('a/sub/y.txt', 1);
+    const root = path.join(config.dataDir, 'agents');
+    const underRoot = (c: unknown[]): boolean => String(c[0]).startsWith(root);
+    const rd = vi.spyOn(fs, 'readdirSync');
+    const st = vi.spyOn(fs, 'statSync');
+    try {
+      await executeStorageStats({ send: (m) => sent.push(m) });
+      expect(rd.mock.calls.filter(underRoot)).toEqual([]);
+      expect(st.mock.calls.filter(underRoot)).toEqual([]);
+    } finally {
+      rd.mockRestore();
+      st.mockRestore();
+    }
   });
 });

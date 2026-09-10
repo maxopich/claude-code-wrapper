@@ -320,7 +320,7 @@ describe('SettingsModal — Storage section', () => {
     const text = managedSizeText();
     expect(text).toContain('2.0 KB');
     expect(text).not.toContain('≥');
-    expect(storageText()).not.toContain('scan capped');
+    expect(storageText()).not.toContain('not everything could be counted');
   });
 
   test('a truncated managed-agent walk shows a floor (≥) and says it is capped', () => {
@@ -328,7 +328,7 @@ describe('SettingsModal — Storage section', () => {
     feed({ managedAgentsSizeBytes: 2048, managedAgentsSizeTruncated: true });
     expect(managedSizeText()).toContain('≥');
     expect(managedSizeText()).toContain('2.0 KB');
-    expect(storageText()).toContain('scan capped');
+    expect(storageText()).toContain('not everything could be counted');
   });
 
   test('lastPurgeAt null → "Cleanup hasn\'t run yet."', () => {

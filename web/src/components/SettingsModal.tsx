@@ -416,7 +416,9 @@ export function SettingsModal(props: {
                   {storage.managedAgentsSizeTruncated ? '≥ ' : ''}
                   {formatBytes(storage.managedAgentsSizeBytes)}
                 </code>
-                {storage.managedAgentsSizeTruncated ? ' (scan capped — actual size is larger)' : ''}
+                {storage.managedAgentsSizeTruncated
+                  ? ' (not everything could be counted — the real size may be larger)'
+                  : ''}
               </p>
               <ul className="settings-storage-tables">
                 {storage.tableStats.map((t) => (
