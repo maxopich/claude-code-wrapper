@@ -6803,7 +6803,6 @@ async function runOneTurn(
     });
     return;
   }
-  if (!msg.sessionId) createSession(sessionId, project.id);
   touchProject(project.id);
 
   // Cebab-8x8.1.2: the Cebab-owned help assistant runs through this very path
@@ -6828,7 +6827,42 @@ async function runOneTurn(
   // `resolveProjectAuthority` returns zero settings layers and all three TOFU
   // gates short-circuit — it participates (so "every spawn is gated" stays
   // literally true) but there is nothing under `settingSources: []` to gate.
-  const turnDenials = await gateProjectsForSpawn(conn, [project.id], assistant ? [] : undefined);
+  //
+  // `Cebab-6fax.17`: the gate is awaited HERE — before the `sessions` row is
+  // written and OUTSIDE the turn's try/finally, whose teardown owns the runner,
+  // the lifecycle registration and the logger, none of which exist yet. An
+  // operator DECLINING a trust or env-injection prompt (or a disconnect mid-
+  // prompt) rejects the parked promise with a `GateAbandonedError`, whose
+  // `name` is `AbortError`. Left to propagate it reached the dispatch-level
+  // catch, which sends a SESSIONLESS `wrapper_error` — so the chat stayed at
+  // "thinking" forever, nothing having resolved the turn — and, because
+  // `createSession` used to run first, left an orphan `sessions` row with no
+  // events. Same structural gap the bus start paths closed by creating the
+  // session row only after the gate clears. Catch it here: a cancellation is
+  // `aborted`, not `process_crashed` (`classifyHandlerFailure` names it), the
+  // error is scoped to THIS session so its "thinking" state clears, and the
+  // turn ends before any row is written. A genuine throw keeps its
+  // `process_crashed` kind and still reports against the session.
+  let turnDenials: McpDenials;
+  try {
+    turnDenials = await gateProjectsForSpawn(conn, [project.id], assistant ? [] : undefined);
+  } catch (err) {
+    const kind = classifyHandlerFailure(err);
+    const message =
+      kind === 'aborted'
+        ? 'Turn cancelled: you declined a trust or environment prompt before it started.'
+        : err instanceof Error
+          ? err.message
+          : String(err);
+    send(conn.ws, { type: 'wrapper_error', sessionId, kind, message });
+    send(conn.ws, { type: 'session_running', projectId: project.id, sessionId, running: false });
+    return;
+  }
+
+  // The gate cleared. Only now does a brand-new turn get its `sessions` row, so
+  // a declined prompt above leaves none. A resume (msg.sessionId set) reuses the
+  // row F5 already validated and never creates one here.
+  if (!msg.sessionId) createSession(sessionId, project.id);
 
   const ac = new AbortController();
 

@@ -48,6 +48,20 @@ export function runOneTurnBody(source: string): string {
   return end === -1 ? stripped.slice(at) : stripped.slice(at, end);
 }
 
+/**
+ * The offset of the MAIN turn try — the one whose `finally` undoes the
+ * lifecycle registrations. `Cebab-6fax.17` added an EARLIER `try` around the
+ * spawn gate (a cancelled gate is caught and reported, not left to propagate),
+ * so `indexOf('try {')` no longer resolves to the block these assertions are
+ * about. The main try is the one wrapping the SDK stream loop, so anchor on the
+ * `for await` and walk back to its opening `try`.
+ */
+export function mainTurnTryAt(body: string): number {
+  const forAwaitAt = body.indexOf('for await');
+  if (forAwaitAt === -1) return -1;
+  return body.lastIndexOf('try {', forAwaitAt);
+}
+
 describe('[security] runOneTurn registers inside the block that unregisters', () => {
   const source = fs.readFileSync(SERVER_TS, 'utf8');
   const body = runOneTurnBody(source);
@@ -61,16 +75,24 @@ describe('[security] runOneTurn registers inside the block that unregisters', ()
   });
 
   test('the try opens before the statements that can throw', () => {
-    const tryAt = body.indexOf('try {');
-    expect(tryAt, 'no try in runOneTurn — this gate is stale').toBeGreaterThan(-1);
-    for (const stmt of [
-      'setSessionPermissionMode(sessionId',
-      "type: 'session_running'",
-      "type: 'permission_mode_changed'",
-    ]) {
-      const at = body.indexOf(stmt);
+    const tryAt = mainTurnTryAt(body);
+    expect(tryAt, 'no main turn try in runOneTurn — this gate is stale').toBeGreaterThan(-1);
+    // `setSessionPermissionMode` is the first throwing statement inside the main
+    // try and appears only there, so it anchors the block unambiguously.
+    const permAt = body.indexOf('setSessionPermissionMode(sessionId');
+    expect(permAt, 'setSessionPermissionMode is gone — this gate is stale').toBeGreaterThan(-1);
+    expect(
+      permAt,
+      'setSessionPermissionMode runs before the try that would clean up after it',
+    ).toBeGreaterThan(tryAt);
+    // The two sends follow it, inside the same try. Search FROM `permAt` so the
+    // running:false / wrapper_error sends that `Cebab-6fax.17` added to the
+    // earlier gate-cancel catch — a different block, before the main try — are
+    // not what these match.
+    for (const stmt of ["type: 'session_running'", "type: 'permission_mode_changed'"]) {
+      const at = body.indexOf(stmt, permAt);
       expect(at, `${stmt} is gone — this gate is stale`).toBeGreaterThan(-1);
-      expect(at, `${stmt} runs before the try that would clean up after it`).toBeGreaterThan(tryAt);
+      expect(at, `${stmt} runs inside the try that would clean up after it`).toBeGreaterThan(tryAt);
     }
   });
 
@@ -80,7 +102,7 @@ describe('[security] runOneTurn registers inside the block that unregisters', ()
     // registry write with nothing between them that can throw, and the
     // `finally` needs `unregister` in scope. What must not drift is a THIRD
     // statement appearing in that gap.
-    const tryAt = body.indexOf('try {');
+    const tryAt = mainTurnTryAt(body);
     expect(body.indexOf('registerQuery(')).toBeLessThan(tryAt);
     expect(body.indexOf('conn.inFlight.set(sessionId')).toBeLessThan(tryAt);
     const between = body.slice(body.indexOf('conn.inFlight.set(sessionId'), tryAt);
