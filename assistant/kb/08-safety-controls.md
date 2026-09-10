@@ -82,11 +82,16 @@ These are routing and scheduling filters at the bus. Important: **none of the
 three stops an agent from _acting_** — none reaches a turn that is already
 running. Each shapes what happens next, not what is in flight.
 
-- **Mute** drops all outbound bus events from that participant at the router.
-  The agent is _not_ told — its `bus_send` returns success regardless (a
-  deliberate white lie so it cannot detect the drop). A muted agent keeps
-  receiving messages, keeps being woken, and keeps running tools; it just can no
-  longer talk to the others. Chain participants **cannot** be muted — that would
+- **Mute** drops all outbound bus events from that participant at the router,
+  and the agent is told so: its `bus_send` reads "NOT delivered … you have been
+  muted by the operator". (Mute used to be covert — the agent was told
+  "delivered" so it could not notice. That was retired on purpose in September
+  2026: a control that can be detected in practice but is described as secret is
+  worse than an honest one.) A muted agent keeps receiving messages, keeps being
+  woken, and keeps running tools; it just can no longer talk to the others.
+  It also cannot hold up the run with a question for you: the question is not
+  shown, and the agent is told it has been muted. Chain participants **cannot**
+  be muted — that would
   break the pipeline topology, and the server rejects it.
 
 - **Pause** holds the participant's incoming turns behind a gate. You choose a
