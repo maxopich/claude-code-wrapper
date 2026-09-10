@@ -17,6 +17,8 @@ import path from 'node:path';
 import type { ServerMsg } from '@cebab/shared';
 import { config } from './config.js';
 import { getDb } from './db.js';
+import { managedAgentsRoot } from './managed_agent.js';
+import { dirSizeBytes } from './stray_session_folders.js';
 import { getSetting } from './repo/settings.js';
 import {
   LAST_AUTO_RECLAIM_AT_KEY,
@@ -93,6 +95,36 @@ export function computeLogsDirSizeBytes(): number {
 }
 
 /**
+ * Entry budget for the managed-agent size walk. Matches the per-agent copy cap
+ * (`DEFAULT_MAX_FILES` in `managed_agent.ts`), so a single fully-sized managed
+ * agent measures exactly while an aggregate beyond one agent's worth of entries
+ * reports as truncated. Bounded on purpose: the walk runs against the operator's
+ * real data dir on every Settings open, and the tree it sizes is the one this
+ * feature deliberately lets grow to gigabytes — an unbounded walk there is the
+ * hazard, not a nicety.
+ */
+export const MANAGED_SIZE_ENTRY_BUDGET = 300_000;
+
+/**
+ * On-disk size of every managed-agent tree under `<dataDir>/agents/`, via the
+ * shared bounded async `dirSizeBytes`. `truncated` is true when the walk hit
+ * its entry or depth cap, in which case `bytes` is a floor. A missing/empty
+ * `agents/` dir reports `{ bytes: 0, truncated: false }` — `dirSizeBytes`
+ * swallows the ENOENT and returns 0 without touching the budget.
+ *
+ * `entryBudget` is injectable so a test can force truncation on a small fixture
+ * (exceeds budget → truncated) and confirm an under-budget control counts
+ * exactly.
+ */
+export async function computeManagedAgentsSize(
+  entryBudget = MANAGED_SIZE_ENTRY_BUDGET,
+): Promise<{ bytes: number; truncated: boolean }> {
+  const budget = { entries: entryBudget };
+  const bytes = await dirSizeBytes(managedAgentsRoot(), budget);
+  return { bytes, truncated: budget.entries <= 0 };
+}
+
+/**
  * Row count per allowlisted table. Each name is a compile-time literal from
  * `STORAGE_STAT_TABLES` (never input), so the interpolation is injection-safe.
  * A per-table failure (e.g. a table missing on an older schema) degrades to
@@ -115,11 +147,14 @@ export function computeTableStats(): { table: string; rows: number }[] {
  * surfaces is the purge heartbeat the cron writes into the settings table.
  * `getSetting` returns null until the cron has run once — passed through as-is.
  */
-export function executeStorageStats(args: { send: (msg: ServerMsg) => void }): void {
+export async function executeStorageStats(args: { send: (msg: ServerMsg) => void }): Promise<void> {
+  const managed = await computeManagedAgentsSize();
   args.send({
     type: 'storage_stats',
     dbSizeBytes: computeDbSizeBytes(),
     logsDirSizeBytes: computeLogsDirSizeBytes(),
+    managedAgentsSizeBytes: managed.bytes,
+    managedAgentsSizeTruncated: managed.truncated,
     lastPurgeAt: getSetting<number>(LAST_PURGE_AT_KEY),
     lastPurgeCount: getSetting<number>(LAST_PURGE_COUNT_KEY),
     tableStats: computeTableStats(),

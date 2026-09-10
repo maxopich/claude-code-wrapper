@@ -411,7 +411,12 @@ export function SettingsModal(props: {
             <>
               <p className="hint">
                 Database <code>{formatBytes(storage.dbSizeBytes)}</code> · session logs{' '}
-                <code>{formatBytes(storage.logsDirSizeBytes)}</code>
+                <code>{formatBytes(storage.logsDirSizeBytes)}</code> · managed agents{' '}
+                <code data-testid="storage-managed-size">
+                  {storage.managedAgentsSizeTruncated ? '≥ ' : ''}
+                  {formatBytes(storage.managedAgentsSizeBytes)}
+                </code>
+                {storage.managedAgentsSizeTruncated ? ' (scan capped — actual size is larger)' : ''}
               </p>
               <ul className="settings-storage-tables">
                 {storage.tableStats.map((t) => (

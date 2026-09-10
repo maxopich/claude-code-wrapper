@@ -20,6 +20,7 @@ import {
   STORAGE_STAT_TABLES,
   computeDbSizeBytes,
   computeLogsDirSizeBytes,
+  computeManagedAgentsSize,
   computeTableStats,
   executeStorageStats,
 } from './storage_stats.js';
@@ -109,18 +110,63 @@ describe('computeLogsDirSizeBytes', () => {
   });
 });
 
+// Cebab-6fax.43.3: the managed-agent trees under `<dataDir>/agents/` are the
+// feature that deliberately makes gigabyte-scale copies, so their size is what
+// an operator watches. A tree over the entry budget must report TRUNCATED (a
+// floor), never a silently-smaller number; a control under the budget counts
+// exactly.
+describe('computeManagedAgentsSize', () => {
+  function makeAgentFile(slug: string, rel: string, bytes: number): void {
+    const abs = path.join(config.dataDir, 'agents', slug, rel);
+    fs.mkdirSync(path.dirname(abs), { recursive: true });
+    fs.writeFileSync(abs, 'x'.repeat(bytes));
+  }
+
+  test('sums every managed tree exactly when under the entry budget', async () => {
+    makeAgentFile('alpha', 'a.txt', 100);
+    makeAgentFile('alpha', 'src/b.txt', 50);
+    makeAgentFile('beta', 'c.txt', 30);
+
+    const res = await computeManagedAgentsSize();
+    expect(res.truncated).toBe(false);
+    expect(res.bytes).toBe(180);
+  });
+
+  test('reports 0 and not truncated when no managed agents exist', async () => {
+    const res = await computeManagedAgentsSize();
+    expect(res).toEqual({ bytes: 0, truncated: false });
+  });
+
+  test('a tree that exceeds the entry budget reports truncated, not a smaller number', async () => {
+    // Six entries (two slug dirs + four files) against a budget of 2: the walk
+    // stops early, so the reported byte total is a floor and `truncated` says so.
+    for (let i = 0; i < 4; i++) makeAgentFile(`slug${i}`, `f${i}.txt`, 1000);
+
+    const capped = await computeManagedAgentsSize(2);
+    expect(capped.truncated).toBe(true);
+    expect(capped.bytes).toBeLessThan(4000); // did not count the whole tree
+
+    // Same tree under a generous budget counts every byte and is not truncated.
+    const full = await computeManagedAgentsSize();
+    expect(full.truncated).toBe(false);
+    expect(full.bytes).toBe(4000);
+  });
+});
+
 describe('executeStorageStats', () => {
-  test('sends one storage_stats envelope with sizes, counts, and cadence echo', () => {
+  test('sends one storage_stats envelope with sizes, counts, and cadence echo', async () => {
     seedSessions(['s1', 's2']);
     insertEventRow('s1', 1);
     fs.writeFileSync(path.join(config.logsDir, 's1.jsonl'), 'z'.repeat(42));
 
-    executeStorageStats({ send: (m) => sent.push(m) });
+    await executeStorageStats({ send: (m) => sent.push(m) });
 
     expect(sent).toHaveLength(1);
     const stats = lastStats();
     expect(stats.dbSizeBytes).toBeGreaterThan(0);
     expect(stats.logsDirSizeBytes).toBe(42);
+    expect(stats.managedAgentsSizeBytes).toBe(0);
+    expect(stats.managedAgentsSizeTruncated).toBe(false);
     expect(stats.purgeIntervalMs).toBe(SESSION_PURGE_INTERVAL_MS);
     expect(stats.purgeAfterMs).toBe(SESSION_PURGE_AFTER_MS);
     const byTable = Object.fromEntries(stats.tableStats.map((s) => [s.table, s.rows]));
@@ -128,15 +174,20 @@ describe('executeStorageStats', () => {
     expect(byTable.events).toBe(1);
   });
 
-  test('passes the purge heartbeat through (null until the cron runs)', () => {
-    executeStorageStats({ send: (m) => sent.push(m) });
+  test('passes the purge heartbeat through (null until the cron runs)', async () => {
+    await executeStorageStats({ send: (m) => sent.push(m) });
     expect(lastStats().lastPurgeAt).toBeNull();
     expect(lastStats().lastPurgeCount).toBeNull();
+    // The executor is async now BECAUSE it also walks the managed-agent trees
+    // (Cebab-6fax.43.3); every envelope carries that size, so this test pins it
+    // too — otherwise the `await` above would be a no-op the revert-check can't
+    // distinguish from a test that never depended on the change.
+    expect(lastStats().managedAgentsSizeBytes).toBe(0);
 
     sent = [];
     setSetting<number>(LAST_PURGE_AT_KEY, 1_700_000_000_000);
     setSetting<number>(LAST_PURGE_COUNT_KEY, 4);
-    executeStorageStats({ send: (m) => sent.push(m) });
+    await executeStorageStats({ send: (m) => sent.push(m) });
     expect(lastStats().lastPurgeAt).toBe(1_700_000_000_000);
     expect(lastStats().lastPurgeCount).toBe(4);
   });
@@ -153,27 +204,33 @@ describe('executeStorageStats — autoReclaim (P0-C part 2b)', () => {
     config.autoReclaimDays = savedDays;
   });
 
-  test('off when CEBAB_AUTO_RECLAIM_DAYS is unset (config null)', () => {
+  test('off when CEBAB_AUTO_RECLAIM_DAYS is unset (config null)', async () => {
     config.autoReclaimDays = null;
-    executeStorageStats({ send: (m) => sent.push(m) });
+    await executeStorageStats({ send: (m) => sent.push(m) });
     expect(lastStats().autoReclaim).toEqual({
       enabled: false,
       idleDays: null,
       lastRunAt: null,
       lastCount: null,
     });
+    // The async managed-agent walk is why this test now awaits — pin its field
+    // so the dependency is real, not incidental (see the purge test above).
+    expect(lastStats().managedAgentsSizeBytes).toBe(0);
   });
 
-  test('on with idleDays + heartbeat passthrough when enabled', () => {
+  test('on with idleDays + heartbeat passthrough when enabled', async () => {
     config.autoReclaimDays = 30;
     setSetting<number>(LAST_AUTO_RECLAIM_AT_KEY, 1_700_000_000_000);
     setSetting<number>(LAST_AUTO_RECLAIM_COUNT_KEY, 2);
-    executeStorageStats({ send: (m) => sent.push(m) });
+    await executeStorageStats({ send: (m) => sent.push(m) });
     expect(lastStats().autoReclaim).toEqual({
       enabled: true,
       idleDays: 30,
       lastRunAt: 1_700_000_000_000,
       lastCount: 2,
     });
+    // Same reason as the two tests above: the `await` is load-bearing only if
+    // the envelope's managed-agent size is actually asserted.
+    expect(lastStats().managedAgentsSizeBytes).toBe(0);
   });
 });

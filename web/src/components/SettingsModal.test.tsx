@@ -264,6 +264,8 @@ describe('SettingsModal — Storage section', () => {
       type: 'storage_stats',
       dbSizeBytes: 2048,
       logsDirSizeBytes: 1536,
+      managedAgentsSizeBytes: 0,
+      managedAgentsSizeTruncated: false,
       lastPurgeAt: null,
       lastPurgeCount: null,
       tableStats: [
@@ -303,6 +305,30 @@ describe('SettingsModal — Storage section', () => {
     expect(text).toContain('3 rows');
     expect(text).toContain('6h'); // 21,600,000 ms interval
     expect(text).toContain('7d'); // 604,800,000 ms cutoff
+  });
+
+  // Cebab-6fax.43.3: the managed-agent tree size, and its truncation flag —
+  // an operator reads a plain number as complete, so a capped walk must SAY so
+  // rather than show a silently-smaller figure.
+  function managedSizeText(): string {
+    return document.querySelector('[data-testid="storage-managed-size"]')?.textContent ?? '';
+  }
+
+  test('renders the managed-agent size exactly when the walk was not capped', () => {
+    renderWithStorage();
+    feed({ managedAgentsSizeBytes: 2048, managedAgentsSizeTruncated: false });
+    const text = managedSizeText();
+    expect(text).toContain('2.0 KB');
+    expect(text).not.toContain('≥');
+    expect(storageText()).not.toContain('scan capped');
+  });
+
+  test('a truncated managed-agent walk shows a floor (≥) and says it is capped', () => {
+    renderWithStorage();
+    feed({ managedAgentsSizeBytes: 2048, managedAgentsSizeTruncated: true });
+    expect(managedSizeText()).toContain('≥');
+    expect(managedSizeText()).toContain('2.0 KB');
+    expect(storageText()).toContain('scan capped');
   });
 
   test('lastPurgeAt null → "Cleanup hasn\'t run yet."', () => {

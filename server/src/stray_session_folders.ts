@@ -88,9 +88,31 @@ function normalizeForCompare(p: string): string {
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
-/** Recursive size, bounded. Returns `null` once a cap is hit. */
-async function dirSizeBytes(dir: string, budget: { entries: number }, depth = 0): Promise<number> {
-  if (depth > MAX_SCAN_DEPTH) return 0;
+/**
+ * Recursive on-disk size of `dir`, bounded by a shared entry budget. Exported
+ * because `storage_stats.ts` measures the managed-agent trees with the SAME
+ * sizer (one bounded async walk, never a second implementation, never a sync
+ * one that would park the event loop on exactly the gigabyte trees it exists
+ * to size).
+ *
+ * TRUNCATION is a caller-side read of the budget: after the call, an exhausted
+ * `budget.entries <= 0` means the total is a floor, not the exact size. The
+ * DEPTH cap folds into the same channel — hitting it drains the budget rather
+ * than silently returning 0, because a size that quietly stops counting reads
+ * as complete when it is not (a managed copy's `node_modules` can nest past the
+ * depth cap). Draining is deliberately coarse: one too-deep subtree truncates
+ * the rest of the walk, which over-reports "truncated" but never under-reports
+ * bytes as if they were the whole story.
+ */
+export async function dirSizeBytes(
+  dir: string,
+  budget: { entries: number },
+  depth = 0,
+): Promise<number> {
+  if (depth > MAX_SCAN_DEPTH) {
+    budget.entries = -1; // signal truncation; entries below this are uncounted.
+    return 0;
+  }
   let total = 0;
   let entries;
   try {
