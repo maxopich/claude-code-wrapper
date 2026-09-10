@@ -41,6 +41,7 @@ function render(over: Partial<ManagedFileEditorProps> = {}): ManagedFileEditorPr
     canSave: true,
     saving: false,
     savedAt: null,
+    trusted: true,
     saveRefusal: null,
     onKind: vi.fn(),
     onDraft: vi.fn(),
@@ -127,6 +128,15 @@ describe('saving', () => {
     expect(text()).toContain('next session');
   });
 
+  test('on an untrusted agent the save message says when it will actually load (Cebab-6fax.43.1)', () => {
+    // Reddens: dropping the untrusted branch -- the editor then promises that the
+    // next session loads a file an untrusted agent's chats never read. Managed
+    // copies start untrusted, so this is the ordinary case, not an edge.
+    render({ savedAt: 123, canSave: false, trusted: false });
+    expect(text()).toContain('Trusted');
+    expect(text()).not.toContain('next session');
+  });
+
   test('Enter inserts a newline rather than saving', () => {
     // The composer's GrowTextarea submits on Enter by default. In a FILE that
     // would write to disk on a line break.
@@ -172,7 +182,7 @@ describe('[a11y] the tab strip', () => {
   test('exactly one tab is in the tab order', () => {
     render({ kind: 'mcp' });
     const tabs = [...container.querySelectorAll('[role="tab"]')] as HTMLButtonElement[];
-    expect(tabs).toHaveLength(3);
+    expect(tabs).toHaveLength(4);
     expect(tabs.filter((t) => t.tabIndex === 0)).toHaveLength(1);
     expect(tabs.find((t) => t.tabIndex === 0)!.getAttribute('aria-selected')).toBe('true');
   });
@@ -187,7 +197,7 @@ describe('[a11y] the tab strip', () => {
   });
 
   test.each([
-    ['ArrowRight', 'settings', 'mcp'],
+    ['ArrowRight', 'settings', 'settings_local'],
     ['ArrowLeft', 'settings', 'claude_md'],
     ['End', 'settings', 'claude_md'],
     ['Home', 'claude_md', 'settings'],

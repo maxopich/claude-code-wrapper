@@ -621,15 +621,24 @@ export type SessionPermissionMode = 'default' | 'acceptEdits';
  * this feature. The server maps each to a fixed relative path
  * (`MANAGED_EDITABLE` in `server/src/managed_file.ts`); the wire never carries
  * one, so there is no traversal input to validate and no sanitiser to get
- * wrong. Adding a fourth kind is a deliberate edit in two places rather than a
+ * wrong. Adding a kind is a deliberate edit in two places rather than a
  * client sending a longer string.
+ *
+ * `Cebab-6fax.43.1` added `settings_local` as a fourth FIXED LITERAL — never a
+ * pattern, path parameter or `settings*.json` glob, which would put a path back
+ * on the wire and destroy the property this set exists for. The set may grow by
+ * decision, never by mechanism; re-read that bead before proposing a fifth. It
+ * earns its place because the copy engine duplicates `settings.local.json`,
+ * Trust LOADS it, and it is therefore the one copied file that can change the
+ * agent's posture yet is the one the operator cannot otherwise see or edit.
  */
-export type ManagedFileKind = 'settings' | 'mcp' | 'claude_md';
+export type ManagedFileKind = 'settings' | 'mcp' | 'claude_md' | 'settings_local';
 
 export const MANAGED_FILE_KIND_SET: ReadonlySet<ManagedFileKind> = new Set([
   'settings',
   'mcp',
   'claude_md',
+  'settings_local',
 ]);
 
 export function isManagedFileKind(v: unknown): v is ManagedFileKind {

@@ -439,3 +439,22 @@ describe('[security] permission_decision is a closed pair (Cebab-6fax.40)', () =
     expect(validateClientMsg({ ...base }).ok).toBe(false);
   });
 });
+
+describe('the settings_local kind crosses the wire (Cebab-6fax.43.1)', () => {
+  test('read_managed_file and write_managed_file accept it', () => {
+    // Reddens: dropping settings_local from the shared kind set. The browser's
+    // edits for the fourth file would then be rejected at the wire while every
+    // other test stayed green. SAMPLES keeps one entry per message type, so the
+    // new kind is exercised here rather than there.
+    const read = overTheWire({ type: 'read_managed_file', projectId: 1, kind: 'settings_local' });
+    expect(read.ok ? null : read.reason).toBeNull();
+    const write = overTheWire({
+      type: 'write_managed_file',
+      projectId: 1,
+      kind: 'settings_local',
+      content: '{}',
+      baseMtimeMs: 0,
+    });
+    expect(write.ok ? null : write.reason).toBeNull();
+  });
+});
