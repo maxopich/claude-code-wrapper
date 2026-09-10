@@ -92,8 +92,11 @@ const SAFE_SID_RE = /^[a-zA-Z0-9_-]{1,128}$/;
  * REMOVED attests nothing about what REMAINS — which is the same
  * looks-like-assurance-but-isn't failure this bead is about. The row attests
  * intent and policy; the artifact attests itself.
+ *
+ * Bumped for `Cebab-6fax.32`: the redacted export now also omits hook output,
+ * so a row written before that change must stay distinguishable from one after.
  */
-export const REDACTED_CONTENT_POLICY = 'redacted/no-stream-partials';
+export const REDACTED_CONTENT_POLICY = 'redacted/no-stream-partials/no-hook-output';
 
 /**
  * Stands in for a line the export could not parse — a hand-edited log, or (the

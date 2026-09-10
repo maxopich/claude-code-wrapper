@@ -815,7 +815,10 @@ function walk(
       continue;
     }
 
-    if (maskHookOutput && HOOK_OUTPUT_FIELDS.has(key) && typeof raw === 'string') {
+    if (maskHookOutput && HOOK_OUTPUT_FIELDS.has(key)) {
+      // ANY TYPE, not only strings (the D05 precedent above): an array or object
+      // body would otherwise fall through to the value walk, which cannot
+      // recognise a plain password, and ship it.
       // Cebab-6fax.32: BEFORE the value-pattern walk below, so a plain password
       // in hook stdout — which matches no vendor shape — is dropped rather than
       // shipped, and the marker (not `<redacted>`) is what a reader sees.

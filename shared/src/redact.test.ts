@@ -1220,6 +1220,18 @@ describe('[security] hook output omitted from share surfaces (Cebab-6fax.32)', (
     expect((local.redacted as Record<string, string>).stdout).not.toBe(HOOK_OUTPUT_OMITTED);
   });
 
+  it('a NON-string hook body is omitted too (fails closed)', () => {
+    // Reddens: restoring the `typeof raw === 'string'` guard -- an array or object
+    // body then falls through to the value walk, which cannot recognise a plain
+    // password, and it ships.
+    const body = { ...hookResponse(), stdout: [PASSWORD], output: { text: PASSWORD } };
+    const r = redactSensitive(body, { omitHookOutput: true });
+    expect(JSON.stringify(r.redacted)).not.toContain(PASSWORD);
+    const obj = r.redacted as Record<string, unknown>;
+    expect(obj.stdout).toBe(HOOK_OUTPUT_OMITTED);
+    expect(obj.output).toBe(HOOK_OUTPUT_OMITTED);
+  });
+
   it('covers the hook_progress sibling; NOT keyed on the field name (control)', () => {
     // Reddens: narrowing the predicate to hook_response alone. hook_progress
     // carries the identical stdout/stderr/output and is durable too.

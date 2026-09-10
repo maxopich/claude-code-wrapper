@@ -282,6 +282,37 @@ describe('[security] searchSessions — containment / redaction invariant (C4-5 
     expect(raw.results[0]!.snippet).toContain(PASSWORD);
   });
 
+  test('[Cebab-6fax.32] the omission marker is not searchable: its words match no hook row', () => {
+    const pid = seedProject('p');
+    createSession('hk2', pid);
+    insertEvent(
+      'hk2',
+      nextSeq('hk2'),
+      'system',
+      'hook_response',
+      JSON.stringify({
+        type: 'system',
+        subtype: 'hook_response',
+        hook_name: 'SessionStart',
+        outcome: 'success',
+        stdout: 'please export DB_PASS before running',
+        stderr: '',
+        output: '',
+      }),
+    );
+    // Reddens: dropping the marker skip in the haystack. The raw LIKE matches the
+    // hidden stdout ('export') or the key name ('output'), and the marker's own
+    // words then satisfy the redacted haystack -- a hook row whose snippet is
+    // Cebab's marker, and a hint at what the hidden body said.
+    expect(searchSessions({ query: 'export', scope: 'all_projects' }).results).toEqual([]);
+    expect(searchSessions({ query: 'output', scope: 'all_projects' }).results).toEqual([]);
+    // CONTROL (folded): the raw opt-in still finds the row, so the empty result
+    // above is the marker skip, not a missing row.
+    expect(
+      searchSessions({ query: 'export', scope: 'all_projects', raw: true }).results,
+    ).toHaveLength(1);
+  });
+
   test('multi-agent text secrets (Tier-3 inline) never surface in snippets', () => {
     const pid = seedProject('p');
     const sid = 'bus-1';
