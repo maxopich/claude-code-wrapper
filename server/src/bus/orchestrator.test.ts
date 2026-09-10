@@ -426,15 +426,18 @@ describe('createOrchestratorRouter — hop-budget enforcement', () => {
     errSpy.mockRestore();
   });
 
-  test('forwardCebabEvent counts too, even when its row does not land', () => {
-    // The second of the router's two counter sites. Briefings and roster
-    // prompts go through here, so a session whose writes are failing from the
-    // start would otherwise never advance the counter at all.
-    //
-    // Budget 3 against TWO cebab events + one worker hop, deliberately: with
-    // a smaller budget the hop's own increment could reach the cap by itself,
-    // and this would pass whether or not `forwardCebabEvent` counted.
-    const { router, sessionId, onEnded, deliver, errSpy } = buildUnpersistableRouter(3);
+  test('forwardCebabEvent rows never count — even when the persist throws', () => {
+    // `Cebab-6fax.19`: Cebab's own framing (roster prompts, the CLAUDE.md
+    // marker) does not bump the counter, and this pins that on the failing-
+    // persist branch — the one place register B25's "bump outside the try"
+    // reasoning lives (now for `handleEvent` alone). Budget 2, then TWO cebab
+    // briefings (persist throws, still uncharged), then two worker hops. Were
+    // the briefings charged, they alone would sit at the cap and the first
+    // hop's deliver would be refused; because they are free, hop 1 delivers
+    // (count 1) and hop 2 is the boundary trip (count 2 === budget). So
+    // `deliver` fires exactly once — proving the cebab rows were free AND that
+    // the counter still advances when the write fails.
+    const { router, sessionId, onEnded, deliver, errSpy } = buildUnpersistableRouter(2);
     for (const agent of ['reviewer', 'editor']) {
       router.forwardCebabEvent({
         ts: 1,
@@ -445,10 +448,13 @@ describe('createOrchestratorRouter — hop-budget enforcement', () => {
       });
     }
     router.handleEvent(
-      makeEvent({ source: 'reviewer', destination: ORCHESTRATOR_AGENT_NAME, text: 'work' }),
+      makeEvent({ source: 'reviewer', destination: ORCHESTRATOR_AGENT_NAME, text: 'h1' }),
+    );
+    router.handleEvent(
+      makeEvent({ source: 'editor', destination: ORCHESTRATOR_AGENT_NAME, text: 'h2' }),
     );
 
-    expect(deliver).not.toHaveBeenCalled();
+    expect(deliver).toHaveBeenCalledTimes(1);
     expect(onEnded).toHaveBeenCalledWith(sessionId, 'stopped', '001');
     errSpy.mockRestore();
   });

@@ -296,10 +296,16 @@ describe('createChainRouter — hop-budget enforcement', () => {
     expect(getMultiAgentSession(SESSION_ID)!.status).toBe('stopped');
   });
 
-  test('forwardCebabEvent rows count toward the budget', () => {
-    // Briefings persisted before any agent hop should still count — the UI
-    // shows `events.length / hopBudget` and the math has to match.
-    const { router, onEnded, deliver } = setupBudget(2);
+  test('forwardCebabEvent rows do NOT count toward the budget', () => {
+    // `Cebab-6fax.19`: Cebab's own framing (briefings, the CLAUDE.md marker,
+    // the initial prompt) is not a hop the run took — only agent-to-agent
+    // messages (handleEvent) are. This test used to assert the OPPOSITE, on
+    // stale reasoning ("the UI shows events.length / hopBudget"), which
+    // `Cebab-v85` had already made false. Budget 3, then TWO briefings: on the
+    // old code the briefings counted, so the first real hop would reach 3 and
+    // trip the cap; now they cost nothing, so the two real hops below both wake
+    // their destination and the run lives.
+    const { router, onEnded, deliver } = setupBudget(3);
     router.forwardCebabEvent({
       ts: 1,
       source: CEBAB_SOURCE,
@@ -314,15 +320,19 @@ describe('createChainRouter — hop-budget enforcement', () => {
       kind: 'intro',
       text: 'briefing-2',
     });
-    // First agent hop would push count to 3 (over the cap) and trip the
-    // synthetic error. Deliver to reviewer must not fire.
+    // Two genuine hops. With the briefings uncharged, hop 1 → count 1 (deliver),
+    // hop 2 → count 2 (deliver); neither reaches the cap of 3. On the old code
+    // the two briefings would already be at count 2, so hop 1 → 3 trips it.
     router.handleEvent(ev({ source: 'coder', destination: 'reviewer', text: 'first work' }));
+    router.handleEvent(ev({ source: 'reviewer', destination: 'coder', text: 'second work' }));
 
-    expect(deliver).not.toHaveBeenCalled();
-    expect(onEnded).toHaveBeenCalledWith(SESSION_ID, 'stopped', null);
+    expect(deliver).toHaveBeenCalledTimes(2);
+    expect(onEnded).not.toHaveBeenCalled();
+    // Two intros + two hops = 4 rows, none of them the synthetic budget error.
     const persisted = listMultiAgentEvents(SESSION_ID);
-    expect(persisted.at(-1)!.kind).toBe('error');
-    expect(persisted.at(-1)!.text).toContain('Hop budget exhausted');
+    expect(persisted).toHaveLength(4);
+    expect(persisted.every((p) => p.source !== CEBAB_SOURCE || p.kind !== 'error')).toBe(true);
+    expect(getMultiAgentSession(SESSION_ID)!.hops_used).toBe(2);
   });
 
   test('budget=Infinity-ish (1000) never trips on a short session', () => {
@@ -387,12 +397,17 @@ describe('createChainRouter — hop-budget enforcement', () => {
       errSpy.mockRestore();
     });
 
-    test('forwardCebabEvent counts too, even when its row does not land', () => {
-      // Budget 3 against TWO cebab events + one agent hop, deliberately: with
-      // a smaller budget the agent hop's own increment could reach the cap on
-      // its own, and the test would pass whether or not `forwardCebabEvent`
-      // counted. Only 2 (cebab) + 1 (hop) = 3 trips it.
-      const { router, onEnded, deliver, errSpy } = setupUnpersistable(3);
+    test('forwardCebabEvent rows never count — even on the failing-persist path', () => {
+      // `Cebab-6fax.19`: Cebab's own framing does not bump the counter, and
+      // this asserts that holds on the failing-persist branch too — the one
+      // place register B25's "bump outside the try" reasoning lives. Budget 2,
+      // then TWO cebab briefings (persist throws, still uncharged), then two
+      // agent hops. If briefings counted, they alone would be at the cap and
+      // the first hop's deliver would be refused; because they do not, hop 1
+      // delivers (count 1) and hop 2 is the boundary trip (count 2 === budget).
+      // So `deliver` is called exactly once — proving both that the cebab rows
+      // were free AND that the counter still advances when the write fails.
+      const { router, onEnded, deliver, errSpy } = setupUnpersistable(2);
       for (const agent of AGENTS) {
         router.forwardCebabEvent({
           ts: 1,
@@ -402,9 +417,10 @@ describe('createChainRouter — hop-budget enforcement', () => {
           text: `briefing for ${agent}`,
         });
       }
-      router.handleEvent(ev({ source: 'coder', destination: 'reviewer', text: 'work' }));
+      router.handleEvent(ev({ source: 'coder', destination: 'reviewer', text: 'h1' }));
+      router.handleEvent(ev({ source: 'reviewer', destination: 'coder', text: 'h2' }));
 
-      expect(deliver).not.toHaveBeenCalled();
+      expect(deliver).toHaveBeenCalledTimes(1);
       expect(onEnded).toHaveBeenCalledWith('session-that-was-never-created', 'stopped', null);
       errSpy.mockRestore();
     });
