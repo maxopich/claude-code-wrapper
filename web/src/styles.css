@@ -8961,6 +8961,11 @@ pre {
 .mcp-server-card-cebab-injected {
   opacity: 0.75;
 }
+.mcp-server-pin-oversized {
+  margin: 6px 0 0;
+  font-size: var(--t-sm);
+  color: var(--err-ink);
+}
 .mcp-server-header {
   display: flex;
   align-items: center;

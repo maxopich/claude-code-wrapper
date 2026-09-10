@@ -198,6 +198,45 @@ describe('awaitMcpTrustDecisions — silent short-circuits', () => {
     expect(auditRows[0]!.reason_code).toBe('denied_remember');
   });
 
+  test('Cebab-6fax.42.1: pin_oversized is refused silently, never prompted, and writes no trust row', async () => {
+    const sink = makeSink();
+    const gate = makeTrustGateState();
+    const view: McpServerView = {
+      name: 'huge-mcp',
+      status: 'unknown',
+      scope: 'mcp-json',
+      originPath: '/u/proj/.mcp.json',
+      tools: [],
+      trust: 'pin_oversized',
+    };
+    const outcome = await awaitMcpTrustDecisions({
+      projectId: 7,
+      gate,
+      send: sink.send,
+      servers: [view],
+    });
+    // No operator prompt: an "Allow" here would persist a null pin, which is
+    // the state this refusal exists to prevent.
+    expect(sink.sent).toEqual([]);
+    expect(gate.pending.size).toBe(0);
+    // Refused, and NOT counted as an operator decision (`persisted: false`).
+    expect(outcome.refused).toEqual([
+      { serverName: 'huge-mcp', originPath: '/u/proj/.mcp.json', persisted: false },
+    ]);
+    expect(outcome.persistedDenials).toBe(0);
+    expect(outcome.approvals).toBe(0);
+    // The audit row lands with its OWN reason code — a forensic reader must not
+    // read it as a human's denial.
+    const auditRows = getDb()
+      .prepare(`SELECT reason_code FROM safety_audit WHERE kind = ?`)
+      .all('mcp.trust_silent_refusal') as Array<{ reason_code: string }>;
+    expect(auditRows.map((r) => r.reason_code)).toEqual(['pin_oversized']);
+    // Nothing was written to the trust ledger — the refusal is transient, so
+    // shrinking the declaration lets the next spawn re-evaluate cleanly.
+    const trustRows = getDb().prepare(`SELECT COUNT(*) AS n FROM mcp_trust`).get() as { n: number };
+    expect(trustRows.n).toBe(0);
+  });
+
   test('server without originPath skips silently (no anchor for decision)', async () => {
     const sink = makeSink();
     const gate = makeTrustGateState();

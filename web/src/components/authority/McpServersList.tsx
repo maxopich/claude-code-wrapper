@@ -54,6 +54,9 @@ const TRUST_CHIP_CLASS: Record<McpServerView['trust'], string> = {
   // unchanged declaration is the swap `declaration_changed` catches, done in
   // the one place a `git diff` of the config shows nothing.
   script_changed: 'mcp-trust-err',
+  // Cebab-6fax.42.1: error tier. Not a prompt-able warning — the server was
+  // REFUSED because its files cannot be pinned, so it is as blocked as `denied`.
+  pin_oversized: 'mcp-trust-err',
   denied: 'mcp-trust-err',
   unknown: 'mcp-trust-muted',
 };
@@ -64,6 +67,7 @@ const TRUST_LABEL: Record<McpServerView['trust'], string> = {
   hash_changed: 'hash changed',
   declaration_changed: 'declaration changed',
   script_changed: 'script changed',
+  pin_oversized: 'too large to pin',
   denied: 'denied',
   unknown: 'unknown',
 };
@@ -212,6 +216,15 @@ function McpServerCard(props: { server: McpServerView }) {
           {server.tools.length} {server.tools.length === 1 ? 'tool' : 'tools'}
         </span>
       </header>
+      {server.trust === 'pin_oversized' && (
+        <p className="mcp-server-pin-oversized" role="note">
+          This server was <strong>refused</strong>: its declaration points at too many files for
+          Cebab to fingerprint, so it cannot detect if one of them is later changed under the same
+          config. Rather than approve it without that protection, Cebab did not start it. To use it,
+          shrink the declaration — pass fewer path-like arguments, or point it at a single
+          consolidated script — and reopen the panel.
+        </p>
+      )}
       <dl className="mcp-server-facts">
         {server.originPath && (
           <div className="mcp-server-fact">

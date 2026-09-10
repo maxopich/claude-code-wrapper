@@ -48,7 +48,7 @@ import { getProject } from './projects.js';
 import {
   checkTrust,
   computeBinarySha,
-  computeScriptShas,
+  computeScriptPin,
   firstDecisionTs,
   listForServer,
 } from './mcp_trust.js';
@@ -810,6 +810,14 @@ export function detectMcpServers(layers: SettingsLayer[]): McpServerView[] {
  *   - `script_changed`                   → `trust: 'script_changed'` (Cebab-1af)
  *   - `first_seen`                       → `trust: 'pending_tofu'`
  *
+ * `Cebab-6fax.42.1`: BEFORE the lookup, the file pin is computed. When it comes
+ * back `oversized` — the declaration names more files than the budget can hash —
+ * the row is `trust: 'pin_oversized'` and the lookup is SKIPPED entirely. There
+ * is nothing to decide: a pin cannot be built, so the only honest states are
+ * "refuse" or "store a null that silently stops protecting", and this module
+ * exists to never do the latter. The gate refuses a `pin_oversized` server; the
+ * panel tells the operator to shrink the declaration.
+ *
  * `projectPath` is the spawn cwd, and it is required rather than derived from
  * `originPath`: relative tokens in a declaration resolve against the directory
  * the CLI runs in, not against the file the declaration was read from — the two
@@ -839,11 +847,16 @@ export function enrichWithTrustState(views: McpServerView[], projectPath: string
     if (candidateSha !== null) view.binarySha = candidateSha;
     // Cebab-1af: and the files the declaration RUNS, which `binary_sha` never
     // covered — it hashes the command, and the command is `node`.
-    const scriptShas = computeScriptShas(
-      view.config?.command ?? '',
-      view.config?.args ?? [],
-      projectPath,
-    );
+    const pin = computeScriptPin(view.config?.command ?? '', view.config?.args ?? [], projectPath);
+    // `Cebab-6fax.42.1`: a declaration too large to pin degrades to a REFUSAL,
+    // not to a silent null. Set the state and skip the lookup — there is no pin
+    // to compare and no decision to offer; storing null here is the very bug
+    // (`no later spawn can report script_changed`) this state replaces.
+    if (pin.kind === 'oversized') {
+      view.trust = 'pin_oversized';
+      continue;
+    }
+    const scriptShas = pin.kind === 'pinned' ? pin.shas : null;
     if (scriptShas !== null) view.scriptShas = scriptShas;
     // Cebab-rxg: the DECLARATION is part of the lookup, not just the command's
     // hash. `computeBinarySha` returns null for every non-absolute command, so

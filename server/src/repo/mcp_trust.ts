@@ -366,27 +366,35 @@ export const SCRIPT_ABSENT = 'absent';
  * direction was already the module's accepted trade — an entry can produce a
  * prompt, never suppress one.
  *
- * Returns `null` in exactly two cases, and they are not the same thing —
- * a contradiction this header carried until `Cebab-6fax.42`, because it claimed
- * "only when there was NO candidate token at all" while the cap below had
- * always been a second null.
+ * Returns one of THREE outcomes (`ScriptPinResult`), and the split is the whole
+ * of `Cebab-6fax.42.1`. Until it, this returned `null` for two unrelated things
+ * — a header contradiction `Cebab-6fax.42` had already named — and the caller
+ * could not tell them apart, so both degraded to "no script-change detection":
  *
- *  1. No candidate token at all (`node` alone, `npx` with only flags). No
- *     identity to track, exactly as for `binary_sha`. It does NOT mean "the
- *     files did not resolve" — that is a map of `SCRIPT_ABSENT` entries, which
- *     a later spawn IS compared against.
- *  2. A declaration past either ceiling. This one is a loss of protection, not
- *     an absence of it: the row is approved with a NULL pin and no later spawn
- *     can report `script_changed` for it. The ceilings are set so this is an
- *     adversarial shape rather than a real one; making it degrade to a REFUSAL
- *     instead of a null is tracked on the bead and is a separate change,
- *     because it needs its own `McpServerView['trust']` state to be visible.
+ *  1. `{ kind: 'none' }` — no candidate token at all (`node` alone, `npx` with
+ *     only flags). No identity to track, exactly as for `binary_sha`. It does
+ *     NOT mean "the files did not resolve" — that is a `pinned` map of
+ *     `SCRIPT_ABSENT` entries, which a later spawn IS compared against. Benign
+ *     and common; stored as a NULL `script_shas_json`.
+ *  2. `{ kind: 'oversized' }` — a declaration past either ceiling. This is a
+ *     LOSS of protection, not an absence of it: approving it with a NULL pin
+ *     means no later spawn can ever report `script_changed` for the row. #577
+ *     fixed the realistic filesystem-server shape that reached here by
+ *     miscounting; what is left is a declaration that GENUINELY exceeds the
+ *     budget, and "silently stop protecting" is the exact anti-pattern this
+ *     module exists to avoid. So it no longer collapses to a null the caller
+ *     cannot see — `enrichWithTrustState` maps it to `trust: 'pin_oversized'`,
+ *     which the gate REFUSES (see that state's header in `protocol.ts`).
+ *  3. `{ kind: 'pinned'; shas }` — a map of one entry per candidate token.
  */
-export function computeScriptShas(
+export type ScriptPinResult =
+  { kind: 'pinned'; shas: Record<string, string> } | { kind: 'none' } | { kind: 'oversized' };
+
+export function computeScriptPin(
   command: string,
   args: readonly string[],
   projectPath: string,
-): Record<string, string> | null {
+): ScriptPinResult {
   const out: Record<string, string> = Object.create(null) as Record<string, string>;
   const seen = new Set<string>();
   let hashed = 0;
@@ -396,7 +404,7 @@ export function computeScriptShas(
     seen.add(token);
     // Checked BEFORE the read, so the ceiling bounds the reads it is there to
     // bound rather than being noticed one read late.
-    if (seen.size > MAX_SCRIPT_CANDIDATES) return null;
+    if (seen.size > MAX_SCRIPT_CANDIDATES) return { kind: 'oversized' };
     // `path.resolve` leaves an absolute token alone and anchors every other
     // one at the spawn cwd, which for both the single-agent turn and every bus
     // participant is the project root.
@@ -417,15 +425,37 @@ export function computeScriptShas(
       // made a filesystem server's directory list disable its own script pin
       // (`Cebab-6fax.42`).
       hashed += 1;
-      if (hashed > MAX_HASHED_SCRIPTS) return null;
+      if (hashed > MAX_HASHED_SCRIPTS) return { kind: 'oversized' };
     }
   }
 
   const keys = Object.keys(out);
-  if (keys.length === 0) return null;
+  if (keys.length === 0) return { kind: 'none' };
   const sorted: Record<string, string> = {};
   for (const k of keys.sort()) sorted[k] = out[k];
-  return sorted;
+  return { kind: 'pinned', shas: sorted };
+}
+
+/**
+ * Back-compat surface: the `Record<string, string> | null` that the ledger's
+ * write and lookup inputs (`scriptShas`, `candidateScriptShas`) take, and what
+ * every existing caller and test expects.
+ *
+ * BOTH `none` and `oversized` collapse to `null` here, and that is correct for
+ * this surface: the shas that get STORED or COMPARED are genuinely absent in
+ * both cases. The difference between them changes only ONE thing — whether the
+ * resolver refuses — and that decision is made from the richer `computeScriptPin`
+ * at the single site (`enrichWithTrustState`) that acts on it. Collapsing here
+ * keeps a null out of the storage/lookup path either way, which is the honest
+ * value when there are no shas to record.
+ */
+export function computeScriptShas(
+  command: string,
+  args: readonly string[],
+  projectPath: string,
+): Record<string, string> | null {
+  const pin = computeScriptPin(command, args, projectPath);
+  return pin.kind === 'pinned' ? pin.shas : null;
 }
 
 /** The tokens `computeScriptShas` will try to read, in declaration order. */

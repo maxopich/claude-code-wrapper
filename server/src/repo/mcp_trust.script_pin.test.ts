@@ -9,6 +9,7 @@ import { _resetOperatorIdCache } from '../notifications/operator.js';
 import {
   changedScriptPaths,
   checkTrust,
+  computeScriptPin,
   computeScriptShas,
   parseScriptShas,
   recordTrustDecision,
@@ -248,6 +249,62 @@ describe('[security] computeScriptShas — which tokens get pinned', () => {
     const sha = writeScript(path.join('~', 'x.mjs'), 'literal tilde\n');
     expect(computeScriptShas('node', ['~/x.mjs'], projectPath)).toEqual({ '~/x.mjs': sha });
   });
+});
+
+// ---- computeScriptPin: none vs oversized vs pinned (Cebab-6fax.42.1) ----
+
+describe('[security] computeScriptPin — the three outcomes are distinct', () => {
+  // The finding: `computeScriptShas` collapsed "nothing to pin" and "too large
+  // to pin" into one `null`, so the caller could not degrade the second to a
+  // refusal. Every case below reddens if the two ever merge back into a bare
+  // null the caller cannot tell apart.
+
+  test('no candidate token → kind "none", NOT "oversized"', () => {
+    // Benign and common (`npx <pkg>` with only flags, bare `node`). This must
+    // stay `none` so the resolver leaves it to the binary/declaration gates
+    // rather than refusing every ordinary stdio server.
+    expect(computeScriptPin('npx', ['-y', '--foo'], projectPath)).toEqual({ kind: 'none' });
+    expect(computeScriptPin('node', [], projectPath)).toEqual({ kind: 'none' });
+  });
+
+  test('a readable file → kind "pinned" with its shas', () => {
+    const sha = writeScript('mcp/server.mjs', 'the script\n');
+    expect(computeScriptPin('node', ['mcp/server.mjs'], projectPath)).toEqual({
+      kind: 'pinned',
+      shas: { 'mcp/server.mjs': sha },
+    });
+  });
+
+  test('more readable files than the hash cap → kind "oversized", not "none"', () => {
+    // The residue #577 left: a declaration that GENUINELY exceeds the byte
+    // budget. Before this split it returned null indistinguishable from `none`
+    // and the resolver stored no pin. Reddens: returning `{ kind: 'none' }` (or
+    // any null-equivalent) here, which is the silent no-protection state.
+    const args: string[] = [];
+    for (let i = 0; i < 9; i += 1) {
+      writeScript(`h${i}.mjs`, `file ${i}\n`);
+      args.push(`h${i}.mjs`);
+    }
+    expect(computeScriptPin('node', args, projectPath)).toEqual({ kind: 'oversized' });
+    // One under the cap still pins — the boundary is the stated one.
+    expect(computeScriptPin('node', args.slice(0, 8), projectPath).kind).toBe('pinned');
+  });
+
+  test('more candidate tokens than the candidate ceiling → kind "oversized"', () => {
+    writeScript('server.mjs', 'the script\n');
+    const flood = Array.from({ length: 64 }, (_, i) => `missing-${i}.txt`);
+    expect(computeScriptPin('node', ['server.mjs', ...flood], projectPath)).toEqual({
+      kind: 'oversized',
+    });
+  });
+
+  // NOTE: no case pins `computeScriptShas` returning null for both none and
+  // oversized. That was the PRE-existing behaviour this change did not touch —
+  // the wrapper collapses both to null on purpose, and the distinction lives in
+  // `computeScriptPin`. A test asserting it would pass with the change reverted
+  // (revert-check flagged exactly that), i.e. it measures nothing about the fix.
+  // The existing `computeScriptShas` describe block above already covers the
+  // wrapper's null contract via `.toBeNull()` on the over-budget shapes.
 });
 
 // ---- changedScriptPaths: only a value present on BOTH sides proves a change --

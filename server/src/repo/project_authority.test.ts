@@ -1070,6 +1070,32 @@ describe('[security] resolveProjectAuthority — Cebab-1af script pinning', () =
     // needed a reason of its own rather than reusing `declaration_changed`.
     expect(changed.config).toEqual(pending.config);
   });
+
+  test('Cebab-6fax.42.1: a declaration too large to pin resolves to pin_oversized, not pending_tofu', () => {
+    // The residue #577 left. A declaration that names more readable files than
+    // the hash budget cannot be fingerprinted, and used to degrade to a NULL
+    // pin — approvable, and then permanently unable to report `script_changed`.
+    // The resolver now marks it `pin_oversized` instead. Reddens: mapping the
+    // oversized `computeScriptPin` result to a null pin + `pending_tofu` (the
+    // old silent-no-protection path), which this asserts against.
+    fs.mkdirSync(path.join(projectPath, 'big'), { recursive: true });
+    const args: string[] = [];
+    for (let i = 0; i < 9; i += 1) {
+      fs.writeFileSync(path.join(projectPath, 'big', `s${i}.mjs`), `file ${i}\n`);
+      args.push(`big/s${i}.mjs`);
+    }
+    fs.writeFileSync(
+      path.join(projectPath, '.mcp.json'),
+      JSON.stringify({ mcpServers: { huge: { command: 'node', args } } }),
+    );
+    const huge = resolveProjectAuthority({ projectId, mode: 'cache' })!.mcpServers.find(
+      (s) => s.name === 'huge',
+    )!;
+    expect(huge.trust).toBe('pin_oversized');
+    // And no pin is carried — there is nothing to store, which is the whole
+    // point: an "Allow" must not be able to persist a null.
+    expect(huge.scriptShas).toBeUndefined();
+  });
 });
 
 describe('resolveProjectAuthority — Phase 10 usage-diff enrichment', () => {
