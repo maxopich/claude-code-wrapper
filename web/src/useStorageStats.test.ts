@@ -60,6 +60,8 @@ const sampleStats: StorageStatsView = {
   type: 'storage_stats',
   dbSizeBytes: 100,
   logsDirSizeBytes: 50,
+  managedAgentsSizeBytes: 0,
+  managedAgentsSizeTruncated: false,
   lastPurgeAt: null,
   lastPurgeCount: null,
   tableStats: [{ table: 'events', rows: 7 }],

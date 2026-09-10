@@ -3677,6 +3677,13 @@ export type ServerMsg =
        *   pages a `page_count × page_size` would miss).
        * `logsDirSizeBytes` — sum of the per-session `*.jsonl` under
        *   `~/.cebab/logs/`; 0 when the dir doesn't exist yet.
+       * `managedAgentsSizeBytes` — on-disk size of every managed-agent tree
+       *   under `<dataDir>/agents/`, the feature that deliberately makes
+       *   gigabyte-scale copies. A BOUNDED async walk (shares `dirSizeBytes`
+       *   with the stray-folder scan), so `managedAgentsSizeTruncated` is true
+       *   when the walk hit its entry/depth cap and the byte total is a floor
+       *   rather than exact — a size that quietly stopped counting reads as
+       *   complete when it is not, so it is flagged, never swallowed.
        * `lastPurgeAt` / `lastPurgeCount` — the purge cron heartbeat
        *   (`runSessionPurge` stamps both on every run, including 0-reclaim
        *   runs); null until the cron has run once.
@@ -3693,6 +3700,8 @@ export type ServerMsg =
       type: 'storage_stats';
       dbSizeBytes: number;
       logsDirSizeBytes: number;
+      managedAgentsSizeBytes: number;
+      managedAgentsSizeTruncated: boolean;
       lastPurgeAt: number | null;
       lastPurgeCount: number | null;
       tableStats: { table: string; rows: number; bytes?: number }[];

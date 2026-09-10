@@ -6332,7 +6332,12 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       // row counts + purge heartbeat for the Settings "Storage" section. The
       // executor lives in storage_stats.ts (testable without the WS scaffold),
       // same posture as executeSearchSessions / executeRecoveryLogSnapshot.
-      executeStorageStats({ send: (m) => send(conn.ws, m) });
+      // Async now that it also does a bounded walk of the managed-agent trees
+      // (Cebab-6fax.43.3). AWAITED, not fire-and-forget: handleClientMsg is not
+      // awaited per frame, so this blocks nothing else, and a failure reaches its
+      // catch -- which sends the error -- instead of leaving Settings > Storage
+      // stuck on "Loading...".
+      await executeStorageStats({ send: (m) => send(conn.ws, m) });
       return;
     }
     case 'get_stray_session_folders': {

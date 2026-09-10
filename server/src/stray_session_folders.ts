@@ -88,29 +88,57 @@ function normalizeForCompare(p: string): string {
   return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
 }
 
-/** Recursive size, bounded. Returns `null` once a cap is hit. */
-async function dirSizeBytes(dir: string, budget: { entries: number }, depth = 0): Promise<number> {
-  if (depth > MAX_SCAN_DEPTH) return 0;
+/**
+ * Recursive on-disk size of `dir`, bounded by a shared entry budget. Exported
+ * because `storage_stats.ts` measures the managed-agent trees with the SAME
+ * sizer (one bounded async walk, never a second implementation, never a sync
+ * one that would park the event loop on exactly the gigabyte trees it exists
+ * to size).
+ *
+ * TRUNCATION is an explicit flag: `budget.truncated` is set when the walk skips
+ * something it should have counted -- the entry budget ran out, the depth cap
+ * was hit, or a folder or file could not be read (anything but ENOENT; a path
+ * that vanished mid-walk is not a gap). When it is set, the total is a floor.
+ * The depth cap deliberately does NOT drain the entry budget: draining made
+ * every later sibling count 0, which zeroed the stray-folder scan and the
+ * delete's audited freedBytes (found validating Cebab-6fax.43.3).
+ */
+export async function dirSizeBytes(
+  dir: string,
+  budget: { entries: number; truncated?: boolean },
+  depth = 0,
+): Promise<number> {
+  if (depth > MAX_SCAN_DEPTH) {
+    budget.truncated = true; // too deep to count -- flagged, siblings still counted
+    return 0;
+  }
   let total = 0;
   let entries;
   try {
     entries = await fsp.readdir(dir, { withFileTypes: true });
-  } catch {
+  } catch (err) {
+    // A folder that vanished is not a gap in the count; one that could not be
+    // read (EACCES and the like) is, and must not pass as complete.
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') budget.truncated = true;
     return total;
   }
   for (const ent of entries) {
-    if (budget.entries-- <= 0) return total;
+    if (budget.entries <= 0) {
+      budget.truncated = true; // an entry is being skipped: the total is a floor
+      return total;
+    }
+    budget.entries--;
     const full = path.join(dir, ent.name);
     // Symlinks are neither file nor directory under `withFileTypes`, so they
-    // are skipped rather than followed — the same reasoning `data_perms.ts`
+    // are skipped rather than followed -- the same reasoning `data_perms.ts`
     // gives for its own walk: following one would wander out of the tree.
     if (ent.isDirectory()) {
       total += await dirSizeBytes(full, budget, depth + 1);
     } else if (ent.isFile()) {
       try {
         total += (await fsp.stat(full)).size;
-      } catch {
-        /* vanished mid-walk */
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'ENOENT') budget.truncated = true;
       }
     }
   }

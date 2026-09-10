@@ -21,6 +21,7 @@ import {
   deleteStraySessionFolders,
   scanStraySessionFolders,
   sessionIdFromLegacyName,
+  dirSizeBytes,
 } from './stray_session_folders.js';
 
 const isWindows = process.platform === 'win32';
@@ -215,5 +216,32 @@ describe('[security] deleteStraySessionFolders', () => {
       )
       .get()!.c;
     expect(n).toBe(0);
+  });
+});
+
+describe('dirSizeBytes: a too-deep subtree does not exhaust the shared budget (Cebab-6fax.43.3)', () => {
+  test('after a depth hit, a later walk on the same budget still counts', async () => {
+    // Reddens: draining the entry budget at the depth cap. The stray-folder scan
+    // walks every folder with ONE budget, and the delete's audited freedBytes
+    // comes from this sizer, so draining made every folder after a deep one count
+    // 0. Deterministic on purpose: two calls in a fixed order, not two siblings in
+    // one directory, because readdir order is the filesystem's to choose.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), 'dirsize-'));
+    try {
+      const deepRoot = path.join(root, 'deep');
+      const chain = path.join(deepRoot, ...Array.from({ length: 14 }, (_, i) => `d${i}`));
+      fs.mkdirSync(chain, { recursive: true });
+      fs.writeFileSync(path.join(chain, 'bottom.bin'), 'x'.repeat(500));
+      const sibling = path.join(root, 'sibling');
+      fs.mkdirSync(sibling);
+      fs.writeFileSync(path.join(sibling, 'zz.bin'), 'x'.repeat(5000));
+
+      const budget: { entries: number; truncated?: boolean } = { entries: 100_000 };
+      expect(await dirSizeBytes(deepRoot, budget)).toBe(0); // everything is past the cap
+      expect(budget.truncated).toBe(true);
+      expect(await dirSizeBytes(sibling, budget)).toBe(5000); // still counted
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
   });
 });
