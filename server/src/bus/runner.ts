@@ -381,6 +381,18 @@ export function handleBusSend(
 }
 
 /**
+ * `Cebab-6fax.22`: the identity of a routed `bus_send`, for the per-hop
+ * cross-attempt dedup in `runOneTurn`. Two events with the same key are the
+ * same message: the timestamp is deliberately excluded (it differs on every
+ * call, including a replay), and `source` is included even though it is fixed
+ * per agent so the key stays a total function of the event's meaningful fields.
+ * JSON of the tuple, so a `text` containing the separator cannot forge a match.
+ */
+function busEventKey(ev: BusEvent): string {
+  return JSON.stringify([ev.source, ev.destination, ev.kind, ev.text]);
+}
+
+/**
  * Build the in-process MCP server exposing the single `bus_send` tool for
  * ONE agent. `agentName` is captured in the closure and stamped as the event
  * `source`; the agent cannot override it. Pass the returned config to
@@ -1236,6 +1248,34 @@ export class AgentRunner {
     // ids — so it is silently absorbed rather than recorded twice.
     const tappedToolUseIds = new Set<string>();
 
+    // `Cebab-6fax.22`: the same lifetime and the same reason as
+    // `tappedToolUseIds`, one layer over. A transient-overload retry re-runs
+    // THIS turn, resuming the failed attempt's checkpoint — and an attempt that
+    // called `bus_send` and THEN failed left the message already routed to its
+    // destination. The retry can route it a second time (the model, re-prompted
+    // with the same text over a transcript that already shows the send,
+    // re-issues it), and a routed `bus_send` is not free noise: it re-delivers
+    // the instruction into the peer's context AND charges the hop budget again.
+    //
+    // So a hop remembers what its FAILED attempts routed, keyed by the message
+    // identity `(source, destination, kind, text)`, and a later attempt drops a
+    // send that matches one — see the per-attempt `onEvent` wrapper below. The
+    // same "Cebab's own bound must not be re-spent by the overload loop"
+    // reasoning that made `MaxTurnsReachedError` a control signal
+    // (`isBusControlSignal`) applies to a turn with observable side effects:
+    // retrying it is not free.
+    //
+    // Per-HOP, and content-keyed rather than id-keyed, both deliberately. The
+    // real SDK does not forward the Anthropic `tool_use.id` to an in-process
+    // MCP tool handler (only the mock does), so the routing seam cannot see the
+    // id `tappedToolUseIds` uses; the message body is the identity available at
+    // that seam. Byte-identical sends ACROSS attempts of one hop are replays,
+    // so they are dropped; two identical sends WITHIN one attempt are the
+    // model's genuine intent, so they are not (the wrapper only consults the
+    // prior-attempts set). Cross-restart is not a concern here — a restart does
+    // not resume a mid-flight retry.
+    const routedInPriorAttempts = new Set<string>();
+
     // Retry-with-backoff for transient API overloads ("API Error: 529",
     // "Overloaded"). The interactive CLI absorbs these internally; the SDK
     // propagates them raw to our iterator. Without this layer, Item #4's
@@ -1259,10 +1299,28 @@ export class AgentRunner {
     const maxAttempts = backoffMs.length + 1;
     let lastErr: unknown;
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      // `Cebab-6fax.22`: the routing seam for THIS attempt. It drops a
+      // `bus_send` whose identity a PRIOR failed attempt of this hop already
+      // routed (so the peer is not re-fed the instruction and the hop budget is
+      // not charged twice), while never deduping within the attempt itself.
+      // Suppressed sends still return `delivered to <dest>` to the model via
+      // `handleBusSend` — the message WAS delivered, by the earlier attempt.
+      const routedThisAttempt = new Set<string>();
+      const onEvent = (ev: BusEvent): void => {
+        const key = busEventKey(ev);
+        if (routedInPriorAttempts.has(key)) return;
+        routedThisAttempt.add(key);
+        this.deps.onEvent(ev);
+      };
       try {
-        await this.runOneAttempt(agentName, promptText, spec, turnIndex, tappedToolUseIds);
+        await this.runOneAttempt(agentName, promptText, spec, turnIndex, tappedToolUseIds, onEvent);
         return; // success
       } catch (err) {
+        // Fold what this attempt routed into the prior-attempts set so the next
+        // attempt can recognise a replay of it. Only reached on failure — a
+        // successful attempt returns above, and there is no next attempt to
+        // dedupe against.
+        for (const key of routedThisAttempt) routedInPriorAttempts.add(key);
         lastErr = err;
         const aborted = this.deps.abortController?.signal.aborted === true;
         if (aborted || !isTransientOverload(err) || attempt >= backoffMs.length) {
@@ -1509,6 +1567,15 @@ export class AgentRunner {
      * same turn, so anything it re-emits is a repeat, not a new call.
      */
     tappedToolUseIds: Set<string>,
+    /**
+     * `Cebab-6fax.22`: the router input for THIS attempt. Owned by
+     * `runOneTurn`, which wraps `deps.onEvent` per attempt so a `bus_send` a
+     * prior failed attempt already routed is dropped instead of re-delivered.
+     * Passed in (rather than read from `deps`) precisely so the wrapper, not
+     * the raw router callback, is what `makeBusToolServer` stamps onto this
+     * agent's `bus_send` tool.
+     */
+    onEvent: (ev: BusEvent) => void,
   ): Promise<void> {
     const factory = this.deps.runnerFactory ?? pickRunner;
     // Read INSIDE the serialized turn (not when `deliverTurn` was called) so
@@ -1575,7 +1642,7 @@ export class AgentRunner {
         // key CLOBBERED any `mcpServers.bus` a participant declares in its own
         // `.claude/settings*.json`, which is precisely the collision the
         // namespaced key was introduced to avoid.
-        cebab_bus: makeBusToolServer(agentName, this.deps.onEvent),
+        cebab_bus: makeBusToolServer(agentName, onEvent),
       },
       abortController: this.deps.abortController,
       // Mock-mode fixture routing. Inert under `runClaude`, which reads only
