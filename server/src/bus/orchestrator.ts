@@ -357,11 +357,14 @@ export type OrchestratorSessionHandle = {
    * (per_agent_control.setParticipantMuted) so the durable source of
    * truth and the hot-path mirror stay aligned.
    *
-   * isMuted is a read-only probe reflecting the router's in-memory mute set —
-   * used to verify the durable state reseeds correctly across an R-B restart
-   * (`reconstruct.test.ts`). It no longer gates any bus_send "oracle": since
-   * `Cebab-x4rn` a muted worker's drop is reported truthfully (AE-3's oracle
-   * suppression was retired), so there is nothing to short-circuit.
+   * isMuted is a read-only probe reflecting the router's in-memory mute set. It
+   * is used to verify the durable state reseeds correctly across an R-B restart
+   * (`reconstruct.test.ts`), and — since `Cebab-6fax.41.1` — the runner consults
+   * it (wired as `AgentRunnerDeps.isMuted`) so a muted worker's `AskUserQuestion`
+   * is denied rather than parking the run on the operator. It does NOT gate any
+   * bus_send "oracle": since `Cebab-x4rn` a muted worker's drop is reported
+   * truthfully (AE-3's oracle suppression was retired), so there is nothing to
+   * short-circuit on the bus_send path.
    */
   setMute: (agentName: string, muted: boolean) => boolean;
   isMuted: (agentName: string) => boolean;
@@ -1975,6 +1978,13 @@ export function wireOrchestratorSession(p: {
       router.emitTurnRefused('kicked', agentName);
       return false;
     },
+    // `Cebab-6fax.41.1` [security]: mute must cover `AskUserQuestion`, the one
+    // tool `makeCanUseTool` does not auto-allow. Without this a muted worker
+    // could still park the whole run on an operator question — mute drops its
+    // `bus_send` at `handleEvent` but never saw the ask, which does not flow
+    // through `onEvent`. Read live from the router's in-memory mute set so a
+    // mid-run mute/unmute is honoured on the next ask.
+    isMuted: (agentName) => router.isMuted(agentName),
     onEvent: (ev) => router.handleEvent(ev),
     onMessage: (agent, msg) => {
       writeTranscript(paths, iterationId, agent, msg);

@@ -290,6 +290,19 @@ function busDropSenderText(reasonCode: RouterDropReasonCode | null, destination:
 }
 
 /**
+ * `Cebab-6fax.41.1` [security]: the tool result a MUTED agent reads when it
+ * calls `AskUserQuestion`. Mirrors the `muted_source` bus_send wording — same
+ * fact, stated for the one tool that would otherwise park the run on a human.
+ * The question is not shown to the operator and the run does not wait on it, so
+ * mute's guarantee (the run does not advance on this worker) holds for every
+ * tool, not just `bus_send`.
+ */
+export const MUTED_ASK_DENIAL_TEXT =
+  'You have been muted by the operator, so your question was NOT shown to anyone ' +
+  'and the run will not wait on it. Your outbound bus messages are not being ' +
+  'routed either. End your turn.';
+
+/**
  * One content block off a raw `assistant` SDKMessage, narrowed only as far as
  * the mutation tap needs. Deliberately loose — `type` is checked at use, and a
  * block that is not a `tool_use` is skipped rather than rejected, because this
@@ -618,6 +631,23 @@ export type AgentRunnerDeps = {
     toolUseId: string,
     questions: AskUserQuestionView[],
   ) => Promise<string>;
+  /**
+   * `Cebab-6fax.41.1` [security]: is `agentName` muted RIGHT NOW? Read live in
+   * `makeCanUseTool` on every `AskUserQuestion` call, because mute state changes
+   * mid-run.
+   *
+   * Mute's one guarantee is that the run does not advance on a muted worker:
+   * `onEvent` drops the worker's `bus_send` output at the router. But
+   * `AskUserQuestion` is the ONE tool the bus does not auto-allow — it parks the
+   * whole run on an operator answer — and it does not flow through `onEvent`, so
+   * without this a muted worker could still stall the entire run on a question.
+   * When this returns true the gate denies the ask with a muted message instead
+   * of parking it, so no card is emitted and nobody is waited on.
+   *
+   * Optional: chain mode has no mute verb (`chain.ts`), and the single-agent /
+   * test paths omit it. Absent → never muted, byte-identical to before.
+   */
+  isMuted?: (agentName: string) => boolean;
   /**
    * Called when a `'delegate-only'` agent (the orchestrator) attempts a tool it
    * is structurally barred from — i.e. anything other than `bus_send` /
@@ -1382,6 +1412,30 @@ export class AgentRunner {
       }
       if (toolName !== 'AskUserQuestion' || !onAsk) {
         return { behavior: 'allow', updatedInput: input };
+      }
+      // `Cebab-6fax.41.1` [security]: a muted worker cannot park the run on an
+      // operator question. Mute already drops this worker's `bus_send` output at
+      // the router; `AskUserQuestion` is the one tool not auto-allowed, and it
+      // does NOT flow through `onEvent`, so it is the remaining way a muted
+      // worker could still stall the whole run on a human. Read `isMuted` live
+      // (mute flips mid-run) and deny with the muted message rather than parking
+      // — no card is emitted and nobody is waited on.
+      // `Cebab-6fax.41.1` [security]: a muted worker cannot park the run on an
+      // operator question. Mute already drops this worker's `bus_send` output at
+      // the router; `AskUserQuestion` is the one tool not auto-allowed, and it
+      // does NOT flow through `onEvent`, so it is the remaining way a muted
+      // worker could still stall the whole run on a human. Read `isMuted` live
+      // (mute flips mid-run) and deny with the muted message rather than parking
+      // — no card is emitted and nobody is waited on.
+      // `Cebab-6fax.41.1` [security]: a muted worker cannot park the run on an
+      // operator question. Mute already drops this worker's `bus_send` output at
+      // the router; `AskUserQuestion` is the one tool not auto-allowed, and it
+      // does NOT flow through `onEvent`, so it is the remaining way a muted
+      // worker could still stall the whole run on a human. Read `isMuted` live
+      // (mute flips mid-run) and deny with the muted message rather than parking
+      // — no card is emitted and nobody is waited on.
+      if (this.deps.isMuted?.(agentName)) {
+        return { behavior: 'deny', message: MUTED_ASK_DENIAL_TEXT };
       }
       // Suspend the stalled-turn watchdog while the operator is being asked:
       // the turn is intentionally blocked on a human, not wedged.

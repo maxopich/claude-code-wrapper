@@ -5,6 +5,7 @@ import {
   AgentRunner,
   BUS_SEND_TOOL,
   DELEGATE_ONLY_DISALLOWED,
+  MUTED_ASK_DENIAL_TEXT,
   isDelegationAllowedTool,
 } from './runner.js';
 
@@ -45,16 +46,26 @@ function callGate(opts: RunOptions & Partial<MockOptions>, toolName: string) {
  * turn, wiring an `onAskUserQuestion` (so the interactive posture with a
  * `canUseTool` gate is selected) and a spy `onGuardrailViolation`.
  */
-async function captureTurn(spec: { name: string; toolPolicy?: 'delegate-only' }): Promise<{
+async function captureTurn(spec: {
+  name: string;
+  toolPolicy?: 'delegate-only';
+  isMuted?: (agentName: string) => boolean;
+}): Promise<{
   opts: RunOptions & Partial<MockOptions>;
   violations: Array<[string, string]>;
+  asked: string[];
 }> {
   const calls: (RunOptions & Partial<MockOptions>)[] = [];
   const violations: Array<[string, string]> = [];
+  const asked: string[] = [];
   const runner = new AgentRunner({
     onEvent: () => {},
-    onAskUserQuestion: async () => 'User selected: Ship it',
+    onAskUserQuestion: async (agent) => {
+      asked.push(agent);
+      return 'User selected: Ship it';
+    },
     onGuardrailViolation: (agent, tool) => violations.push([agent, tool]),
+    ...(spec.isMuted ? { isMuted: spec.isMuted } : {}),
     runnerFactory: (opts) => {
       calls.push(opts);
       return fakeRunner([resultMsg('sess-1')]);
@@ -62,7 +73,7 @@ async function captureTurn(spec: { name: string; toolPolicy?: 'delegate-only' })
   });
   runner.register({ name: spec.name, cwd: `/tmp/${spec.name}`, toolPolicy: spec.toolPolicy });
   await runner.deliverTurn(spec.name, 'go');
-  return { opts: calls[0]!, violations };
+  return { opts: calls[0]!, violations, asked };
 }
 
 describe('isDelegationAllowedTool', () => {
@@ -136,6 +147,31 @@ describe('delegate-only tool policy', () => {
     // The two allowed tools must NOT be in the strip-list.
     expect(opts.disallowedTools).not.toContain('AskUserQuestion');
     expect(opts.disallowedTools).not.toContain('mcp__cebab_bus__bus_send');
+  });
+
+  test('[security] a muted worker cannot park the run on AskUserQuestion', async () => {
+    // The bug: mute drops a worker's bus_send at the router, but AskUserQuestion
+    // is the one tool not auto-allowed and does not flow through onEvent, so a
+    // muted worker could still park the whole run waiting on the operator.
+    const muted = await captureTurn({ name: 'coder', isMuted: () => true });
+    // The muted ask must be denied WITHOUT parking (onAskUserQuestion untouched).
+    const mutedAsk = await callGate(muted.opts, 'AskUserQuestion');
+    expect(mutedAsk.behavior).toBe('deny');
+    expect(mutedAsk.message).toBe(MUTED_ASK_DENIAL_TEXT);
+    // The operator is never asked — no card was emitted for the muted worker.
+    expect(muted.asked).toEqual([]);
+
+    // Anti-vacuity control, in the SAME case so a revert reddens the whole test:
+    // the same gate with isMuted=false must reach the park branch and return the
+    // operator's answer, proving the deny above is the mute check firing and not
+    // AskUserQuestion being broken for everyone. On revert, the muted assertions
+    // above already fail; this half only guards against a fix that denies always.
+    const unmuted = await captureTurn({ name: 'coder', isMuted: () => false });
+    const unmutedAsk = await callGate(unmuted.opts, 'AskUserQuestion');
+    expect(unmutedAsk.behavior).toBe('deny');
+    expect(unmutedAsk.message).toBe('User selected: Ship it');
+    expect(unmutedAsk.message).not.toBe(MUTED_ASK_DENIAL_TEXT);
+    expect(unmuted.asked).toEqual(['coder']);
   });
 
   test('[security] an unrestricted agent auto-allows every tool (no regression)', async () => {
