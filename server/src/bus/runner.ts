@@ -1274,7 +1274,7 @@ export class AgentRunner {
     // model's genuine intent, so they are not (the wrapper only consults the
     // prior-attempts set). Cross-restart is not a concern here — a restart does
     // not resume a mid-flight retry.
-    const routedInPriorAttempts = new Set<string>();
+    const routedInPriorAttempts = new Map<string, BusRouteResult | void>();
 
     // Retry-with-backoff for transient API overloads ("API Error: 529",
     // "Overloaded"). The interactive CLI absorbs these internally; the SDK
@@ -1303,14 +1303,27 @@ export class AgentRunner {
       // `bus_send` whose identity a PRIOR failed attempt of this hop already
       // routed (so the peer is not re-fed the instruction and the hop budget is
       // not charged twice), while never deduping within the attempt itself.
-      // Suppressed sends still return `delivered to <dest>` to the model via
-      // `handleBusSend` — the message WAS delivered, by the earlier attempt.
-      const routedThisAttempt = new Set<string>();
-      const onEvent = (ev: BusEvent): void => {
+      //
+      // THE WRAPPER MUST RETURN THE ROUTER'S VERDICT (`Cebab-x4rn`). The
+      // `bus_send` tool result is built from it — "NOT delivered … you have
+      // been muted" versus "delivered to <dest>" — and `busSendResultText`
+      // reads an absent verdict as "delivered". So a wrapper that calls the
+      // router and returns nothing silently turns EVERY drop back into the
+      // retired white lie, for every bus agent, and tsc accepts it because
+      // `(ev) => void` is assignable where a verdict is expected.
+      //
+      // A suppressed replay answers with the verdict the router gave the
+      // FIRST time, not with "delivered": replaying a send that was dropped
+      // (muted, kicked, unknown destination) as a success would reintroduce
+      // that same lie on the retry path alone.
+      const routedThisAttempt = new Map<string, BusRouteResult | void>();
+      const onEvent = (ev: BusEvent): BusRouteResult | void => {
         const key = busEventKey(ev);
-        if (routedInPriorAttempts.has(key)) return;
-        routedThisAttempt.add(key);
-        this.deps.onEvent(ev);
+        if (routedInPriorAttempts.has(key)) return routedInPriorAttempts.get(key);
+        routedThisAttempt.set(key, undefined);
+        const verdict = this.deps.onEvent(ev);
+        routedThisAttempt.set(key, verdict);
+        return verdict;
       };
       try {
         await this.runOneAttempt(agentName, promptText, spec, turnIndex, tappedToolUseIds, onEvent);
@@ -1320,7 +1333,7 @@ export class AgentRunner {
         // attempt can recognise a replay of it. Only reached on failure — a
         // successful attempt returns above, and there is no next attempt to
         // dedupe against.
-        for (const key of routedThisAttempt) routedInPriorAttempts.add(key);
+        for (const [key, verdict] of routedThisAttempt) routedInPriorAttempts.set(key, verdict);
         lastErr = err;
         const aborted = this.deps.abortController?.signal.aborted === true;
         if (aborted || !isTransientOverload(err) || attempt >= backoffMs.length) {
@@ -1575,7 +1588,7 @@ export class AgentRunner {
      * the raw router callback, is what `makeBusToolServer` stamps onto this
      * agent's `bus_send` tool.
      */
-    onEvent: (ev: BusEvent) => void,
+    onEvent: (ev: BusEvent) => BusRouteResult | void,
   ): Promise<void> {
     const factory = this.deps.runnerFactory ?? pickRunner;
     // Read INSIDE the serialized turn (not when `deliverTurn` was called) so
