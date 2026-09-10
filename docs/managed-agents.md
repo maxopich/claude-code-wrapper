@@ -27,6 +27,7 @@ threat model and has never carried these two.
 - [Why `.git` is excluded](#why-git-is-excluded)
 - [Credentials, and why they are copied in the clear](#credentials-and-why-they-are-copied-in-the-clear)
 - [The symlink rule](#the-symlink-rule)
+- [Where the copy is allowed to write](#where-the-copy-is-allowed-to-write)
 - [The supported Node floor](#the-supported-node-floor)
 - [Deleting a managed agent](#deleting-a-managed-agent)
 
@@ -61,6 +62,10 @@ threat model and has never carried these two.
 ## The symlink rule
 
 **It is stricter than "don't follow symlinks"** (`managed_agent.ts`). `fsp.cp({ dereference: false })` satisfies that phrase and is wrong here: it recreates an escaping link faithfully, handing the managed agent a live path out of the space Cebab owns. So does an **absolute** link that resolves _inside_ the source — recreated verbatim it still names the SOURCE after the copy. Only relative links resolving inside-or-at the source root are recreated; everything else is skipped and reported. Directory links are never descended, which is also the loop guard. Measured caps (5 GB / 300k files) are a backstop, not the decision: the operator sees a preflight measured by the _same traversal the copy uses_ and confirms. The copy is `fs.promises` throughout — a synchronous copy of the gigabyte-scale trees this deliberately includes would park the event loop for minutes.
+
+## Where the copy is allowed to write
+
+`copyTree` enforces its own containment and cap, not just the caller's (`Cebab-6fax.43.4`). The survey's caps run _before_ `claimManagedDir` creates the target, so they cannot see two hazards: a tree that grew between the estimate and the copy, and a target that lies inside its own source. So `copyTree` refuses, against paths resolved with `realpath` first (a resolution failure is a refusal — never a fallback to the raw path, which would defeat the check it is part of), a **target not strictly inside `managedAgentsRoot()`** and a **source that is the target or an ancestor of it**. The second is the self-recursive copy of `Cebab-ygu.16`: a data dir nested inside a workspace project (a shape `workspace.ts` cannot refuse) makes the managed target a descendant of the source, and the walk would then read the directory it is filling and re-copy its own output one level deeper each pass. And `copyTree` re-checks the same 5 GB / 300k thresholds _during_ the copy, so a copy that outgrows the survey's measurement is aborted from within — the caller's catch removes the partial target, because a copy larger than what was measured is not the snapshot it claims to be.
 
 ## The supported Node floor
 

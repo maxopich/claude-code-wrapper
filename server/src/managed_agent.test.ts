@@ -468,6 +468,91 @@ describe('managed_agent — removeManagedDir', () => {
   });
 });
 
+describe('managed_agent — copy containment and cap (Cebab-6fax.43.4)', () => {
+  const tmp = withTempDataDir('managed-containment');
+
+  test('[security] refuses a target outside the managed root, but an in-root copy still succeeds', async () => {
+    // Both halves live in ONE case on purpose. The revert-check requires every
+    // added case to redden without the fix, and a standalone anti-vacuity
+    // control passes either way by construction — so the positive control is an
+    // assertion INSIDE the case whose refusal reddens, not a case of its own.
+    //
+    // Positive control FIRST: an ordinary in-root copy writes the tree. Without
+    // it, a copyTree that refused everything would pass the refusal below and
+    // ship an engine that never copies anything.
+    const okSrc = path.join(tmp.root(), 'ok-src');
+    write(path.join(okSrc, 'CLAUDE.md'), '# agent\n');
+    write(path.join(okSrc, 'nested', 'f.txt'), 'x');
+    const ok = await copyTree(okSrc, await claimManagedDir('ok'));
+    expect(ok.files).toBe(2);
+    expect(fs.existsSync(path.join(ok.target, 'CLAUDE.md'))).toBe(true);
+
+    // The refusal: a target that exists but is a sibling of `.cebab`, not inside
+    // it — so this exercises the containment refusal, not the resolve-failure
+    // one. This is the assertion that reddens when the check is reverted.
+    const src = path.join(tmp.root(), 'src');
+    write(path.join(src, 'CLAUDE.md'), '# agent\n');
+    const outside = path.join(tmp.root(), 'not-managed');
+    fs.mkdirSync(outside, { recursive: true });
+
+    await expect(copyTree(src, outside)).rejects.toThrow(/not inside/);
+    // Nothing was written into the out-of-root target.
+    expect(fs.readdirSync(outside)).toEqual([]);
+  });
+
+  test('[security] refuses a source that is an ANCESTOR of the target', async () => {
+    // The self-recursive copy (Cebab-ygu.16): a data dir nested inside a
+    // workspace project, which `workspace.ts` cannot refuse. `tmp.root()` is
+    // the parent of `.cebab`, so a claimed managed dir sits inside it — copying
+    // the ancestor would walk into the directory the copy is filling.
+    const target = await claimManagedDir('recursive');
+    await expect(copyTree(tmp.root(), target)).rejects.toThrow(/inside its own source/);
+  });
+
+  test('[security] refuses a target that cannot be resolved (no raw-path fallback)', async () => {
+    // A failure to resolve is a refusal, not a fallback to the unresolved path
+    // — `project_containment_fallback_is_an_escape_hatch`. The managed root is
+    // made to exist by the claim above; the target beneath it is not created.
+    const src = path.join(tmp.root(), 'src');
+    write(path.join(src, 'CLAUDE.md'), '# agent\n');
+    await claimManagedDir('anchor'); // makes managedAgentsRoot() exist
+    const ghost = path.join(managedAgentsRoot(), 'never-created');
+
+    await expect(copyTree(src, ghost)).rejects.toThrow(/cannot resolve the copy target/);
+  });
+
+  test('[security] copyTree enforces its OWN cap, and a generous cap still copies fully', async () => {
+    // One case, same reason as the containment case above: the generous-cap
+    // control passes with or without the fix, so it rides inside the case whose
+    // tight-cap refusal reddens rather than standing alone.
+    //
+    // Control FIRST: the same 20-file tree under a generous cap copies whole.
+    // Without it, a copyTree that threw on every cap would pass the refusal
+    // below for the wrong reason.
+    const roomySrc = path.join(tmp.root(), 'small');
+    for (let i = 0; i < 20; i++) write(path.join(roomySrc, `f${i}.txt`), 'x'.repeat(100));
+    const roomy = await copyTree(roomySrc, await claimManagedDir('roomy'), undefined, {
+      maxBytes: 1024 * 1024,
+      maxFiles: 1000,
+    });
+    expect(roomy.files).toBe(20);
+
+    // The refusal: the survey's caps run before the target exists and cannot see
+    // a tree that grew, or a walk into its own output. copyTree now bounds the
+    // copy from within, so a tight cap trips even though the survey saw nothing.
+    // This is the assertion that reddens when the cap is reverted.
+    const src = path.join(tmp.root(), 'big');
+    for (let i = 0; i < 20; i++) write(path.join(src, `f${i}.txt`), 'x'.repeat(100));
+
+    await expect(
+      copyTree(src, await claimManagedDir('capped'), undefined, {
+        maxBytes: 50,
+        maxFiles: 2,
+      }),
+    ).rejects.toThrow(/exceeded the cap/);
+  });
+});
+
 describe('managed_agent — .git is never copied (Cebab-ws0.11)', () => {
   const tmp = withTempDataDir('managed-vcs');
 

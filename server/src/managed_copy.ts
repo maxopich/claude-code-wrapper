@@ -164,19 +164,27 @@ export async function runManagedCopy(
   let last = 0;
   let copied;
   try {
-    copied = await copyTree(project.path, target, (p) => {
-      const now = Date.now();
-      if (now - last < PROGRESS_INTERVAL_MS) return;
-      last = now;
-      send({
-        type: 'managed_copy_progress',
-        projectId,
-        files: p.files,
-        bytes: p.bytes,
-        totalFiles: survey.files,
-        totalBytes: survey.bytes,
-      });
-    });
+    copied = await copyTree(
+      project.path,
+      target,
+      (p) => {
+        const now = Date.now();
+        if (now - last < PROGRESS_INTERVAL_MS) return;
+        last = now;
+        send({
+          type: 'managed_copy_progress',
+          projectId,
+          files: p.files,
+          bytes: p.bytes,
+          totalFiles: survey.files,
+          totalBytes: survey.bytes,
+        });
+      },
+      // The survey above enforces the same caps before the copy; passing them
+      // here makes the copy re-enforce them from within, so a tree that grew
+      // between the two — or a self-recursive walk — cannot outrun the bound.
+      caps,
+    );
   } catch (err: unknown) {
     // A half-copied tree that no project row points at is garbage in the data
     // dir, and it is UNREACHABLE garbage: `runManagedDelete` has existed since
