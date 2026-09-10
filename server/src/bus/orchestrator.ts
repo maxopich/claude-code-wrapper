@@ -631,17 +631,20 @@ export function createOrchestratorRouter(params: {
    */
   initialKickedAgents?: readonly string[];
   /**
-   * `Cebab-vie.8`: is any agent's turn queue held right now? Injected rather
-   * than read, because the gates live on the `AgentRunner` and this module is
-   * about routing. The stranded-run check needs it to tell a wedged run from a
-   * held one — a paused (or mutation-held) worker also ends its turn with the
-   * tail pointing at itself, but the operator has a Resume/Continue button.
+   * `Cebab-vie.8` / `Cebab-6fax.41.2`: is THIS agent's turn queue held right
+   * now? Injected rather than read, because the gates live on the `AgentRunner`
+   * and this module is about routing. The stranded-run check calls it on the
+   * agent the tail awaits to tell a wedged run from a held one — a paused (or
+   * mutation-held) worker also ends its turn with the tail pointing at itself,
+   * but the operator has a Resume/Continue button. Keyed per agent so a gate
+   * held on some unrelated worker cannot silence a run genuinely stranded on
+   * the awaited one.
    *
    * Optional so the many test call sites that build a bare router keep
    * compiling; absent means "no gates", which for a router with no runner is
    * the truth.
    */
-  isAnyGateHeld?: () => boolean;
+  isGateHeldForAgent?: (agentName: string) => boolean;
 }): OrchestratorRouter {
   const {
     sessionId,
@@ -1374,7 +1377,7 @@ export function createOrchestratorRouter(params: {
     const decision = decideStrandedRun({
       turnsInFlight,
       ended,
-      anyGateHeld: params.isAnyGateHeld?.() ?? false,
+      gateHeldForAgent: params.isGateHeldForAgent ?? (() => false),
       tail: getLastMultiAgentEvent(sessionId),
       cause: lastDrop,
     });
@@ -2364,7 +2367,7 @@ export function wireOrchestratorSession(p: {
     workerNames,
     paths,
     lifecycle,
-    isAnyGateHeld: () => runner.anyGateHeld(),
+    isGateHeldForAgent: (agentName) => runner.agentGateHeld(agentName),
     onEvent: p.onEvent,
     onEnded: p.onEnded,
     onTeardown,

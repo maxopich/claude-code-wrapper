@@ -1218,18 +1218,18 @@ export class AgentRunner {
   /**
    * `Cebab-vie.8`: is ANY agent's turn queue held, by any holder?
    *
-   * The stranded-run detector needs this because a held queue is the one way a
-   * run can have zero turns running and still not be stuck: the pause-on-
-   * dangerous gate ends the worker's turn by throwing
+   * A held queue is the one way a run can have zero turns running and still not
+   * be stuck: the pause-on-dangerous gate ends the worker's turn by throwing
    * `PausedForMutationError`, leaving the event tail pointing at the worker it
    * held, and an operator pause does the same to whatever is delivered next.
-   * Both hand the operator a Continue/Resume affordance, so neither is a run
-   * that needs telling it has stopped.
+   * Both hand the operator a Continue/Resume affordance.
    *
-   * Holder-agnostic on purpose. The detector's question is "is something going
-   * to move this run again", and both holders answer it the same way — asking
-   * per holder would be a distinction with no consequence here, and one more
-   * place to forget a third holder.
+   * Holder-agnostic on purpose: a caller that only wants "is anything held"
+   * does not care WHICH holder. Note that the stranded-run detector no longer
+   * calls this — it needs the per-agent `agentGateHeld` (`Cebab-6fax.41.2`),
+   * because a gate held on some unrelated agent says nothing about whether the
+   * agent the run is waiting on will move again. This remains the whole-runner
+   * probe the kick tests use to assert no gate was leaked.
    *
    * A gate entry only exists while it is held: `releaseHold` deletes the map
    * entry when the last holder lets go, so a non-empty map already means a live
@@ -1243,6 +1243,26 @@ export class AgentRunner {
       if (gate.holders.size > 0) return true;
     }
     return false;
+  }
+
+  /**
+   * `Cebab-6fax.41.2`: is THIS agent's turn queue held, by any holder?
+   *
+   * The stranded-run detector (`bus/quiescence.ts`) asks this about the agent
+   * the event tail is waiting on. A held gate on that specific agent means its
+   * own turn will resume and move the run, and the operator has a
+   * Continue/Resume button — so the note must stay silent. A gate held on a
+   * DIFFERENT agent is irrelevant to whether the awaited one will ever reply,
+   * which is why the detector keys on the agent rather than on `anyGateHeld`.
+   *
+   * Holder-agnostic like `anyGateHeld`, and for the same reason: an operator
+   * pause and the pause-on-dangerous hold both end (or park) the agent's turn
+   * with a Resume/Continue affordance, so either one means "this agent will
+   * move again". The map entry only exists while held (see `anyGateHeld`), so a
+   * present entry with a non-empty holder set is a live hold on this agent.
+   */
+  agentGateHeld(agentName: string): boolean {
+    return (this.pauseGates.get(agentName)?.holders.size ?? 0) > 0;
   }
 
   /** Test-only probe: is the OPERATOR holding this agent's queue? */

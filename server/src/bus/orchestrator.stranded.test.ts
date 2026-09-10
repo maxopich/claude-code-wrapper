@@ -228,22 +228,29 @@ describe('a muted worker mid-delegation (Cebab-vie.8)', () => {
     expect(strandedRows()).toHaveLength(1);
   });
 
-  test('a held queue is not a stranded run', async () => {
-    // The conjunct that keeps the detector safe on a paused run: a held agent
-    // also ends its turn with the tail pointing at it, and the operator has a
-    // Resume button. Holding a DIFFERENT agent is deliberate — the question is
-    // "can anything still move this run", not "is the tail's agent held".
+  test('a hold on an UNRELATED agent no longer silences the stranded run (Cebab-6fax.41.2)', async () => {
+    // The tail awaits `coder`, but `reviewer` is the agent sitting on a gate. A
+    // held `reviewer` will resume `reviewer`, not `coder`, so the run really is
+    // wedged and the note must fire. The old holder-agnostic `anyGateHeld`
+    // suppressed exactly this — a run stranded on a muted worker while some
+    // other agent held a gate — which is the case the note exists for. This
+    // proves the wiring threads the awaited agent's name through
+    // `runner.agentGateHeld` rather than asking "is anything held".
+    //
+    // The silent direction (a hold on the AWAITED agent stays quiet) is
+    // exercised against the predicate directly in `quiescence.test.ts` and
+    // through a router in `chain.stranded.test.ts`; it cannot be shown cleanly
+    // here because a held awaited agent keeps its own turn in flight, so
+    // `turnsInFlight` — not the gate — is what would be under test.
     const wired = runWedge({ workers: ['coder', 'reviewer'] });
     expect(wired.handle.pauseAgent('reviewer')).toBe(true);
     wired.deliver(ORCHESTRATOR_AGENT_NAME, 'plan the round');
     await flush(16);
-    expect(strandedRows()).toHaveLength(0);
-
-    // Positive control on the premise: lift the hold and the same run reports,
-    // so the silence above was the gate and not a broken fixture.
-    expect(wired.handle.resumeAgent('reviewer')).toBe(true);
-    wired.router.onTurnSettled('coder');
     expect(strandedRows()).toHaveLength(1);
+
+    // Premise: the hold really is standing when the note is written, so the row
+    // above is the fix and not a hold that silently lifted itself.
+    expect(wired.handle.resumeAgent('reviewer')).toBe(true);
   });
 });
 

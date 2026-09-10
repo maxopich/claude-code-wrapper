@@ -417,9 +417,10 @@ describe('AgentRunner — anyGateHeld (Cebab-vie.8)', () => {
   });
 
   test('it is ANY agent, not one named agent', () => {
-    // The detector has no agent to ask about: it has just watched the last
-    // running turn settle and wants to know whether anything at all can still
-    // move the run. Reddens a per-agent narrowing.
+    // `anyGateHeld` is the whole-runner probe: it reports a held gate anywhere,
+    // which is what the kick tests use to assert no gate was leaked. Reddens a
+    // per-agent narrowing of THIS method (the detector's per-agent question is
+    // `agentGateHeld`, covered below).
     const { runnerFactory } = buildBlockingRunner();
     const runner = new AgentRunner({ onEvent: () => undefined, runnerFactory });
     runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
@@ -428,6 +429,62 @@ describe('AgentRunner — anyGateHeld (Cebab-vie.8)', () => {
     expect(runner.pause('beta')).toBe(true);
     expect(runner.isPaused('alpha')).toBe(false);
     expect(runner.anyGateHeld()).toBe(true);
+  });
+});
+
+describe('AgentRunner — agentGateHeld (Cebab-6fax.41.2)', () => {
+  // The stranded-run detector asks this about the ONE agent the event tail is
+  // waiting on: a gate held on that agent means its turn will resume, but a
+  // gate held on some other agent says nothing about whether the awaited one
+  // will reply. Each case pairs a held agent with a different, unheld one so a
+  // return to the holder-agnostic `anyGateHeld` — which answers `true` for both
+  // — reddens.
+  test('true for the held agent, false for a different agent', () => {
+    const { runnerFactory } = buildBlockingRunner();
+    const runner = new AgentRunner({ onEvent: () => undefined, runnerFactory });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+    runner.register({ name: 'beta', cwd: '/tmp/beta' });
+
+    expect(runner.agentGateHeld('alpha')).toBe(false);
+    expect(runner.pause('beta')).toBe(true);
+    // `beta` is held; `alpha` — which is what a stranded run might be awaiting —
+    // is not. This is the distinction `anyGateHeld` could not make.
+    expect(runner.agentGateHeld('beta')).toBe(true);
+    expect(runner.agentGateHeld('alpha')).toBe(false);
+    expect(runner.resume('beta')).toBe(true);
+    expect(runner.agentGateHeld('beta')).toBe(false);
+  });
+
+  test('the pause-on-dangerous hold counts too, and only for its own agent', () => {
+    // Holder-agnostic per agent: the mutation hold is the case the detector
+    // actually needs, since it ends a worker's turn with the tail on that
+    // worker. Reddens if written against the operator holder only.
+    const { runnerFactory } = buildBlockingRunner();
+    const runner = new AgentRunner({ onEvent: () => undefined, runnerFactory });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+    runner.register({ name: 'beta', cwd: '/tmp/beta' });
+
+    expect(runner.holdForMutation('alpha')).toBe(true);
+    expect(runner.agentGateHeld('alpha')).toBe(true);
+    expect(runner.agentGateHeld('beta')).toBe(false);
+    expect(runner.releaseMutationHold('alpha')).toBe(true);
+    expect(runner.agentGateHeld('alpha')).toBe(false);
+  });
+
+  test('two holders on one agent: releasing one leaves that agent held', () => {
+    // The same one-verb-lifts-another-verb's-hold defect the holder set exists
+    // to prevent, seen from the per-agent detector's side.
+    const { runnerFactory } = buildBlockingRunner();
+    const runner = new AgentRunner({ onEvent: () => undefined, runnerFactory });
+    runner.register({ name: 'alpha', cwd: '/tmp/alpha' });
+
+    runner.pause('alpha');
+    runner.holdForMutation('alpha');
+    expect(runner.agentGateHeld('alpha')).toBe(true);
+    runner.resume('alpha');
+    expect(runner.agentGateHeld('alpha')).toBe(true);
+    runner.releaseMutationHold('alpha');
+    expect(runner.agentGateHeld('alpha')).toBe(false);
   });
 });
 
