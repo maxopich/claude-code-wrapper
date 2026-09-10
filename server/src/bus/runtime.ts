@@ -301,8 +301,16 @@ export function renderChainBriefing(opts: {
   selfAgent: string;
   participantNames: string[];
   nextHop: string;
+  /** Execute mode (default false = consultant): when true, the participant is
+   *  told it may create/modify/delete files WITHIN its own project folder to
+   *  implement the relayed task; otherwise it is held to analysis-only. Chain
+   *  participants used to receive NEITHER clause — the one production path with
+   *  no prompt-level brake at all (`Cebab-6fax.4`). Threaded from the session's
+   *  persisted `execute_mode`, exactly like `renderWorkerBriefing`. */
+  executeMode?: boolean;
 }): string {
   const { iterationId, position, totalSteps, selfAgent, participantNames, nextHop } = opts;
+  const executeMode = opts.executeMode ?? false;
   const isLast = position === totalSteps;
   const others = participantNames.filter((n) => n !== selfAgent);
   // F6: wrap every interpolated agent slug in a <participant>…</participant>
@@ -331,6 +339,17 @@ export function renderChainBriefing(opts: {
     }", text="<your ${isLast ? 'final ' : ''}reply>")`,
     ``,
     UNTRUSTED_INPUT_FRAMING,
+    ``,
+    // `Cebab-6fax.4` [security]: the prompt-level brake for a chain hop. A chain
+    // participant runs with an auto-approving `canUseTool`, its project's hooks
+    // loaded, and no operator in the loop — so with no clause here it was the
+    // one production path that could silently mutate a repo. Same two-branch
+    // shape and same wording as `renderWorkerBriefing`; the difference is only
+    // WHERE the relayed request comes from (a peer/initial task, not an
+    // orchestrator relay).
+    executeMode
+      ? `Execute mode: in this multi-agent session you may DO the work, not just advise. Use your own role and instructions to implement the task relayed to you — you may create, modify, or delete files WITHIN your own project folder. Do NOT modify, create, or delete files outside your own project folder.`
+      : `Consultant mode: in this multi-agent session you act as a consultant. Keep using your own role and instructions for the analysis, but unless the message you receive explicitly relays a user request to make a specific change, do NOT modify, create, or delete files outside your own project folder, and do NOT produce deliverable changes. Writing scratch/notes inside your own folder is fine. Default to findings and recommendations.`,
     ``,
     `Send exactly one ${
       isLast ? '`final`' : '`reply`'

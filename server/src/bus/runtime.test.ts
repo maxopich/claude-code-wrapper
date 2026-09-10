@@ -79,6 +79,40 @@ describe('renderChainBriefing', () => {
     expect(text).toContain('You are the last step');
     expect(text).toMatch(/bus_send\(destination="_sink", kind="final"/);
   });
+
+  // `Cebab-6fax.4` [security]: chain participants used to receive NEITHER a
+  // consultant constraint NOR an execute clause, making a chain hop the one
+  // production path with no prompt-level brake at all. Same two-branch shape as
+  // `renderWorkerBriefing`.
+  const chainBase = {
+    iterationId: '001',
+    position: 1,
+    totalSteps: 2,
+    selfAgent: 'coder',
+    participantNames: ['coder', 'reviewer'],
+    nextHop: 'reviewer',
+  };
+
+  test('imposes consultant mode by default — own-folder scratch ok, no other-directory changes', () => {
+    const text = renderChainBriefing(chainBase);
+    expect(text).toContain('Consultant mode');
+    expect(text).toMatch(/do NOT modify, create, or delete files outside your own project folder/i);
+    expect(text).toMatch(/scratch\/notes inside your own folder is fine/i);
+  });
+
+  test('defaults to consultant mode when executeMode is omitted or false', () => {
+    expect(renderChainBriefing(chainBase)).toContain('Consultant mode');
+    expect(renderChainBriefing({ ...chainBase, executeMode: false })).toContain('Consultant mode');
+  });
+
+  test('executeMode swaps the consultant clause for an own-folder execute clause', () => {
+    const text = renderChainBriefing({ ...chainBase, executeMode: true });
+    // The consultant analysis-only framing is gone...
+    expect(text).not.toContain('Consultant mode');
+    // ...replaced by permission to write inside the participant's own folder.
+    expect(text).toContain('Execute mode');
+    expect(text).toMatch(/within your own project folder/i);
+  });
 });
 
 describe('[security] untrusted-input framing', () => {

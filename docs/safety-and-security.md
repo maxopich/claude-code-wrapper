@@ -141,18 +141,22 @@ must **not** modify, create or delete files in other directories, or produce
 deliverable changes, _unless the user's relayed request explicitly directs that
 specific change_.
 
-Two limits on that sentence, both easy to over-read:
+It reaches **all three** prompt renderers — `renderRosterPrompt`,
+`renderWorkerBriefing` and `renderChainBriefing` (`Cebab-6fax.4`). Chain
+participants used to receive **neither** the constraint nor its execute-mode
+counterpart, which made a chain hop the one production path with no prompt-level
+brake at all — an agent running with an auto-approving `canUseTool`, its
+project's hooks loaded, and no operator in the loop. That gap is closed: a chain
+participant now carries the same consultant clause a worker does, threaded from
+the session's persisted `execute_mode` so an R-B reconstruct re-briefs a
+not-yet-spoken participant in the same mode it started in.
 
-- **It reaches the orchestrator and its workers, not chain participants.**
-  `renderRosterPrompt` and `renderWorkerBriefing` render the constraint;
-  `renderChainBriefing` renders **neither** it nor its execute-mode counterpart,
-  so a chain participant receives no prompt-level mutation constraint at all. It
-  still gets the mechanical pause-on-dangerous brake below. One of the two, not
-  neither.
+One limit on the sentence, easy to over-read:
+
 - **It is per-session and the operator can turn it off.** `executeMode` — a
   session-start opt-in, threaded through all three prompt renderers — **replaces**
   the consultant text with explicit permission to create, modify and delete files
-  _within the worker's own project folder_. Consultant is the default, not a
+  _within the participant's own project folder_. Consultant is the default, not a
   guarantee.
 
 ### Why it is advisory

@@ -762,6 +762,69 @@ describe('startChainSession — project CLAUDE.md injection', () => {
     unregisterLiveSession(handle.sessionId);
   });
 
+  // `Cebab-6fax.4` [security]: a chain participant runs with an auto-approving
+  // canUseTool, its project's hooks loaded, and no operator in the loop — so
+  // the prompt-level consultant/execute clause is the ONLY brake on it, and
+  // before this it received neither. These pin the DELIVERED prompt against the
+  // executeMode threaded through `startChainSession` (not the render function
+  // against itself): the property that matters is that the clause the operator
+  // chose is the one that actually reaches participant[0]'s first turn, and
+  // that it is persisted so R-B reconstruct re-briefs in the same mode.
+  test('default (no executeMode) briefs the chain head in consultant mode, persisted false', async () => {
+    const workspace = path.join(tmpRoot, 'ws-consult');
+    fs.mkdirSync(workspace, { recursive: true });
+    const captured: string[] = [];
+    const handle = await startChainSession({
+      participants: [participant('c-consult-a', null), participant('c-consult-b', null)],
+      initialPrompt: 'analyze this',
+      workspaceRoot: workspace,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      runnerFactory: fakeRunnerFactory(captured),
+    });
+    await new Promise((r) => setImmediate(r));
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('Consultant mode');
+    expect(captured[0]).not.toContain('Execute mode');
+    // The clause must arrive BEFORE the relayed task, like the framing.
+    expect(captured[0]!.indexOf('Consultant mode')).toBeLessThan(
+      captured[0]!.indexOf('analyze this'),
+    );
+    // Persisted + surfaced so R-B re-briefs the same way.
+    expect(handle.executeMode).toBe(false);
+    expect(getMultiAgentSession(handle.sessionId)!.execute_mode).toBe(0);
+
+    unregisterLiveSession(handle.sessionId);
+  });
+
+  test('executeMode=true briefs the chain head with the own-folder execute clause, persisted true', async () => {
+    const workspace = path.join(tmpRoot, 'ws-exec');
+    fs.mkdirSync(workspace, { recursive: true });
+    const captured: string[] = [];
+    const handle = await startChainSession({
+      participants: [participant('c-exec-a', null), participant('c-exec-b', null)],
+      initialPrompt: 'implement the fix',
+      workspaceRoot: workspace,
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      executeMode: true,
+      runnerFactory: fakeRunnerFactory(captured),
+    });
+    await new Promise((r) => setImmediate(r));
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('Execute mode');
+    expect(captured[0]).toMatch(/within your own project folder/i);
+    expect(captured[0]).not.toContain('Consultant mode');
+    // Persisted so an R-B reconstruct re-briefs a not-yet-spoken participant
+    // in execute mode rather than silently downgrading it to consultant.
+    expect(handle.executeMode).toBe(true);
+    expect(getMultiAgentSession(handle.sessionId)!.execute_mode).toBe(1);
+
+    unregisterLiveSession(handle.sessionId);
+  });
+
   // Symmetric to orchestrator.wiring's onActivity test: chain uses the same
   // observer + onMessage-wrap + deliver `.finally`, so guard the chain path
   // explicitly (regression: a missing `.finally` would never emit `idle`).
