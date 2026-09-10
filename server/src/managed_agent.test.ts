@@ -14,6 +14,7 @@ import {
 } from './managed_agent.js';
 import { withTempDataDir } from './test_support/temp_data_dir.js';
 import { config } from './config.js';
+import { hardenDataDir } from './data_perms.js';
 
 /**
  * Cebab-ws0.9 — the copy engine.
@@ -194,7 +195,7 @@ describe('managed_agent — the copy', () => {
   });
 
   test.skipIf(process.platform === 'win32')(
-    'copied files keep the executable bit and gain no group or other access',
+    'copied files are 0600 uniformly — the exec bit is dropped, not preserved (Cebab-6fax.43.2)',
     async () => {
       const src = path.join(tmp.root(), 'modes');
       write(path.join(src, 'run.sh'), '#!/bin/sh\necho hi\n');
@@ -204,15 +205,24 @@ describe('managed_agent — the copy', () => {
       const target = await claimManagedDir('modes');
       await copyTree(src, target);
 
-      const runMode = fs.statSync(path.join(target, 'run.sh')).mode & 0o777;
-      const plainMode = fs.statSync(path.join(target, 'plain.txt')).mode & 0o777;
-      // Executable survives; group/other are stripped. A copy into Cebab's own
-      // data dir must never widen who can read an agent's credentials, and it
-      // must not break the project's scripts either.
-      expect(runMode & 0o100).toBe(0o100);
-      expect(runMode & 0o077).toBe(0);
-      expect(plainMode & 0o077).toBe(0);
-      expect(plainMode & 0o100).toBe(0);
+      // 0600 wins uniformly: an executable source file is copied WITHOUT its
+      // exec bit, because a managed agent's tree is config and source read by
+      // an interpreter, never invoked. Group/other are stripped either way, so
+      // a copy into Cebab's own data dir never widens who can read the tree.
+      expect(fs.statSync(path.join(target, 'run.sh')).mode & 0o777).toBe(0o600);
+      expect(fs.statSync(path.join(target, 'plain.txt')).mode & 0o777).toBe(0o600);
+
+      // And the re-sweep is the guarantee that keeps it 0600. Pinning BOTH the
+      // post-copy and the post-sweep mode is deliberate: a test that only
+      // checked after the sweep would stay green if the copy started preserving
+      // the exec bit again, since the sweep only tightens group/other and leaves
+      // an owner-exec-only file (0700) alone.
+      const swept = hardenDataDir();
+      expect(swept.applied).toBe(true);
+      expect(fs.statSync(path.join(target, 'run.sh')).mode & 0o777).toBe(0o600);
+      expect(fs.statSync(path.join(target, 'plain.txt')).mode & 0o777).toBe(0o600);
+      // The tree above the files stays owner-traversable (0700), not 0600.
+      expect(fs.statSync(target).mode & 0o777).toBe(0o700);
     },
   );
 
@@ -609,24 +619,25 @@ describe('managed_agent — credential-bearing files (Cebab-ws0.11)', () => {
   });
 
   test.skipIf(process.platform === 'win32')(
-    'control: an ordinary file keeps its exec bit and is not forced to 0600',
+    'an ORDINARY executable file is also forced to 0600 — 0600 is uniform, not just for sensitive names (Cebab-6fax.43.2)',
     async () => {
-      // Forcing 0600 on everything would pass the case above and break every
-      // script in the copied project.
+      // The anti-vacuity pair for the 0600 rule: this proves the mode is applied
+      // to EVERY file, not only to credential-named ones. An implementation that
+      // forced 0600 only on sensitive paths (the old `& 0o700` branch for the
+      // rest) would pass the credential case above and fail here.
       const src = credentialFixture('exec');
       const target = await claimManagedDir('exec');
       await copyTree(src, target);
 
-      expect(fs.statSync(path.join(target, 'run.sh')).mode & 0o777).toBe(0o700);
+      expect(fs.statSync(path.join(target, 'run.sh')).mode & 0o777).toBe(0o600);
       expect(fs.statSync(path.join(target, 'src', 'index.ts')).mode & 0o777).toBe(0o600);
     },
   );
 
   test.skipIf(process.platform === 'win32')(
-    'an EXECUTABLE credential file loses the exec bit, unlike an ordinary one',
+    'an EXECUTABLE credential file also lands at 0600',
     async () => {
-      // This is the case `& 0o700` gets wrong: it would leave a 0755 `.env` at
-      // 0700. Nothing needs to execute a credential file.
+      // Nothing in a managed tree needs to execute, credential file or not.
       const src = path.join(tmp.root(), 'execenv');
       write(path.join(src, '.env'), `API_TOKEN=${FAKE_KEY}\n`);
       fs.chmodSync(path.join(src, '.env'), 0o755);
