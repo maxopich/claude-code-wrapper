@@ -84,6 +84,7 @@ describe('getScrubbedEnvVars — name-only env audit', () => {
       'ANTHROPIC_AUTH_TOKEN',
       'CLAUDE_CODE_OAUTH_TOKEN',
       'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR',
+      'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR',
       'AWS_BEARER_TOKEN_BEDROCK',
       'ANTHROPIC_FOUNDRY_API_KEY',
       'ANTHROPIC_FOUNDRY_AUTH_TOKEN',
@@ -161,6 +162,68 @@ describe('[security] the scrub list is derived from the CLI, not from a copy of 
     const arr = src.slice(open, close + 1);
     return [...new Set(arr.match(/CLAUDE_CODE_USE_[A-Z_]+/g) ?? [])];
   }
+
+  /**
+   * The credential-bearing file-descriptor env vars, taken from the bundle's
+   * env-name registry. `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR` and
+   * `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` each name a numbered fd the CLI
+   * reads a secret from — an API key / OAuth token — which overrides the
+   * OAuth subscription just as the inline `ANTHROPIC_API_KEY` /
+   * `CLAUDE_CODE_OAUTH_TOKEN` would (`Cebab-6fax.23`).
+   *
+   * These do NOT live in the `CI` credential array the backend-switch walk
+   * anchors on; they sit in the bundle's exported env-name map. So this is a
+   * second extraction rather than a reuse of the one above.
+   *
+   * Anchored on `API_KEY|OAUTH_TOKEN` — the two secret-bearing kinds — which
+   * deliberately EXCLUDES `CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR`: that is
+   * transport auth, not an API-key/subscription override, and is out of this
+   * bead's scope (tracked separately). Including `API_KEY` in the pattern is not
+   * circular the way a hand-copied expected list would be: the bundle is still
+   * the source of truth for whether the CLI KNOWS the var — if a release drops
+   * it, the anti-vacuity floor below reddens ("re-derive"), not the security
+   * assertion.
+   */
+  function credentialFdsFromBundle(): string[] {
+    const src = sdkBundle();
+    return [...new Set(src.match(/CLAUDE_CODE_(?:API_KEY|OAUTH_TOKEN)_FILE_DESCRIPTOR/g) ?? [])];
+  }
+
+  test('[security] every credential FILE_DESCRIPTOR the CLI knows is scrubbed', () => {
+    // `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR` was absent from the list until
+    // `Cebab-6fax.23`, so a stray `export CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR=N`
+    // pointed the CLI at an fd carrying an API key and every spawn authenticated
+    // as that key while `getScrubbedEnvVars()` reported nothing to strip.
+    const found = credentialFdsFromBundle();
+
+    // Anti-vacuity floor, INLINE rather than its own test on purpose: a
+    // standalone floor passes even when the scrub-list fix is reverted (it only
+    // asserts the bundle extraction works), so the revert-check reads it as a
+    // case that measures nothing. Folded in here, the same protection runs —
+    // an empty `found` makes the `missing` filter below vacuously pass, so the
+    // floor guards it — while this test as a whole still reddens the moment the
+    // fix is reverted (`missing` becomes non-empty). A RED on these three lines
+    // means "re-derive the extraction"; a RED on the `missing` assertion means
+    // "a credential fd is unscrubbed".
+    expect(
+      found.length,
+      'no credential FILE_DESCRIPTOR names extracted from the SDK bundle',
+    ).toBeGreaterThanOrEqual(2);
+    expect(found).toContain('CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR');
+    expect(found).toContain('CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR');
+
+    const missing = found.filter((name) => !SCRUBBED_ENV_VAR_NAMES.includes(name));
+    expect(
+      missing,
+      `the bundled CLI reads a credential from these fds and Cebab does not strip them: ${missing.join(', ')}`,
+    ).toEqual([]);
+  });
+
+  test('[security] and each credential FD is actually detected in a live env', () => {
+    for (const name of credentialFdsFromBundle()) {
+      expect(getScrubbedEnvVars({ [name]: '3' })).toEqual([name]);
+    }
+  });
 
   test('the extraction actually found the CLI list (anti-vacuity floor)', () => {
     // Without this the assertion below passes when the bundle is minified
