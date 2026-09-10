@@ -91,7 +91,7 @@ export const MAX_MANAGED_FILE_BYTES = 1_000_000;
  * DIRECTLY instead, with `..` and absolute inputs, so it is a real check with
  * real cases; and a test asserts every entry of the constant passes it. What it
  * guards is therefore not a hostile request — there is no request — but the
- * edit that adds a fourth entry to the constant and gets it wrong.
+ * edit that adds a fifth entry to the constant and gets it wrong.
  */
 export function relPathIsContained(rel: string): boolean {
   if (rel === '') return false;
@@ -343,7 +343,7 @@ export function writeManagedFile(
   // `copyTree` gives every non-sensitive file `entry.mode & 0o700`, i.e.
   // owner-only; writing CLAUDE.md at 0644 under the ordinary umask 022 landed
   // it group- and world-readable, which is a relaxation of exactly the kind
-  // the comment forbids. None of the three kinds is executable, and 0600 is
+  // the comment forbids. None of the four kinds is executable, and 0600 is
   // the data directory's stated file policy, so `FILE_MODE` is the whole
   // answer and `pathLooksSensitive` is no longer needed to pick a mode.
   const mode = FILE_MODE;

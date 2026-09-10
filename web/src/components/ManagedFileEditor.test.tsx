@@ -41,6 +41,7 @@ function render(over: Partial<ManagedFileEditorProps> = {}): ManagedFileEditorPr
     canSave: true,
     saving: false,
     savedAt: null,
+    trusted: true,
     saveRefusal: null,
     onKind: vi.fn(),
     onDraft: vi.fn(),
@@ -125,6 +126,15 @@ describe('saving', () => {
     render({ savedAt: 123, canSave: false });
     // "Saved" alone would leave open whether the running session picked it up.
     expect(text()).toContain('next session');
+  });
+
+  test('on an untrusted agent the save message says when it will actually load (Cebab-6fax.43.1)', () => {
+    // Reddens: dropping the untrusted branch -- the editor then promises that the
+    // next session loads a file an untrusted agent's chats never read. Managed
+    // copies start untrusted, so this is the ordinary case, not an edge.
+    render({ savedAt: 123, canSave: false, trusted: false });
+    expect(text()).toContain('Trusted');
+    expect(text()).not.toContain('next session');
   });
 
   test('Enter inserts a newline rather than saving', () => {

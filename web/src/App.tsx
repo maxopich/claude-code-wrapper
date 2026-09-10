@@ -3098,6 +3098,9 @@ function AppShell({
           canSave={canSaveManagedEdit(state.managedEdit)}
           saving={state.managedEdit.status === 'saving'}
           savedAt={state.managedEdit.savedAt}
+          trusted={
+            state.projects.find((p) => p.id === state.managedEdit?.projectId)?.trusted ?? false
+          }
           saveRefusal={state.managedEdit.draft === null ? null : state.managedEdit.refusal}
           onKind={switchManagedEditKind}
           onDraft={(text) => dispatch({ type: 'managed_edit_draft', text })}

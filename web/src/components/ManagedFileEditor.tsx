@@ -37,6 +37,10 @@ export type ManagedFileEditorProps = {
   canSave: boolean;
   saving: boolean;
   savedAt: number | null;
+  /** The agent's Trust setting. An untrusted agent's chats load none of these
+   *  files -- and managed copies start untrusted -- so the save message must not
+   *  promise that the next session will. `Cebab-6fax.43.1`. */
+  trusted: boolean;
   /** A failed SAVE, shown alongside the operator's text rather than replacing
    *  it — losing what they typed to report why it did not save would be worse
    *  than the failure. */
@@ -228,7 +232,9 @@ export function ManagedFileEditor(props: ManagedFileEditorProps) {
               )}
               {props.savedAt !== null && !props.saveRefusal && (
                 <p className="gate-modal-help managed-file-saved" role="status">
-                  Saved. The next session this agent starts will load it.
+                  {props.trusted
+                    ? 'Saved. The next session this agent starts will load it.'
+                    : "Saved. This agent's chats load it only once the agent is Trusted."}
                 </p>
               )}
             </>

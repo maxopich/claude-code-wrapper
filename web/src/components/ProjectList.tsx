@@ -297,7 +297,7 @@ export function ProjectList(props: {
                           e.stopPropagation();
                           props.onEditManagedConfig(p.id, p.name);
                         }}
-                        title={`Edit ${p.name}'s settings.json, .mcp.json and CLAUDE.md. Cebab owns this copy, so nothing in your own workspace is touched.`}
+                        title={`Edit ${p.name}'s settings.json, settings.local.json, .mcp.json and CLAUDE.md. Cebab owns this copy, so nothing in your own workspace is touched.`}
                       >
                         edit config
                       </button>
