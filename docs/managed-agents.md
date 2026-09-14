@@ -56,7 +56,16 @@ threat model and has never carried these two.
 
 ## Credentials, and why they are copied in the clear
 
-**Deliberately.** An encryption key that has to sit on the same disk as its ciphertext, readable by the same account, stops a casual grep and buys a key-management surface. What is done instead: the tree is 0700 and files matching `pathLooksSensitive` (exported from `shared/src/redact.ts` for this, and reused rather than restated) are written at exactly 0600 — which also strips a stray exec bit a plain `& 0o700` would keep; the preflight NAMES those files, paths only, since the predicate opens nothing; and a `chmod` that fails is reported as `permissions_unenforced` rather than swallowed. Note the ordering of importance: the 0700 TREE is what keeps other accounts out, and the per-file modes are defence in depth behind it.
+**Deliberately.** An encryption key that has to sit on the same disk as its ciphertext, readable by the same account, stops a casual grep and buys a key-management surface. What is done instead: the tree is 0700 and files matching `pathLooksSensitive` (exported from `shared/src/redact.ts` for this, and reused rather than restated) are written at exactly 0600 — which also strips a stray exec bit a plain `& 0o700` would keep; every other file keeps its OWNER bits (`entry.mode & 0o700`), so group and other are stripped and nothing the source could not do becomes possible in the copy; the preflight NAMES the credential files, paths only, since the predicate opens nothing; and a `chmod` that fails is reported as `permissions_unenforced` rather than swallowed. Note the ordering of importance: the 0700 TREE is what keeps other accounts out, and the per-file modes are defence in depth behind it.
+
+## Why an ordinary file keeps its owner-exec bit
+
+**Because a copied project's hooks and MCP servers are SPAWNED, not read** (`Cebab-6fax.43.2`). A uniform-0600 copy was specified, built and then closed unmerged, on two measurements taken against the bundled CLI:
+
+- **0600 stops them running.** Shell-form hooks go through `/bin/sh -c` and survive, but an exec-form hook and a stdio MCP server are executed directly. A `SessionStart` hook at `"$CLAUDE_PROJECT_DIR"/.claude/hooks/x.sh` failed at 0600 with **exit 126** (the 0700 control ran), and an `.mcp.json` server `./bin/server` at 0600 came up `failed` (the 0700 control `connected`; `node bin/server` at 0600 also `connected`, since there the interpreter is what gets executed). Exit 126 is **non-blocking**, so a `PreToolUse` guard hook invoked by path would stop blocking and **fail open** — and bus workers load project hooks regardless of Trust, so this lands on bus runs immediately.
+- **Nothing downstream was undoing an exec bit.** `hardenDataDir` skips any file with no group/other bits at all (`GROUP_OTHER_MASK = 0o077`), so a 0700 file is left exactly as it is. The sweep is not a backstop for a uniform-0600 rule and never contradicted the copy; the guarantee it and the copy share is **owner-only access behind the 0700 tree**, not 0600.
+
+So the two branches are deliberate and each is pinned from both sides in `server/src/managed_agent.test.ts`: a 0755 `run.sh` lands at 0700, a plain source file at 0600, and a 0755 `.env` at 0600 — the last being the case a bare `& 0o700` gets wrong. A change that "tidies" the copy to one mode reddens there rather than silently breaking every hook in every managed copy.
 
 ## The symlink rule
 

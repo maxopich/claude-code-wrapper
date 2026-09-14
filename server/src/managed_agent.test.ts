@@ -612,7 +612,14 @@ describe('managed_agent — credential-bearing files (Cebab-ws0.11)', () => {
     'control: an ordinary file keeps its exec bit and is not forced to 0600',
     async () => {
       // Forcing 0600 on everything would pass the case above and break every
-      // script in the copied project.
+      // script in the copied project. MEASURED, not asserted (Cebab-6fax.43.2,
+      // re-decided 2026-09-14 after the uniform-0600 change was built and
+      // closed): the CLI spawns exec-form hooks and stdio MCP servers
+      // directly, so at 0600 a `SessionStart` hook named by path fails with
+      // exit 126 and an `.mcp.json` server `./bin/server` comes up `failed`
+      // (0700 controls ran and connected). Exit 126 is NON-BLOCKING, so a
+      // `PreToolUse` guard hook invoked by path fails open. Keeping the owner
+      // bits is the decision; `docs/managed-agents.md` carries the rest.
       const src = credentialFixture('exec');
       const target = await claimManagedDir('exec');
       await copyTree(src, target);
