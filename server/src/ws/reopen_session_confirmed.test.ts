@@ -591,6 +591,52 @@ describe('executeReopenSessionConfirmed — a displaced LIVE incumbent is torn d
     expect(sent.find((m) => m.type === 'session_superseded')).toBeDefined();
   });
 
+  test('a stop that THROWS still clears the registry — the swallow must not re-create the leak', async () => {
+    // The catch exists so a broken teardown cannot leave the row `running`.
+    // Swallowing alone would be the original defect back again: the throw can
+    // land before `unregisterLiveSession`, and then the entry outlives a row
+    // that says `crashed` — exactly the state this bead is about. So the catch
+    // clears the entry itself.
+    const proj = upsertProject('P2', '/projects/p2');
+    createMultiAgentSession('incumbent2', 'orchestrator', '200');
+    createMultiAgentSession('target2', 'orchestrator', '201');
+    endMultiAgentSession('target2', 'crashed');
+    addParticipant('target2', proj.id, 'worker', null);
+
+    const stop = vi.fn(async (reason: string) => {
+      void reason;
+      // Throws BEFORE any unregister, which is the only ordering that matters.
+      throw new Error('teardown blew up');
+    });
+    registerLiveSession({
+      sessionId: 'incumbent2',
+      mode: 'orchestrator' as const,
+      handle: { sessionId: 'incumbent2', stop },
+      rebind: vi.fn(() => 1),
+      sendServerMsg: vi.fn(),
+    } as unknown as LiveBusSession);
+    expect(hasLiveSession('incumbent2')).toBe(true);
+
+    await executeReopenSessionConfirmed({
+      sessionId: 'target2',
+      acknowledgedWorkspaceDiff: true,
+      typedConfirmation: undefined,
+      currentActiveSessionId: 'incumbent2',
+      detachCurrentActive: vi.fn(),
+      adoptResumed: vi.fn(),
+      resumeCallbacks: dummyResumeCallbacks,
+      send: captureSend,
+      computeDiff: async () => EMPTY_DIFF,
+      resumeTarget: stubResumeOk,
+    });
+
+    expect(stop).toHaveBeenCalledWith('crashed');
+    expect(hasLiveSession('incumbent2')).toBe(false);
+    // The row is still marked, and the reopen still went through — a failing
+    // teardown must not take the operator's reopen down with it.
+    expect(getMultiAgentSession('incumbent2')?.status).toBe('crashed');
+  });
+
   // The not-live incumbent path — where `getLiveSession` returns undefined and
   // the handler falls through to the redundant `endMultiAgentSession` — is
   // already covered by the "swap path" test above, which registers nothing

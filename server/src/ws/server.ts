@@ -228,6 +228,7 @@ import {
   isSessionStartInFlight,
   listLiveSessionIds,
   releaseSessionStart,
+  unregisterLiveSession,
 } from '../bus/session_registry.js';
 import {
   resolveQuestion,
@@ -2064,8 +2065,23 @@ export async function executeReopenSessionConfirmed(args: {
       // own `endMultiAgentSession` (`markCrashedAndAnnounceSuperseded`, Register
       // B02). `stop()` runs its own teardown (endMultiAgentSession +
       // unregisterLiveSession); the redundant end-call below still covers the
-      // not-live case. A throwing `stop` is logged and swallowed so the row is
-      // never left `running`.
+      // not-live case.
+      //
+      // AWAITING HERE IS SAFE FOR A REASON WORTH STATING, because it is not a
+      // property of `stop` in general: `teardown` skips its one awaited step,
+      // `onTeardown`, exactly when `reason === 'crashed'`, so this resolves
+      // through microtasks and yields no macrotask. That is what keeps the
+      // claim above — no other WS message can observe the overlap — true. A
+      // future `onTeardown` that ran on the crashed path would break it, and
+      // another connection could then see both rows `running` and both
+      // sessions live.
+      //
+      // A throwing `stop` is logged and swallowed so the row is never left
+      // `running` — but swallowing alone would re-create the very leak this
+      // block exists to close, since a throw before `unregisterLiveSession`
+      // leaves the entry behind with a `crashed` row beside it. Clear it in the
+      // catch. Unregistering twice is harmless (a Map delete); leaving it is
+      // not.
       const liveActive = getLiveSession(currentActiveSessionId);
       if (liveActive) {
         try {
@@ -2075,6 +2091,7 @@ export async function executeReopenSessionConfirmed(args: {
             `[reopen_session_confirmed] failed to stop live displaced session ${currentActiveSessionId}`,
             err,
           );
+          unregisterLiveSession(currentActiveSessionId);
         }
       }
       endMultiAgentSession(currentActiveSessionId, 'crashed');
