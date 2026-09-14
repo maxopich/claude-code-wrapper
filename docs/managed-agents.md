@@ -110,6 +110,14 @@ workspace project outright (its directory is the operator's, and its row would r
 on the next scan anyway), and `removeManagedDir` re-checks containment itself. The
 destructive step is guarded twice by code that does not share a path.
 
-**Refused while anything is running.** `snapshotInFlight()` covers bus runs too, since
-their `agent_activity` carries a `projectId` — deleting the tree and rows out from under
-a live turn would leave the run writing into freed state.
+**Refused while anything is running.** Deleting the tree and rows out from under a live
+turn would leave the run writing into freed state. Two signals answer "is anything live",
+because they see different things. `snapshotInFlight()` is the per-HOP Query registry —
+it catches a single-agent turn and a bus participant whose turn is executing _at that
+instant_, but a bus run between hops (routing, awaiting the operator, a paused agent) has
+no in-flight query and slips past it (`Cebab-bxi0`). So the guard also refuses when the
+project takes part in a session `hasLiveSession()` reports as genuinely live in this
+process — a signal that holds for the run's whole lifetime, not just mid-hop. A stale
+`running` DB row left by a dead process is absent from that in-process map, so the refusal
+is scoped to a truly live run; a stranded row is instead ended by the `Cebab-6fax.33`
+handling above.

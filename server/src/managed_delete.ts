@@ -22,6 +22,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { config } from './config.js';
 import { emit } from './notifications/dispatcher.js';
+import { hasLiveSession } from './bus/session_registry.js';
 import { isManagedProjectPath, removeManagedDir } from './managed_agent.js';
 import { endMultiAgentSession, listMultiAgentSessionIdsForProject } from './repo/multi_agent.js';
 import { deleteProject, getProject } from './repo/projects.js';
@@ -65,13 +66,28 @@ export async function runManagedDelete(
 
   // Refuse while anything is still running against this project — deleting the
   // tree and rows out from under a live turn would leave the run writing into
-  // freed state. Matches `executeBulkSessionOp`'s running guard, and covers bus
-  // runs too (their `agent_activity` carries `projectId`).
+  // freed state. Matches `executeBulkSessionOp`'s running guard.
   const sessionSet = new Set(sessionIds);
-  const running = snapshotInFlight().some(
+  const singleAgentRunning = snapshotInFlight().some(
     (m) => m.projectId === projectId || sessionSet.has(m.sessionId),
   );
-  if (running) {
+
+  // `Cebab-bxi0`: `snapshotInFlight` is the per-HOP Query registry — it only
+  // sees a bus participant whose turn is executing at that exact instant. A bus
+  // run BETWEEN hops (routing, awaiting the operator, or a paused/muted agent)
+  // has no in-flight query for this project, so the check above waved it
+  // through; the delete then removed the `projects` row and the agent vanished
+  // from a live run's roster while it continued. The durable signal is the
+  // in-process registry of genuinely-live sessions (`hasLiveSession`), which
+  // holds a bus run for its whole lifetime, not just mid-hop. A stale `running`
+  // DB row left by a dead process is NOT in that map — so this refuses only a
+  // truly live run, and the `Cebab-6fax.33` end-the-stranded-row handling below
+  // still applies to those.
+  const inLiveBusRun = listMultiAgentSessionIdsForProject(projectId).some((sid) =>
+    hasLiveSession(sid),
+  );
+
+  if (singleAgentRunning || inLiveBusRun) {
     return fail('this agent has a running session — Stop or End it first, then retry the delete');
   }
 

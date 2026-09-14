@@ -24,6 +24,7 @@ import {
 import { getProject, upsertProject } from './repo/projects.js';
 import { createSession } from './repo/sessions.js';
 import { registerQuery } from './runner/lifecycle.js';
+import { registerLiveSession, unregisterLiveSession } from './bus/session_registry.js';
 import { withTempDataDir } from './test_support/temp_data_dir.js';
 
 type AuditRow = { kind: string; reason_code: string; payload_json: string };
@@ -195,6 +196,65 @@ describe('runManagedDelete', () => {
     expect(getProject(managedId)).toBeDefined();
     expect(fs.existsSync(managedPath)).toBe(true);
   });
+
+  test('[security] a live bus run BETWEEN hops blocks the delete (Cebab-bxi0)', async () => {
+    // The hazard: `snapshotInFlight` is the per-HOP Query registry, so between
+    // hops (routing, awaiting the operator, a paused agent) no query is in
+    // flight for the project and the guard used to wave the delete through —
+    // stripping the agent from a live run's roster mid-run. The durable signal
+    // is the in-process live-session registry, which holds the run for its
+    // whole lifetime. Note NO query is registered here: this is precisely the
+    // between-hops moment the old guard missed.
+    const managedId = await makeManagedAgent(tmp.root(), 'mid-hop');
+    const managedPath = getProject(managedId)!.path;
+    const sid = seedSession(managedId);
+    createMultiAgentSession('live-bus-sid', 'orchestrator');
+    addParticipant('live-bus-sid', managedId, 'worker', null);
+    registerLiveSession({
+      sessionId: 'live-bus-sid',
+      mode: 'orchestrator',
+      handle: {
+        sessionId: 'live-bus-sid',
+        iterationId: 'iter-1',
+        participantAgentNames: [],
+        lifecycle: 'temp',
+        sessionFolder: '',
+        stop: async () => {},
+        detach: () => {},
+        retry: async () => {},
+        continueThroughMutation: async () => {},
+      },
+      rebind: () => 1,
+      sendServerMsg: () => {},
+    });
+
+    const sent: ServerMsg[] = [];
+    let outcome;
+    try {
+      outcome = await runManagedDelete(managedId, (m) => sent.push(m));
+    } finally {
+      unregisterLiveSession('live-bus-sid');
+    }
+
+    expect(outcome.removed).toBe(false);
+    // Refusal is before the audit, so the tree, the row and the session survive.
+    expect(getProject(managedId)).toBeDefined();
+    expect(fs.existsSync(managedPath)).toBe(true);
+    expect(eventCount(sid)).toBe(1);
+    const result = sent.find((m) => m.type === 'managed_delete_result');
+    expect(result?.result.ok).toBe(false);
+    if (result?.type === 'managed_delete_result' && !result.result.ok) {
+      expect(result.result.error).toContain('running session');
+    }
+  });
+
+  // NOTE: the anti-vacuity control for the guard above — that a STALE `running`
+  // bus row (a dead process's row, absent from the in-process live map) does NOT
+  // block the delete and is instead ended `stopped` — is the pre-existing
+  // `Cebab-6fax.33` suite below. Those tests create a running participant WITHOUT
+  // registering it live, so a guard that over-refused on any `running` row would
+  // redden them. A duplicate here is only redundant coverage that never reddens
+  // under revert, so it is deliberately not added.
 
   test('a project that has gone away fails cleanly', async () => {
     const sent: ServerMsg[] = [];
