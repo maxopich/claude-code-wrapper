@@ -42,13 +42,6 @@ export type AuthorityPreflightModalProps = {
   projectIds: number[];
   model?: PreflightModelSlot;
   startMode?: PreflightStartModeSlot;
-  /**
-   * Cebab-ph8r [security]: the projects are about to run as BUS participants,
-   * which load all three setting scopes whatever Trust says. Forwarded to the
-   * body so the panel stops repeating the single-agent scope rule. See
-   * `AuthorityPanel`'s prop of the same name.
-   */
-  runsWithAllScopes?: boolean;
   /** Optional: hook fired when the operator clicks [Start session]. When
    *  omitted, the [Start session] button hides — modal is review-only. */
   onStart?: () => void;
@@ -56,7 +49,7 @@ export type AuthorityPreflightModalProps = {
 };
 
 export function AuthorityPreflightModal(props: AuthorityPreflightModalProps) {
-  const { projectIds, onStart, onClose, model, startMode, runsWithAllScopes = false } = props;
+  const { projectIds, onStart, onClose, model, startMode } = props;
   const { overlayRef, onBackdropMouseDown } = useModalSurface({ onClose });
   const startBtnRef = useRef<HTMLButtonElement>(null);
   const closeBtnRef = useRef<HTMLButtonElement>(null);
@@ -102,12 +95,11 @@ export function AuthorityPreflightModal(props: AuthorityPreflightModalProps) {
         </header>
         <p className="gate-modal-help">
           {isAggregate
-            ? 'Resolved authority for each participant project — the SDK will load these settings layers when each agent spawns. Bus participants load the project\u2019s own files whatever Trust says, so review per-project before starting the run.'
+            ? 'Resolved authority for each participant project — the SDK will load these settings layers when each agent spawns. Each participant loads its own files according to its Trust setting, so review per-project before starting the run.'
             : 'Resolved authority for this project — the SDK will load these settings layers when the session spawns. Review before starting.'}
         </p>
         <AuthorityPreflightBody
           projectIds={projectIds}
-          runsWithAllScopes={runsWithAllScopes}
           {...(model !== undefined && { model })}
           {...(startMode !== undefined && { startMode })}
         />
