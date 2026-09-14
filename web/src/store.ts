@@ -1380,6 +1380,39 @@ function retireRunningSessions(
 }
 
 /**
+ * Cebab-1jm3: give an in-flight managed copy a way out of a dropped socket.
+ *
+ * `Cebab-ygu.31` holds the copy modal open while `status === 'copying'` —
+ * Escape, the backdrop and the dismiss button are all inert — so a failure that
+ * arrives on the wire is not discarded by the reducer against a null
+ * `managedCopy`. But a copy that NEVER resolves (the socket drops mid-copy, the
+ * server restarts, or the copy hangs on a large tree) leaves the modal wedged in
+ * `copying` with no path out. A disconnect is the observable form of "the result
+ * will never arrive here": `runManagedCopy` streams its result over this socket
+ * and nothing re-requests it on reconnect (`onOpen` sends only
+ * `get_settings`/`list_projects`), so once the socket is gone the pending result
+ * is already lost. Resolve the modal to a dismissable failure — the same
+ * retire-the-stale-liveness move `ws_close` already makes for running sessions
+ * and open permission cards. Returns the same reference when nothing is copying,
+ * so a close on an idle app allocates nothing. If the copy did finish
+ * server-side, the new agent still appears via the reconnect's `list_projects`.
+ */
+function resolveDisconnectedManagedCopy(
+  managedCopy: AppState['managedCopy'],
+): AppState['managedCopy'] {
+  if (!managedCopy || managedCopy.status !== 'copying') return managedCopy;
+  return {
+    ...managedCopy,
+    status: 'done',
+    result: {
+      ok: false,
+      error:
+        'The connection dropped before the copy finished. If it completed on the server, the new agent will appear in your sidebar.',
+    },
+  };
+}
+
+/**
  * Cebab-ygu.27: mark every still-open permission card as denied-by-disconnect.
  * Called from the `ws_close` reducer alongside `retireRunningSessions`.
  *
@@ -1675,6 +1708,12 @@ export function reduce(state: AppState, action: Action): AppState {
         // briefly relight the badge on reconnect for an install that
         // happened before the connection dropped.
         lastBusInstallAt: {},
+        // Cebab-1jm3: a managed copy in flight streams its result over THIS
+        // socket; once the socket is gone the result can never land, so the
+        // held-open modal (ygu.31) would wedge in `copying` with no dismiss.
+        // Resolve it to a dismissable failure — same retire-stale-liveness move
+        // as the running-session and permission-card drains above.
+        managedCopy: resolveDisconnectedManagedCopy(state.managedCopy),
       };
 
     case 'connection_lost':

@@ -328,11 +328,18 @@ describe('ManagedCopyModal — a copy in flight cannot be dismissed (Cebab-ygu.3
 
   test('the failure the operator would otherwise never see is shown once the copy resolves', () => {
     const onClose = vi.fn();
-    // The copy runs — the modal is now undismissable...
+    // The copy runs — and the guard is what carries the failure to the operator:
+    // an Escape here must NOT dismiss, because dismissing sets `managedCopy: null`
+    // and the reducer then drops the incoming `managed_copy_result`, error and
+    // all. Assert the guard directly (not just that a done state renders): with
+    // the hold-open fix reverted this Escape fires onClose and this line reddens.
     renderWith(state({ status: 'copying', progress: null }), onClose);
-    // ...then fails. Because the modal stayed open through the copy, the result
-    // lands in an open modal (rather than being dropped by the reducer against a
-    // null `managedCopy`) and the server's error text renders.
+    act(() => {
+      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+    });
+    expect(onClose).not.toHaveBeenCalled();
+    // ...then it fails. Because the modal stayed open through the copy, the
+    // result lands in an open modal and the server's error text renders.
     renderWith(
       state({ status: 'done', result: { ok: false, error: 'permission denied' } }),
       onClose,

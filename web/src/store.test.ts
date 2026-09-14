@@ -4220,6 +4220,31 @@ describe('store / managed copy (Cebab-ws0.9)', () => {
     expect(s.managedCopy?.status).toBe('done');
     expect(s.managedCopy?.result).toEqual({ ok: false, error: 'nope' });
   });
+
+  test('a disconnect mid-copy resolves the held-open modal, but leaves a still-dismissable one alone (Cebab-1jm3)', () => {
+    // ygu.31 makes the modal inert while `copying`, so a copy that NEVER
+    // resolves (dropped socket, server restart, a hung tree) would wedge the
+    // modal forever. The result streams over this socket and nothing
+    // re-requests it on reconnect, so a `ws_close` is the observable "it will
+    // never arrive": the modal must flip to a dismissable failure.
+    let s = reduce(open(), { type: 'managed_copy_open', projectId: 4 });
+    s = reduce(s, { type: 'managed_copy_started' });
+    expect(s.managedCopy?.status).toBe('copying');
+
+    s = reduce(s, { type: 'ws_close' });
+    expect(s.managedCopy?.status).toBe('done');
+    expect(s.managedCopy?.result?.ok).toBe(false);
+    expect(s.managedCopy?.projectId).toBe(4);
+
+    // The other half of the fix, in the same case so it reddens with it: only
+    // `copying` is the wedged state — `measuring`/`ready`/`done` already keep a
+    // working dismiss, so ws_close must NOT manufacture a spurious failure for
+    // them. Same reference in, same reference out.
+    const measuring = reduce(open(), { type: 'managed_copy_open', projectId: 5 });
+    expect(measuring.managedCopy?.status).toBe('measuring');
+    const afterClose = reduce(measuring, { type: 'ws_close' });
+    expect(afterClose.managedCopy).toBe(measuring.managedCopy);
+  });
 });
 
 describe('store / tool output survives the fold (Cebab-003)', () => {
