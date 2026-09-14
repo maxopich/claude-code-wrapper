@@ -563,7 +563,7 @@ export function DraftView(props: {
                       ) : (
                         <button
                           className="primary-btn"
-                          title="Install bus integration: pure DB metadata — Cebab assigns a stable agent slug and marks this project bus-eligible. Nothing is written into the project (no CLAUDE.md, no .claude/settings.json, no scripts). During multi-agent sessions this project's agent runs headless: every tool call is auto-approved with no human in the loop — bypass in effect. Only AskUserQuestion is ever surfaced to you."
+                          title="Install bus integration: pure DB metadata — Cebab assigns a stable agent slug and marks this project bus-eligible. Nothing is written into the project (no CLAUDE.md, no .claude/settings.json, no scripts). Cebab writing nothing is not the same as nothing running: if this project is Trusted, its own hooks and MCP servers load and run on every hop, exactly as in a single-agent session; if it is untrusted, they do not. During multi-agent sessions this project's agent runs headless: every tool call is auto-approved with no human in the loop — bypass in effect. Only AskUserQuestion is ever surfaced to you."
                           onClick={() =>
                             // U16: was a `window.confirm`. Same words, same
                             // friction — an in-app dialog the theme reaches.
@@ -575,6 +575,17 @@ export function DraftView(props: {
                                     Pure database metadata: Cebab assigns a stable agent slug and
                                     marks the project bus-eligible. Nothing is written into the
                                     project itself.
+                                  </p>
+                                  <p>
+                                    {/* Cebab-6fax.21.3: &quot;Cebab writes nothing&quot; was read
+                                     *  as &quot;nothing runs&quot;. Since Cebab-6fax.21.1 a
+                                     *  participant&apos;s scopes follow its own Trust, so say which
+                                     *  half applies to this project. */}
+                                    Cebab writing nothing is not the same as nothing running. If
+                                    this project is <strong>Trusted</strong>, its own hooks, env
+                                    injectors and MCP servers load and run on every hop of a
+                                    multi-agent session, exactly as they would in a single-agent
+                                    session here. If it is untrusted, none of them load.
                                   </p>
                                   <p>
                                     During multi-agent sessions this project&apos;s agent runs
