@@ -563,7 +563,7 @@ export function DraftView(props: {
                       ) : (
                         <button
                           className="primary-btn"
-                          title="Install bus integration: pure DB metadata — Cebab assigns a stable agent slug and marks this project bus-eligible. Nothing is written into the project (no CLAUDE.md, no .claude/settings.json, no scripts). During multi-agent sessions this project's agent runs headless: every tool call is auto-approved with no human in the loop — bypass in effect. Only AskUserQuestion is ever surfaced to you."
+                          title="Install bus integration: pure DB metadata — Cebab assigns a stable agent slug and marks this project bus-eligible. Nothing is written into the project (no CLAUDE.md, no .claude/settings.json, no scripts). Cebab writing nothing is not the same as nothing running: if this project is Trusted, its own hooks and MCP servers load and run on every hop, exactly as in a single-agent session; if it is untrusted, they do not. During multi-agent sessions this project's agent runs headless: every tool call is auto-approved with no human in the loop — bypass in effect. Only AskUserQuestion is ever surfaced to you."
                           onClick={() =>
                             // U16: was a `window.confirm`. Same words, same
                             // friction — an in-app dialog the theme reaches.
@@ -575,6 +575,17 @@ export function DraftView(props: {
                                     Pure database metadata: Cebab assigns a stable agent slug and
                                     marks the project bus-eligible. Nothing is written into the
                                     project itself.
+                                  </p>
+                                  <p>
+                                    {/* Cebab-6fax.21.3: &quot;Cebab writes nothing&quot; was read
+                                     *  as &quot;nothing runs&quot;. Since Cebab-6fax.21.1 a
+                                     *  participant&apos;s scopes follow its own Trust, so say which
+                                     *  half applies to this project. */}
+                                    Cebab writing nothing is not the same as nothing running. If
+                                    this project is <strong>Trusted</strong>, its own hooks, env
+                                    injectors and MCP servers load and run on every hop of a
+                                    multi-agent session, exactly as they would in a single-agent
+                                    session here. If it is untrusted, none of them load.
                                   </p>
                                   <p>
                                     During multi-agent sessions this project&apos;s agent runs
@@ -2132,11 +2143,16 @@ export function ActiveRunView(props: {
 
 /**
  * Item #6: trust signal per bus participant, joined render-time from the
- * project's `trusted` flag. Trust is not a runtime gate here — the bus's
- * `canUseTool` (server/src/bus/runner.ts) never reads the project's trust
- * flag; it allows every tool but `AskUserQuestion` for any agent that is not
- * the orchestrator. So the chip exposes which projects the operator has
- * vouched for, which is otherwise invisible from this surface.
+ * project's `trusted` flag.
+ *
+ * TWO GATES, AND ONLY ONE OF THEM IGNORES TRUST (`Cebab-6fax.21.1`). The
+ * per-tool gate still does: the bus's `canUseTool` (server/src/bus/runner.ts)
+ * allows every tool but `AskUserQuestion` for any agent that is not the
+ * orchestrator, whatever the project's Trust. What Trust now decides is which
+ * setting scopes the participant spawns with — `busSettingScopesFor`, read at
+ * each hop — so an untrusted participant's hooks, env injectors and
+ * `.mcp.json` servers do not load at all, and a trusted one's do and run on
+ * every hop. The chip said this signal was "informational here"; it is not.
  *
  * Returns null when no project matches the slug (degenerate case: the project
  * was uninstalled/deleted mid-run). Caller renders nothing in that case.
@@ -2148,7 +2164,7 @@ function ParticipantTrustChip(props: { slug: string; projects: Project[] }) {
   // One sentence, both arms — it drifted into two copies once already, and the
   // claim it drifted into was wrong in both (register X01/X11).
   const busNote =
-    "Bus workers auto-approve every tool call regardless of trust, so this signal is informational here — the bus gate never reads the project's trusted flag.";
+    'On the bus this decides what LOADS, not what is allowed: a trusted participant loads its own hooks, env injectors and .mcp.json on every hop, an untrusted one loads none of them. Tool calls are auto-approved either way — only AskUserQuestion reaches you.';
   const title = trusted
     ? `${project.name}: trusted. In a single-agent chat this project auto-allows every tool. ${busNote}`
     : `${project.name}: untrusted. In a single-agent chat this project would prompt for non-edit tools. ${busNote}`;

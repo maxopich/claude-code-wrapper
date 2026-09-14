@@ -103,8 +103,11 @@ bus, that is not how workers behave.** Workers and chain participants
 **auto-approve every tool** — Bash, Edit, file writes, MCP calls — with no human
 gate. The one exception is `AskUserQuestion`: when an agent explicitly asks _you_
 a question, that reaches you and your answer is handed back to it. Everything
-else runs on its own. Because participants also load their own project settings,
-any hooks a project defines will fire on every hop too, again without a prompt.
+else runs on its own. A participant on a **Trusted** project also loads that
+project's own settings, so any hooks it defines fire on every hop too, again
+without a prompt. A participant on an untrusted project loads none of them —
+Trust applies to a multi-agent run participant by participant, the same way it
+applies to a single-agent session.
 
 The **orchestrator is the deliberate opposite**. It runs a locked-down policy
 (`delegate-only`, default-deny): it is allowed to do essentially two things —
