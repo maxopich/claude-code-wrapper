@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { config } from '../config.js';
@@ -21,6 +22,8 @@ import { AgentRunner } from './runner.js';
 // that previously let an UNTRUSTED worker's project MCP servers, `env:` block
 // and hooks load with all three layers while its Trust toggle said `['user']`,
 // and the gate (resolving trust-derived) saw nothing to prompt about.
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 let tmpRoot: string;
 let projectDir: string;
@@ -199,13 +202,130 @@ describe('[security] behavioural red: a participant loads its project layers iff
   });
 });
 
-// NOTE: a gate-level assertion via `gateProjectsForSpawn(conn, [projectId])`
-// (no override) is deliberately NOT added here. That call resolves each project
-// against its trust-derived scopes both before and after this change — the old
-// omitted-`settingSources` default and the new `busSettingScopesFor` produce
-// the identical scope set — so it is observationally unchanged and would be a
-// vacuous test (it cannot redden on revert). The gate's real change is the
-// bus CALL SITES in `ws/server.ts` dropping the `BUS_SETTING_SCOPES` override;
-// `mcp_denial_gate.security.test.ts` exercises the gate directly, and the
-// spawn↔gate agreement is pinned above by comparing the runner's derived
-// `opts.settingSources` (which DID change) to the resolver's `settingSourcesUsed`.
+describe('[security] Trust is read at EACH hop, not captured at register', () => {
+  /**
+   * Two hops through one registration, capturing the options each one spawned
+   * with. `captureSpawnOptions` above delivers a single turn immediately after
+   * `register`, so a register-time capture of the scopes would produce the
+   * identical value and the whole file would stay green — measured, by mutating
+   * the runner to capture at register: all 221 cases passed. This is the case
+   * that sees it.
+   */
+  async function captureTwoHops(
+    firstTrusted: boolean,
+    thenTrusted: boolean,
+  ): Promise<(RunOptions & Partial<MockOptions>)[]> {
+    const calls: (RunOptions & Partial<MockOptions>)[] = [];
+    const runner = new AgentRunner({
+      onEvent: () => {},
+      runnerFactory: (opts) => {
+        calls.push(opts);
+        return fakeRunner([resultMsg('sess-two-hop')]);
+      },
+    });
+    setProjectTrusted(projectId, firstTrusted);
+    runner.register({
+      name: 'worker',
+      cwd: projectDir,
+      projectId,
+      // Mismatched against BOTH values below, so neither hop can pass by
+      // surfacing the register-time value.
+      settingSources: ['local'],
+    });
+    await runner.deliverTurn('worker', 'hop one');
+    setProjectTrusted(projectId, thenTrusted);
+    await runner.deliverTurn('worker', 'hop two');
+    expect(calls).toHaveLength(2);
+    return calls;
+  }
+
+  test('revoking Trust mid-run narrows the NEXT hop — the safety-relevant direction', async () => {
+    const [first, second] = await captureTwoHops(true, false);
+    expect(first!.settingSources).toEqual(['user', 'project', 'local']);
+    expect(second!.settingSources).toEqual(['user']);
+  });
+
+  test('granting Trust mid-run widens the next hop (see Cebab-ipbr: the gate does not re-run)', async () => {
+    const [first, second] = await captureTwoHops(false, true);
+    expect(first!.settingSources).toEqual(['user']);
+    // Pinned as the CURRENT behaviour, not as a desirable one. The spawn
+    // re-reads Trust every hop while `gateProjectsForSpawn` runs only at
+    // session start, `addWorker` and the R-B Continue path — so this hop loads
+    // the project's MCP servers, `env:` injectors and hooks having passed no
+    // gate. `Cebab-ipbr` closes that by re-gating on elevation; when it lands,
+    // this expectation changes and this comment is the record of why.
+    expect(second!.settingSources).toEqual(['user', 'project', 'local']);
+  });
+});
+
+describe('[security] no bus gate call site pins its own scopes', () => {
+  /**
+   * The gate half of `Cebab-6fax.21.1` is the four BUS call sites in
+   * `ws/server.ts` dropping their `BUS_SETTING_SCOPES` third argument, and
+   * nothing above can see that: restoring the override at all four leaves every
+   * behavioural case in this file green (measured). A gate-level assertion via
+   * `gateProjectsForSpawn(conn, [projectId])` cannot see it either — that call
+   * resolves trust-derived before and after, so it is observationally
+   * unchanged and would be vacuous.
+   *
+   * So pin the CALL SITES, by reading the source the same way
+   * `ws/projects_emit_site.test.ts` and `busPreflightScopes.test.ts` do. The
+   * third parameter is `settingSourcesOverride`, and exactly one caller is
+   * allowed to pass it: the single-agent turn, for the built-in assistant's
+   * zero-layer posture.
+   */
+  const SERVER_TS = path.resolve(__dirname, '..', 'ws', 'server.ts');
+  const ALLOWED_OVERRIDE = 'assistant ? [] : undefined';
+
+  /** Argument text of each `gateProjectsForSpawn(...)` CALL, declaration excluded. */
+  function callArguments(source: string): string[] {
+    const out: string[] = [];
+    const needle = 'gateProjectsForSpawn(';
+    let at = source.indexOf(needle);
+    while (at !== -1) {
+      // The declaration is `export async function gateProjectsForSpawn(`.
+      const lineStart = source.lastIndexOf('\n', at) + 1;
+      if (!source.slice(lineStart, at).includes('function')) {
+        let depth = 1;
+        let i = at + needle.length;
+        for (; i < source.length && depth > 0; i += 1) {
+          if (source[i] === '(') depth += 1;
+          else if (source[i] === ')') depth -= 1;
+        }
+        out.push(source.slice(at + needle.length, i - 1));
+      }
+      at = source.indexOf(needle, at + needle.length);
+    }
+    return out;
+  }
+
+  test('every call passes conn + project ids only, except the assistant posture', () => {
+    const source = fs.readFileSync(SERVER_TS, 'utf8');
+    const calls = callArguments(source);
+    // ANTI-VACUITY: a rename or a refactor that moves the gate elsewhere must
+    // fail here rather than pass on an empty scan.
+    expect(calls.length).toBeGreaterThanOrEqual(5);
+
+    const withOverride = calls.filter((args) => splitTopLevel(args).length > 2);
+    expect(withOverride.map((a) => splitTopLevel(a)[2]!.trim())).toEqual([ALLOWED_OVERRIDE]);
+  });
+
+  /** Split a call's argument text on TOP-LEVEL commas only. */
+  function splitTopLevel(args: string): string[] {
+    const parts: string[] = [];
+    let depth = 0;
+    let start = 0;
+    for (let i = 0; i < args.length; i += 1) {
+      const ch = args[i]!;
+      if ('([{'.includes(ch)) depth += 1;
+      else if (')]}'.includes(ch)) depth -= 1;
+      else if (ch === ',' && depth === 0) {
+        parts.push(args.slice(start, i));
+        start = i + 1;
+      }
+    }
+    const last = args.slice(start).trim();
+    if (last.length > 0) parts.push(last);
+    return parts.map((p) => p.trim()).filter((p) => p.length > 0);
+  }
+});

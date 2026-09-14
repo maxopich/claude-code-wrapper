@@ -1879,8 +1879,9 @@ export function wireChainSession(p: {
       // `Cebab-6fax.21.1` [security]: setting scopes are NOT pinned here. The
       // runner derives them from this `projectId`'s Trust at each hop
       // (`busSettingScopesFor`) — trusted → all three layers, untrusted →
-      // `['user']` — so a Trust toggle mid-run applies on the next hop, and
-      // the gate that vetted this participant resolves against the same scopes.
+      // `['user']` — so a Trust toggle mid-run applies on the next hop. The
+      // gate resolves against the same FUNCTION but at start only, so an
+      // elevation mid-run outruns it; see `bus/runner.ts` and `Cebab-ipbr`.
       // Cluster G Phase 3 (G1): thread the participant project so the
       // lifecycle registry's per-hop snapshot can name it for the
       // active-runs sidebar dropdown.

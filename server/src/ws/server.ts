@@ -2634,8 +2634,12 @@ export async function gateProjectsForSpawn(
     // [security] Resolve against the scopes the SPAWN will use. For the bus
     // (and the ordinary single-agent turn) that is this project's trust-derived
     // set — the SAME function `bus/runner.ts` derives the spawn's
-    // `settingSources` from (`Cebab-6fax.21.1`), so the gate and the spawn can
-    // never disagree. For an untrusted project `busSettingScopesFor` returns
+    // `settingSources` from (`Cebab-6fax.21.1`), so the gate and the spawn
+    // agree about what a Trust value means. They agree about the VALUE only as
+    // long as it does not move: this runs at session start, at `addWorker` and
+    // on the R-B Continue path, while the spawn re-reads the row every hop, so
+    // a Trust elevation mid-run spawns wider than anything gated here
+    // (`Cebab-ipbr`). For an untrusted project `busSettingScopesFor` returns
     // `['user']`, so the MCP and env gates below correctly see nothing
     // project-scoped to gate — because the spawn will not load it either.
     // `scope_conformance.test.ts` pins the shared use. The assistant's `[]`
