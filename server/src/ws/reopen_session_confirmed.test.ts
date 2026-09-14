@@ -16,6 +16,13 @@ import { listForSession } from '../repo/recovery_log.js';
 import { upsertProject } from '../repo/projects.js';
 import type { ResumedSession } from '../bus/resume.js';
 import type { OrchestratorSessionHandle } from '../bus/orchestrator.js';
+import {
+  getLiveSession,
+  hasLiveSession,
+  registerLiveSession,
+  unregisterLiveSession,
+  type LiveBusSession,
+} from '../bus/session_registry.js';
 import { executeReopenSessionConfirmed } from './server.js';
 
 // Cluster D Phase 5c (spec §6.3, BE-D20 / BE-D21 / BE-D24): coverage
@@ -116,6 +123,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // The live registry is a process singleton — a test that registers an
+  // incumbent must not leak it into the next test's `claimSessionStart`.
+  unregisterLiveSession('incumbent');
   closeDb();
   config.dataDir = originalDataDir;
   fs.rmSync(tmpRoot, { recursive: true, force: true });
@@ -519,6 +529,120 @@ describe('executeReopenSessionConfirmed — reactivation failures', () => {
       message: 'reconstruction blew up',
     });
   });
+});
+
+// Cebab-1tty: displacing a LIVE incumbent must actually tear it down, not just
+// silence its sink. `detachCurrentActive` is a bare sink swap, and nothing else
+// in this handler clears the live registry — so before the fix the displaced
+// run stayed live in-process forever while its row read `crashed`, which is
+// what refused a managed-agent delete, no-op'd stop, and wedged the next start.
+describe('executeReopenSessionConfirmed — a displaced LIVE incumbent is torn down (Cebab-1tty)', () => {
+  /** A fake live session whose `stop` mimics a real router teardown: it
+   *  unregisters itself from the process registry (as chain/orchestrator
+   *  `teardown` does via `unregisterLiveSession`). */
+  function registerFakeLive(sessionId: string): { stop: ReturnType<typeof vi.fn> } {
+    const stop = vi.fn(async (reason: string) => {
+      void reason;
+      unregisterLiveSession(sessionId);
+    });
+    const fake = {
+      sessionId,
+      mode: 'orchestrator' as const,
+      handle: { sessionId, stop },
+      rebind: vi.fn(() => 1),
+      sendServerMsg: vi.fn(),
+    };
+    registerLiveSession(fake as unknown as LiveBusSession);
+    return { stop };
+  }
+
+  test('reopening B while A is live leaves A absent from the live registry', async () => {
+    const proj = upsertProject('P', '/projects/p');
+    createMultiAgentSession('incumbent', 'orchestrator', '100'); // stays running
+    createMultiAgentSession('target', 'orchestrator', '101');
+    endMultiAgentSession('target', 'crashed');
+    addParticipant('target', proj.id, 'worker', null);
+
+    const { stop } = registerFakeLive('incumbent');
+    expect(hasLiveSession('incumbent')).toBe(true);
+
+    await executeReopenSessionConfirmed({
+      sessionId: 'target',
+      acknowledgedWorkspaceDiff: true,
+      typedConfirmation: undefined,
+      currentActiveSessionId: 'incumbent',
+      detachCurrentActive: vi.fn(),
+      adoptResumed: vi.fn(),
+      resumeCallbacks: dummyResumeCallbacks,
+      send: captureSend,
+      computeDiff: async () => EMPTY_DIFF,
+      resumeTarget: stubResumeOk,
+    });
+
+    // The handle was stopped for real, so the registry no longer holds A. A
+    // managed agent that took part in A can now be deleted (the delete refusal
+    // keys on exactly this registry being non-empty), stop is no longer a
+    // no-op, and claimSessionStart is un-wedged.
+    expect(stop).toHaveBeenCalledWith('crashed');
+    expect(hasLiveSession('incumbent')).toBe(false);
+    expect(getLiveSession('incumbent')).toBeUndefined();
+    // And the swap still completed: row crashed, superseded notice sent.
+    expect(getMultiAgentSession('incumbent')?.status).toBe('crashed');
+    expect(sent.find((m) => m.type === 'session_superseded')).toBeDefined();
+  });
+
+  test('a stop that THROWS still clears the registry — the swallow must not re-create the leak', async () => {
+    // The catch exists so a broken teardown cannot leave the row `running`.
+    // Swallowing alone would be the original defect back again: the throw can
+    // land before `unregisterLiveSession`, and then the entry outlives a row
+    // that says `crashed` — exactly the state this bead is about. So the catch
+    // clears the entry itself.
+    const proj = upsertProject('P2', '/projects/p2');
+    createMultiAgentSession('incumbent2', 'orchestrator', '200');
+    createMultiAgentSession('target2', 'orchestrator', '201');
+    endMultiAgentSession('target2', 'crashed');
+    addParticipant('target2', proj.id, 'worker', null);
+
+    const stop = vi.fn(async (reason: string) => {
+      void reason;
+      // Throws BEFORE any unregister, which is the only ordering that matters.
+      throw new Error('teardown blew up');
+    });
+    registerLiveSession({
+      sessionId: 'incumbent2',
+      mode: 'orchestrator' as const,
+      handle: { sessionId: 'incumbent2', stop },
+      rebind: vi.fn(() => 1),
+      sendServerMsg: vi.fn(),
+    } as unknown as LiveBusSession);
+    expect(hasLiveSession('incumbent2')).toBe(true);
+
+    await executeReopenSessionConfirmed({
+      sessionId: 'target2',
+      acknowledgedWorkspaceDiff: true,
+      typedConfirmation: undefined,
+      currentActiveSessionId: 'incumbent2',
+      detachCurrentActive: vi.fn(),
+      adoptResumed: vi.fn(),
+      resumeCallbacks: dummyResumeCallbacks,
+      send: captureSend,
+      computeDiff: async () => EMPTY_DIFF,
+      resumeTarget: stubResumeOk,
+    });
+
+    expect(stop).toHaveBeenCalledWith('crashed');
+    expect(hasLiveSession('incumbent2')).toBe(false);
+    // The row is still marked, and the reopen still went through — a failing
+    // teardown must not take the operator's reopen down with it.
+    expect(getMultiAgentSession('incumbent2')?.status).toBe('crashed');
+  });
+
+  // The not-live incumbent path — where `getLiveSession` returns undefined and
+  // the handler falls through to the redundant `endMultiAgentSession` — is
+  // already covered by the "swap path" test above, which registers nothing
+  // live. A duplicate here would pass with or without this change (there is no
+  // handle to stop), so it is deliberately omitted rather than written as a
+  // non-reddening case.
 });
 
 // Register S09: a reopen that fails must not have cost the operator the session

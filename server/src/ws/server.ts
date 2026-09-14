@@ -228,6 +228,7 @@ import {
   isSessionStartInFlight,
   listLiveSessionIds,
   releaseSessionStart,
+  unregisterLiveSession,
 } from '../bus/session_registry.js';
 import {
   resolveQuestion,
@@ -2054,6 +2055,45 @@ export async function executeReopenSessionConfirmed(args: {
   if (currentActiveSessionId && currentActiveSessionId !== sessionId) {
     try {
       detachCurrentActive();
+      // Cebab-1tty: `detachCurrentActive` is a bare sink swap — it silences
+      // the WS stream but leaves the incumbent's AgentRunner alive and its
+      // entry in the live registry, which NOTHING else here ever clears. So
+      // the `crashed` row we write next would be a lie: the run stays live for
+      // the life of the process, refusing a managed-agent delete that took
+      // part in it, defeating stop_multi_agent, and wedging claimSessionStart.
+      // Tear it down for real first, exactly as the auto-sweep does before its
+      // own `endMultiAgentSession` (`markCrashedAndAnnounceSuperseded`, Register
+      // B02). `stop()` runs its own teardown (endMultiAgentSession +
+      // unregisterLiveSession); the redundant end-call below still covers the
+      // not-live case.
+      //
+      // AWAITING HERE IS SAFE FOR A REASON WORTH STATING, because it is not a
+      // property of `stop` in general: `teardown` skips its one awaited step,
+      // `onTeardown`, exactly when `reason === 'crashed'`, so this resolves
+      // through microtasks and yields no macrotask. That is what keeps the
+      // claim above — no other WS message can observe the overlap — true. A
+      // future `onTeardown` that ran on the crashed path would break it, and
+      // another connection could then see both rows `running` and both
+      // sessions live.
+      //
+      // A throwing `stop` is logged and swallowed so the row is never left
+      // `running` — but swallowing alone would re-create the very leak this
+      // block exists to close, since a throw before `unregisterLiveSession`
+      // leaves the entry behind with a `crashed` row beside it. Clear it in the
+      // catch. Unregistering twice is harmless (a Map delete); leaving it is
+      // not.
+      const liveActive = getLiveSession(currentActiveSessionId);
+      if (liveActive) {
+        try {
+          await liveActive.handle.stop('crashed');
+        } catch (err) {
+          console.error(
+            `[reopen_session_confirmed] failed to stop live displaced session ${currentActiveSessionId}`,
+            err,
+          );
+          unregisterLiveSession(currentActiveSessionId);
+        }
+      }
       endMultiAgentSession(currentActiveSessionId, 'crashed');
       send({
         type: 'session_superseded',
