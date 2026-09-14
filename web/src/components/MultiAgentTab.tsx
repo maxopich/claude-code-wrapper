@@ -3377,11 +3377,7 @@ function SessionSettingsAuthorityButton(props: { projectIds: number[] }) {
         {props.projectIds.length === 1 ? '' : 's'}…
       </button>
       {open && (
-        <AuthorityPreflightModal
-          projectIds={props.projectIds}
-          runsWithAllScopes
-          onClose={() => setOpen(false)}
-        />
+        <AuthorityPreflightModal projectIds={props.projectIds} onClose={() => setOpen(false)} />
       )}
     </>
   );
@@ -3406,11 +3402,7 @@ function DraftParticipantAuthorityButton(props: { projectId: number }) {
         ⓘ
       </button>
       {open && (
-        <AuthorityPreflightModal
-          projectIds={[props.projectId]}
-          runsWithAllScopes
-          onClose={() => setOpen(false)}
-        />
+        <AuthorityPreflightModal projectIds={[props.projectId]} onClose={() => setOpen(false)} />
       )}
     </>
   );
@@ -3421,8 +3413,16 @@ function DraftParticipantAuthorityButton(props: { projectId: number }) {
  * button next to the composer textarea. Opens the preflight modal with
  * every participant project so the operator can review authority across
  * the whole draft before clicking Start.
+ *
+ * Exported for `authority/MultiAgentPreflightTrust.test.tsx`: it is the only
+ * surface that proves the multi-agent preflight honours each participant's own
+ * Trust end-to-end (open the modal, deliver a per-participant resolve, read the
+ * panel). `MultiAgentTab` has nine test files, and none of them mounts the
+ * authority buttons — `DraftView` (already exported) is the heavier seam that
+ * would also prove every participant id is threaded through, and is worth
+ * moving to if this case ever grows.
  */
-function DraftInspectAuthorityButton(props: { projectIds: number[] }) {
+export function DraftInspectAuthorityButton(props: { projectIds: number[] }) {
   const [open, setOpen] = useState(false);
   const label =
     props.projectIds.length === 1
@@ -3439,11 +3439,7 @@ function DraftInspectAuthorityButton(props: { projectIds: number[] }) {
         {label}
       </button>
       {open && (
-        <AuthorityPreflightModal
-          projectIds={props.projectIds}
-          runsWithAllScopes
-          onClose={() => setOpen(false)}
-        />
+        <AuthorityPreflightModal projectIds={props.projectIds} onClose={() => setOpen(false)} />
       )}
     </>
   );
