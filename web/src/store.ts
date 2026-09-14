@@ -1389,13 +1389,29 @@ function retireRunningSessions(
  * server restarts, or the copy hangs on a large tree) leaves the modal wedged in
  * `copying` with no path out. A disconnect is the observable form of "the result
  * will never arrive here": `runManagedCopy` streams its result over this socket
- * and nothing re-requests it on reconnect (`onOpen` sends only
- * `get_settings`/`list_projects`), so once the socket is gone the pending result
- * is already lost. Resolve the modal to a dismissable failure — the same
- * retire-the-stale-liveness move `ws_close` already makes for running sessions
- * and open permission cards. Returns the same reference when nothing is copying,
- * so a close on an idle app allocates nothing. If the copy did finish
- * server-side, the new agent still appears via the reconnect's `list_projects`.
+ * and nothing re-requests it on reconnect (`onOpen` asks for settings, the
+ * project list and the model catalogue — none of them a copy result), so once
+ * the socket is gone the pending result is already lost. Resolve the modal to a
+ * dismissable outcome — the same retire-the-stale-liveness move `ws_close`
+ * already makes for running sessions and open permission cards. Returns the
+ * same reference when nothing is copying, so a close on an idle app allocates
+ * nothing.
+ *
+ * IT REPORTS AN UNKNOWN OUTCOME, NOT A FAILURE, AND THAT IS THE POINT. The
+ * server does not abort a copy when the socket closes: `runManagedCopy` takes
+ * no AbortSignal, `ws.on('close')` cancels turns and permission cards and
+ * nothing about a copy, and the send closure is a silent no-op on a dead
+ * socket. So the ORDINARY outcome of this path is a copy that runs to
+ * completion and registers its project row while this client is gone —
+ * "the copy failed" would be false in exactly the common case. The sidebar is
+ * the honest place to look, with one caveat worth stating: the reconnect's
+ * `list_projects` is a snapshot, so a copy that finishes AFTER it lands shows
+ * up only on the next refresh.
+ *
+ * ONE WAY IN IS STILL UNCOVERED (`Cebab-hfs3`): a copy that hangs while the
+ * socket stays up, and the sibling case where the handler throws and the client
+ * is sent `wrapper_error` rather than a `managed_copy_result`. Neither produces
+ * a `ws_close`, so neither reaches this helper.
  */
 function resolveDisconnectedManagedCopy(
   managedCopy: AppState['managedCopy'],
@@ -1407,7 +1423,7 @@ function resolveDisconnectedManagedCopy(
     result: {
       ok: false,
       error:
-        'The connection dropped before the copy finished. If it completed on the server, the new agent will appear in your sidebar.',
+        'The connection dropped while the copy was running, so its result never reached this window. The copy was not cancelled — it may well have finished. Check the sidebar; if the agent is not there yet, reload.',
     },
   };
 }
@@ -1529,6 +1545,7 @@ export type Action =
   | { type: 'managed_copy_open'; projectId: number }
   /** Cebab-ws0.9: the operator confirmed; the copy is now running. */
   | { type: 'managed_copy_started' }
+  | { type: 'managed_copy_send_failed' }
   /** Cebab-ws0.9: close the modal, whatever state it was in. */
   | { type: 'managed_copy_close' }
   /** Cebab-m1f: open the delete-confirm modal for a managed agent. */
@@ -1754,6 +1771,28 @@ export function reduce(state: AppState, action: Action): AppState {
     case 'managed_copy_started':
       if (!state.managedCopy) return state;
       return { ...state, managedCopy: { ...state.managedCopy, status: 'copying' } };
+
+    /**
+     * `Cebab-1jm3`: the request never left the tab — `send` no-ops on a closed
+     * socket and says so. Committing to `copying` anyway is the same wedge this
+     * bead exists to remove, by a route `ws_close` cannot rescue: the socket is
+     * ALREADY closed, so no further close event is coming to release the modal.
+     * Resolve it here instead, and say plainly that nothing was started — this
+     * is the one case where the outcome is not unknown.
+     */
+    case 'managed_copy_send_failed':
+      if (!state.managedCopy) return state;
+      return {
+        ...state,
+        managedCopy: {
+          ...state.managedCopy,
+          status: 'done',
+          result: {
+            ok: false,
+            error: 'Not connected to Cebab, so the copy was never started. Reconnect and retry.',
+          },
+        },
+      };
 
     case 'managed_copy_close':
       return { ...state, managedCopy: null };
