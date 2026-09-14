@@ -153,7 +153,11 @@ export function LogToolbar(props: {
         type="button"
         className="ghost-btn"
         onClick={props.onDownload}
-        title="Download the filtered view as NDJSON (one JSON object per line)"
+        /* `Cebab-8pks`: the title says WHICH of the two files this is. The
+         *  decision was to keep hook output in this one, so the operator has to
+         *  be able to tell it from the sidebar's share-safe export without
+         *  opening either. */
+        title="Download the filtered view as NDJSON (one JSON object per line). Your complete local copy — it includes hook output. To share a log, use the session's ⤓ in the sidebar, which is redacted."
       >
         Download .ndjson
       </button>

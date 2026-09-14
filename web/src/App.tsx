@@ -1326,8 +1326,10 @@ function AppShell({
         // conversation, not the token-by-token stream that built it. Says so
         // because the operator's ARCHIVE decision changed even though their
         // SHARE decision did not; someone keeping this for their own records
-        // should know what is not in it.
-        message: `${result.filename} — redacted; live typing detail is not included.`,
+        // should know what is not in it. `Cebab-8pks` added hook output to the
+        // same sentence, for the same reason: it is the other thing a reader of
+        // this file will look for and not find.
+        message: `${result.filename} — redacted; live typing detail and hook output are not included.`,
         sticky: false,
       });
     } catch (err) {
@@ -1418,7 +1420,7 @@ function AppShell({
         dedupeKey: 'bulk_session_export:ok',
         title: `Exported ${ok} ${noun(ok)}`,
         message:
-          'Each session log downloaded as a redacted .jsonl file — live typing detail is not included.',
+          'Each session log downloaded as a redacted .jsonl file — live typing detail and hook output are not included.',
         sticky: false,
       });
     } else {
