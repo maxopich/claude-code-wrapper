@@ -29,6 +29,7 @@ import type {
 import { config } from '../config.js';
 import { pickRunner, type MockOptions, type RunOptions, type Runner } from '../runner/index.js';
 import type { SettingSource } from '../runner/claude.js';
+import { busSettingScopesFor } from '../repo/project_authority.js';
 import { registerQuery } from '../runner/lifecycle.js';
 import { isValidBusDestination } from './paths.js';
 import { classifyMutationScope } from './guardrail.js';
@@ -455,14 +456,21 @@ export type AgentSpec = {
   /** Working directory the agent's `claude` runs in. */
   cwd: string;
   /**
-   * settings.json scopes the SDK should layer for this agent's turns.
-   * Workers and chain participants: `['user', 'project', 'local']` — so a
-   * participant's own `.claude/settings*.json` (MCP servers, allowed/
-   * disallowed tools, env injectors, hooks) loads exactly as it would in a
-   * standalone `claude` session. Orchestrator: `['user']` — its cwd is an
-   * empty Cebab-owned workspace, so widening scope is a no-op and pinning
-   * it here documents that invariant. Defaults to `['user']` if a caller
-   * forgets to pass one (defensive narrow fallback).
+   * settings.json scopes the SDK should layer for this agent's turns — for a
+   * spec with NO `projectId` only.
+   *
+   * IGNORED WHEN `projectId` IS SET (`Cebab-6fax.21.1`), which is every worker
+   * and every chain participant: those derive their scopes from that project's
+   * Trust at turn time (`busSettingScopesFor`), so a value passed here would be
+   * silently discarded rather than rejected — do not pass one. Trusted gets all
+   * three layers, so the participant's own `.claude/settings*.json` (MCP
+   * servers, allowed/disallowed tools, env injectors, hooks) loads exactly as
+   * in a standalone `claude` session; untrusted gets `['user']` and none of it.
+   *
+   * What still reads this field: the orchestrator (`['user']` — its cwd is an
+   * empty Cebab-owned workspace, so widening scope is a no-op and pinning it
+   * documents the invariant) and runner-only tests. Defaults to `['user']` if
+   * a caller forgets to pass one (defensive narrow fallback).
    */
   settingSources?: SettingSource[];
   /**
@@ -1693,6 +1701,32 @@ export class AgentRunner {
     const denied = this.specs.get(agentName)?.deniedMcpServers ?? spec.deniedMcpServers;
     const mcpDenial = denied && denied.length > 0 ? { deniedMcpServers: [...denied] } : {};
 
+    // `Cebab-6fax.21.1` [security]: a participant's setting scopes FOLLOW its
+    // project's Trust. Derived from `spec.projectId` here — at TURN time, the
+    // same reason the denials above are read here rather than captured at
+    // register — so a Trust toggle mid-run applies on that participant's next
+    // hop. Specs with no `projectId` (the orchestrator, and runner-only tests)
+    // keep the register-time `settingSources`, then the narrowest `['user']`
+    // fallback.
+    //
+    // THE SPAWN AND THE GATE USE ONE FUNCTION, AT TWO DIFFERENT TIMES, AND
+    // THAT IS NOT THE SAME AS AGREEING (`Cebab-ipbr`). `busSettingScopesFor`
+    // is also what `gateProjectsForSpawn` resolves against, so the two can
+    // never disagree about what a given Trust value MEANS. They can disagree
+    // about the VALUE: the gate runs at session start, at `addWorker` and on
+    // the R-B Continue path, and this line runs every hop against a mutable
+    // row. Turning Trust ON mid-run therefore widens the next hop to all three
+    // layers while the only gate that ever ran saw `['user']` and had nothing
+    // to prompt about — so that project's MCP servers, env injectors and hooks
+    // reach the spawn ungated. Narrowing has no such problem: it takes effect
+    // the same way and grants nothing. `Cebab-ipbr` closes the widening case
+    // by re-gating on elevation; until it lands, this is a known window and is
+    // stated rather than implied.
+    const settingSources =
+      spec.projectId !== undefined
+        ? [...busSettingScopesFor(spec.projectId)]
+        : (spec.settingSources ?? ['user']);
+
     // Resolved once so the value that goes to the SDK and the value the cap-hit
     // sentinel reports are the same number by construction, not by two call
     // sites agreeing.
@@ -1706,7 +1740,7 @@ export class AgentRunner {
       ...toolLock,
       ...mcpDenial,
       ...(spec.model ? { model: spec.model } : {}),
-      settingSources: spec.settingSources ?? ['user'],
+      settingSources,
       // `Cebab-vie.17`. UNCONDITIONAL, deliberately breaking the
       // conditional-spread rule that governs `model` and `deniedMcpServers`
       // above. That rule exists because absence there has a distinct correct

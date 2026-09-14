@@ -1753,11 +1753,13 @@ export function wireOrchestratorSession(p: {
     p.workers.map((w) => [w.agentName, w.projectName]),
   );
   // Each worker's own root CLAUDE.md, read here and injected once on the
-  // worker's first turn (see `deliver`). The SDK now also auto-loads it
-  // because workers run with `settingSources: ['user', 'project', 'local']`;
-  // the explicit injection survives so the bytes show up in the on-disk
-  // transcript and the operator's chat (the SDK's load is system-context
-  // and doesn't surface). Recomputed automatically on R-B resume since
+  // worker's first turn (see `deliver`). The SDK ALSO auto-loads it for a
+  // TRUSTED worker (its scopes include `project`); an untrusted worker runs
+  // `['user']` and this injection is the only path its rules reach the model
+  // (`Cebab-6fax.21.1`). Either way the explicit injection survives so the
+  // bytes show up in the on-disk transcript and the operator's chat (the
+  // SDK's load is system-context and doesn't surface). Recomputed
+  // automatically on R-B resume since
   // `reconstructOrchestratorSession` rebuilds `p.workers` with
   // each `cwd` and re-enters this function. The orchestrator itself is never
   // in this map — its cwd is the Cebab workspace, not a target project.
@@ -2164,14 +2166,15 @@ export function wireOrchestratorSession(p: {
     settingSources: ['user'],
     toolPolicy: 'delegate-only',
   });
-  // Workers load their project's full settings stack — MCPs,
+  // A TRUSTED worker loads its project's full settings stack — MCPs,
   // allowedTools/disallowedTools, env injectors, hooks — exactly as a
-  // standalone `claude` session in the same cwd would. Because the runner's
-  // `canUseTool` auto-allows every tool except `AskUserQuestion` for agents
-  // without `toolPolicy: 'delegate-only'` (i.e. every worker), there is no
-  // human gate on any of it: a worker's project-defined hooks auto-execute on
-  // every bus turn for that worker. The consultant-mode guardrail in
-  // `runtime.ts` is the only behavioral brake.
+  // standalone `claude` session in the same cwd would; an UNTRUSTED worker
+  // runs `['user']` and loads none of it (`Cebab-6fax.21.1`). For whatever
+  // DOES load, the runner's `canUseTool` auto-allows every tool except
+  // `AskUserQuestion` for agents without `toolPolicy: 'delegate-only'` (i.e.
+  // every worker), so there is no human gate on it: a trusted worker's
+  // project-defined hooks auto-execute on every bus turn. The consultant-mode
+  // guardrail in `runtime.ts` is the only behavioral brake.
   for (const w of p.workers) {
     // H04: denials must be on the spec BEFORE the first turn — a worker's
     // first hop is where a hostile `.mcp.json` would land.
@@ -2179,7 +2182,9 @@ export function wireOrchestratorSession(p: {
     runner.register({
       name: w.agentName,
       cwd: w.cwd,
-      settingSources: ['user', 'project', 'local'],
+      // `Cebab-6fax.21.1` [security]: setting scopes follow this project's
+      // Trust and are derived by the runner from `projectId` at each hop —
+      // see the chain.ts mirror for the full reasoning.
       // Cluster G Phase 3 (G1): see chain.ts mirror — per-participant
       // project for the active-runs registry snapshot.
       projectId: w.projectId,
@@ -2432,7 +2437,9 @@ export function wireOrchestratorSession(p: {
     runner.register({
       name: newAgent.agentName,
       cwd: newAgent.cwd,
-      settingSources: ['user', 'project', 'local'],
+      // `Cebab-6fax.21.1` [security]: setting scopes follow this project's
+      // Trust, derived by the runner from `projectId` at each hop — same as
+      // the initial-workers loop.
       // Cluster G Phase 3 (G1): same projectId threading as the
       // initial-workers loop so mid-run added workers also appear in the
       // active-runs snapshot with the right project.

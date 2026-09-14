@@ -238,10 +238,10 @@ function readSettingsFile(p: string): RawSettings | null {
  * SCOPE GATING is not a nicety — it is the contract `loadSettingsLayers`
  * documents: read exactly what the spawn will load. `.mcp.json` loads iff the
  * spawn's `settingSources` includes `'project'` (measured: `['user']` and `[]`
- * do not load it, `['user','project','local']` does). That is every bus
- * participant and every trusted single-agent project — and reading it for an
- * untrusted single-agent project would prompt the operator about a server
- * their Trust setting already prevents from loading.
+ * do not load it, `['user','project','local']` does). Since `Cebab-6fax.21.1`
+ * that is every TRUSTED project, single-agent turn and bus participant alike —
+ * and reading it for an untrusted one either way would prompt the operator
+ * about a server their Trust setting already prevents from loading.
  *
  * Returns `[]` for absent / unreadable / malformed, matching
  * `readSettingsFile`'s "no rules from this scope" posture.
@@ -492,12 +492,12 @@ export function readClaudeJsonServers(
  * spawn gates (`awaitMcpTrustDecisions` / `awaitEnvInjectionAck`) blind to
  * rules that then execute.
  *
- * Two callers, two scope sets, and they genuinely differ:
- *   - single-agent — trust-derived, matching `ws/server.ts`'s
- *     `trusted ? ['user','project','local'] : ['user']`.
- *   - bus participants — always `['user','project','local']`, because
- *     `bus/{orchestrator,chain}.ts` register every worker with that literal
- *     regardless of trust.
+ * Two callers, ONE rule since `Cebab-6fax.21.1` — both trust-derived:
+ *   - single-agent — `trustDerivedScopes(trusted)`, matching `ws/server.ts`.
+ *   - bus participants — `busSettingScopesFor(projectId)`, which is that same
+ *     function over the participant project's own row, read per hop. The
+ *     literal `['user','project','local']` the register sites used to pass
+ *     regardless of Trust is gone from the bus path.
  *
  * `settingSourcesUsed` on the resolved authority reflects whatever was
  * passed, so the AuthorityPanel never claims a layer that wasn't applied.
@@ -532,25 +532,41 @@ export function loadSettingsLayers(
 }
 
 /**
- * The scope set a project's SINGLE-AGENT run would use, derived from Trust.
- * Mirrors `ws/server.ts`'s `const settingSources = trusted ? [...] : [...]`.
- * Bus callers must NOT use this — see `BUS_SETTING_SCOPES`.
+ * The scope set a project's run uses, derived from Trust. Single-agent AND
+ * multi-agent bus alike: _trusted_ → all three layers (its `.claude/settings*`
+ * hooks and env injectors and its `.mcp.json` load), _untrusted_ → `['user']`
+ * (they do not). Mirrors `ws/server.ts`'s single-agent
+ * `const settingSources = trusted ? [...] : [...]`.
  */
 export function trustDerivedScopes(trusted: boolean): readonly SettingScope[] {
   return trusted ? (['user', 'project', 'local'] as const) : (['user'] as const);
 }
 
 /**
- * The scope set every bus participant runs under, irrespective of Trust.
- * Pinned here so the gate and the spawn read from one definition instead of
- * three hardcoded literals drifting apart — the exact divergence that let an
- * untrusted worker's project-declared MCP servers and `env:` block load
- * without ever reaching a gate.
+ * The scope set a BUS participant rooted in `projectId` runs under, read from
+ * that project's CURRENT Trust — `Cebab-6fax.21.1`. This is THE one function
+ * every bus scope decision goes through: the per-hop spawn (`bus/runner.ts`
+ * reads it at turn time, so a mid-run Trust toggle applies on the participant's
+ * next hop) AND every spawn gate (`gateProjectsForSpawn`) resolve MCP/env/hook
+ * authority against it. Routing both through one function is what stops the
+ * spawn and the gate disagreeing about a participant's scopes — the divergence
+ * that previously let an UNTRUSTED worker's project-declared MCP servers,
+ * `env:` block and hooks load with all three layers while the operator's Trust
+ * toggle said `['user']`. `bus/scope_conformance.test.ts` pins the shared use.
  *
- * Keep in sync with the `runner.register({ settingSources: ... })` calls in
- * `bus/orchestrator.ts` and `bus/chain.ts`.
+ * A missing project row resolves to untrusted (`['user']`) — the safe default,
+ * and structurally unreachable in practice since the spawn was already gated on
+ * the row existing.
+ *
+ * ONE FUNCTION IS NOT ONE MOMENT. The gate calls this at session start, at
+ * `addWorker` and on the R-B Continue path; the spawn calls it every hop. They
+ * cannot disagree about what a Trust value means, and they can disagree about
+ * the value — a Trust elevation mid-run spawns wider than the gate ever saw
+ * (`Cebab-ipbr`).
  */
-export const BUS_SETTING_SCOPES: readonly SettingScope[] = ['user', 'project', 'local'];
+export function busSettingScopesFor(projectId: number): readonly SettingScope[] {
+  return trustDerivedScopes(getProject(projectId)?.trusted === 1);
+}
 
 /**
  * Normalize a permissions.allow / .deny entry to the tool name it
@@ -1051,10 +1067,11 @@ export type ResolverInput = {
    * Scope set to resolve against. Omit for the trust-derived default, which
    * is what the AuthorityPanel and the single-agent spawn gate want.
    *
-   * A BUS spawn gate must pass `BUS_SETTING_SCOPES` — bus participants run
-   * with all three layers regardless of Trust, so resolving trust-derived
-   * here would hand the gates an empty MCP/env list for an untrusted project
-   * whose rules the SDK then loads anyway.
+   * A BUS spawn gate passes `busSettingScopesFor(projectId)` — the SAME
+   * trust-derived scopes the participant will spawn with (`Cebab-6fax.21.1`).
+   * That value equals the trust-derived default here, so passing it is belt
+   * and suspenders; it is passed explicitly so the gate and the spawn read
+   * from one shared function and can never resolve against different scopes.
    */
   settingSources?: readonly SettingScope[];
   latestSessionStarted?: {

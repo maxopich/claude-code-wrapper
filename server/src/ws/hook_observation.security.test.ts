@@ -5,12 +5,11 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import type { HookView, ServerMsg } from '@cebab/shared/protocol';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
-import { upsertProject } from '../repo/projects.js';
+import { upsertProject, setProjectTrusted } from '../repo/projects.js';
 import { verifyChain } from '../notifications/safety_audit.js';
 import { gateProjectsForSpawn, reportHookObservations } from './server.js';
 import { makeTrustGateState } from '../repo/mcp_trust_gate.js';
 import { makeStartGateState } from '../repo/session_start_gate.js';
-import { BUS_SETTING_SCOPES } from '../repo/project_authority.js';
 
 // F6: the spawn path's hook reporter. `hook_trust.test.ts` covers the ledger's
 // identity and change rules; this covers the half that makes them visible —
@@ -165,6 +164,11 @@ describe('[security] gateProjectsForSpawn wires the hook reporter', () => {
         },
       }),
     );
+    // Cebab-6fax.21.1: the gate resolves against this project's trust-derived
+    // scopes. A project's `.claude/settings.json` hooks load only under the
+    // `project` scope, so the participant must be trusted for the hook to run
+    // (and therefore for the reporter to have anything to record).
+    setProjectTrusted(projectId, true);
 
     // Minimal Conn: `send` short-circuits on a non-OPEN socket, and the audit
     // row is written before the send, so the WS output is not needed here.
@@ -175,7 +179,7 @@ describe('[security] gateProjectsForSpawn wires the hook reporter', () => {
       startGate: makeStartGateState(),
     } as unknown as Parameters<typeof gateProjectsForSpawn>[0];
 
-    await gateProjectsForSpawn(conn, [projectId], BUS_SETTING_SCOPES);
+    await gateProjectsForSpawn(conn, [projectId]);
 
     const rows = auditRows();
     expect(rows).toHaveLength(1);

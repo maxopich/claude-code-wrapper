@@ -305,12 +305,13 @@ describe('AgentRunner', () => {
   });
 
   test('register passes the spec.settingSources through to the SDK', async () => {
-    // Chain participants and orchestrator workers register with
-    // ['user', 'project', 'local'] so their `.claude/settings*.json` (MCPs,
-    // allowedTools, hooks) loads exactly as a standalone `claude` session
-    // in the same cwd would. The orchestrator itself registers with
-    // ['user'] because its cwd is Cebab-owned and empty. Both paths must
-    // reach the SDK unchanged.
+    // The fallback path for specs with NO `projectId`: the runner passes
+    // `spec.settingSources` straight through. The orchestrator uses it (it
+    // registers with ['user'] and no projectId because its cwd is Cebab-owned
+    // and empty), and so do runner-only tests. Participants WITH a `projectId`
+    // no longer set `settingSources` here at all — the runner derives them from
+    // that project's Trust at each hop (Cebab-6fax.21.1), covered in
+    // `scope_conformance.test.ts`.
     const calls: (RunOptions & Partial<MockOptions>)[] = [];
     const runner = new AgentRunner({
       onEvent: () => {},
@@ -2509,9 +2510,10 @@ describe('AgentRunner stalled-turn watchdog', () => {
 // ---------------------------------------------------------------------------
 // Register H04: a denied MCP server must not reach a bus agent's spawn.
 //
-// The bus is where this matters most — every worker and chain participant runs
-// with settingSources ['user','project','local'], so a participant project's
-// `.mcp.json` loads on every hop with no human gate on any tool call.
+// The bus is where this matters most — a TRUSTED worker or chain participant
+// runs with settingSources ['user','project','local'] (Cebab-6fax.21.1), so a
+// participant project's `.mcp.json` loads on every hop with no human gate on
+// any tool call.
 // ---------------------------------------------------------------------------
 describe('[security] AgentRunner — MCP denials reach the spawn', () => {
   test('no denials leaves the options untouched', async () => {
