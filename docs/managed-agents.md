@@ -110,6 +110,24 @@ workspace project outright (its directory is the operator's, and its row would r
 on the next scan anyway), and `removeManagedDir` re-checks containment itself. The
 destructive step is guarded twice by code that does not share a path.
 
-**Refused while anything is running.** `snapshotInFlight()` covers bus runs too, since
-their `agent_activity` carries a `projectId` — deleting the tree and rows out from under
-a live turn would leave the run writing into freed state.
+**Refused while anything is running.** Deleting the tree and rows out from under a live
+turn would leave the run writing into freed state. Two signals answer "is anything live",
+because they see different things. `snapshotInFlight()` is the per-HOP Query registry —
+it catches a single-agent turn and a bus participant whose turn is executing _at that
+instant_, but a bus run between hops — routing, or a paused agent — has no in-flight query
+and slips past it (`Cebab-bxi0`). Not an `AskUserQuestion` park: that one waits _inside_
+the turn, so the query is still registered and the per-hop signal does see it. So the
+guard also refuses when the project takes part in a session `hasLiveSession()` reports as
+genuinely live in this process — a signal that holds for the run's whole lifetime, not
+just mid-hop. A stale `running` DB row left by a dead process is absent from that
+in-process map, so the refusal is scoped to a truly live run; a stranded row is instead
+ended by the end-the-stranded-row loop further down `managed_delete.ts` (`Cebab-6fax.33`),
+which flips it to `stopped`.
+
+**One way the two signals disagree, and it traps the operator** (`Cebab-1tty`). The
+in-process map is cleared only by a router's teardown, and the reopen flow displaces the
+active run with `detachCurrentActive()` + `endMultiAgentSession(…, 'crashed')` — a sink
+swap, not a teardown. The row then reads `crashed` (the UI says **failed**) while the
+registry still holds the session, so the delete refuses on a run the operator has every
+reason to believe is over, and `Stop` no-ops on it because the connection no longer points
+at it. The refusal names the session id for that reason; the fix belongs at the source.
