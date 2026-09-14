@@ -17,8 +17,9 @@
  * duplicated.
  */
 
-import type { ManagedCopySkip, ServerMsg } from '@cebab/shared/protocol';
+import type { ManagedCopySkip, ManagedCopySkipReason, ServerMsg } from '@cebab/shared/protocol';
 import { MANAGED_COPY_SKIP_LIMIT } from '@cebab/shared/protocol';
+import { pathLooksSensitive } from '@cebab/shared';
 import { emit } from './notifications/dispatcher.js';
 import {
   DEFAULT_CAPS,
@@ -32,6 +33,29 @@ import { getProject, registerManagedProject } from './repo/projects.js';
 
 /** Progress messages are throttled to this, so a fast copy cannot flood the socket. */
 const PROGRESS_INTERVAL_MS = 400;
+
+/**
+ * [security] Cebab-6z6a — skip reasons that mean content the source HAD did not
+ * arrive in the copy, as opposed to a deliberate policy skip or a file that
+ * DID arrive.
+ *
+ * `copy_failed` (an ENOENT/EACCES/ENOSPC/mkdir error on one entry) and
+ * `unreadable_dir` (a directory whose contents `readdir` refused) both leave
+ * the snapshot missing bytes the operator believes are there. The others do
+ * not, and are deliberately absent:
+ *
+ * - `permissions_unenforced` — the file was copied; only its mode is loose.
+ * - `excluded_vcs` / `symlink_escapes` / `not_regular` — chosen omissions the
+ *   preflight already named; refusing on them would make many ordinary copies
+ *   (any git repo has a `.git`) impossible.
+ * - `symlink_unsupported` — an intra-tree link that could not be recreated on
+ *   Windows; its target is a real file copied elsewhere in the tree, so the
+ *   content is present even though the link is not.
+ */
+const MISSING_REASONS: ReadonlySet<ManagedCopySkipReason> = new Set([
+  'copy_failed',
+  'unreadable_dir',
+]);
 
 /** Same cap, for the credential-file list — see `truncateSkips`. */
 function truncatePaths(paths: string[]): { paths: string[]; truncated: number } {
@@ -186,6 +210,50 @@ export async function runManagedCopy(
     // being true when that verb shipped.) Take it back.
     await removeManagedDir(target).catch(() => {});
     return fail(`the copy failed partway and was removed: ${String(err)}`);
+  }
+
+  // [security] Cebab-6z6a. `copyTree` tolerates a per-entry failure and returns
+  // a `skips` list rather than throwing — the fix `Cebab-ygu.14`/`.13` made so
+  // one churning cache file could not discard a multi-gigabyte copy. The cost
+  // is that a copy which lost real content now looks successful: registering it
+  // hands the operator a managed agent that "looks configured and is not". Two
+  // cases make the snapshot unsafe to run, and both refuse-and-remove here,
+  // exactly as the partial-throw and unregisterable paths above do.
+  const missing = copied.skips.filter((s) => MISSING_REASONS.has(s.reason));
+
+  // A credential or settings file that did not arrive. `pathLooksSensitive`
+  // matches `.env`, `.mcp.json`, `.claude/settings*.json`, `id_rsa`, and the
+  // rest of the redactor's list — the files whose absence makes an agent
+  // silently mis-configured rather than merely incomplete.
+  const sensitiveMissing = missing.filter((s) => pathLooksSensitive(s.rel));
+  if (sensitiveMissing.length > 0) {
+    await removeManagedDir(target).catch(() => {});
+    const named = sensitiveMissing
+      .slice(0, 3)
+      .map((s) => s.rel)
+      .join(', ');
+    const more = sensitiveMissing.length > 3 ? `, and ${sensitiveMissing.length - 3} more` : '';
+    return fail(
+      `${project.name}: files that carry credentials or settings could not be copied ` +
+        `(${named}${more}), so the copy would be missing configuration it needs to run. ` +
+        `Nothing was registered.`,
+    );
+  }
+
+  // A SYSTEMIC failure — an ENOSPC or EACCES on the target, not one transient
+  // per-file error. The tell is that the source had files but essentially none
+  // arrived, or the failures outnumber what was written. `survey.files` is the
+  // regular-file count the same traversal measured moments ago.
+  const systemic = (survey.files > 0 && copied.files === 0) || missing.length > copied.files;
+  if (systemic) {
+    await removeManagedDir(target).catch(() => {});
+    const attempted = missing.length + copied.files;
+    return fail(
+      `${project.name}: the copy failed for most of the tree ` +
+        `(${missing.length.toLocaleString('en')} of ${attempted.toLocaleString('en')} entries ` +
+        `could not be written) — likely no space or no permission on the target. ` +
+        `Nothing was registered.`,
+    );
   }
 
   let row;
