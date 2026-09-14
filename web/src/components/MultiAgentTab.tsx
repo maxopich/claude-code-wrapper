@@ -3417,8 +3417,10 @@ function DraftParticipantAuthorityButton(props: { projectId: number }) {
  * Exported for `authority/MultiAgentPreflightTrust.test.tsx`: it is the only
  * surface that proves the multi-agent preflight honours each participant's own
  * Trust end-to-end (open the modal, deliver a per-participant resolve, read the
- * panel). `MultiAgentTab` has no test file of its own, so this is the seam that
- * lets one exist.
+ * panel). `MultiAgentTab` has nine test files, and none of them mounts the
+ * authority buttons — `DraftView` (already exported) is the heavier seam that
+ * would also prove every participant id is threaded through, and is worth
+ * moving to if this case ever grows.
  */
 export function DraftInspectAuthorityButton(props: { projectIds: number[] }) {
   const [open, setOpen] = useState(false);

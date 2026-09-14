@@ -141,7 +141,7 @@ function deliver(handlerRef: { current: ((m: ServerMsg) => void) | null }, a: Pr
   });
 }
 
-describe('multi-agent preflight — each participant by its own Trust', () => {
+describe('[security] multi-agent preflight — each participant by its own Trust', () => {
   test('an untrusted participant is shown as NOT loaded (the override is gone)', () => {
     const { handlerRef } = openPreflight([1]);
     deliver(handlerRef, untrustedAuthority(1));
