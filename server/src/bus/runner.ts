@@ -29,6 +29,7 @@ import type {
 import { config } from '../config.js';
 import { pickRunner, type MockOptions, type RunOptions, type Runner } from '../runner/index.js';
 import type { SettingSource } from '../runner/claude.js';
+import { busSettingScopesFor } from '../repo/project_authority.js';
 import { registerQuery } from '../runner/lifecycle.js';
 import { isValidBusDestination } from './paths.js';
 import { classifyMutationScope } from './guardrail.js';
@@ -1693,6 +1694,20 @@ export class AgentRunner {
     const denied = this.specs.get(agentName)?.deniedMcpServers ?? spec.deniedMcpServers;
     const mcpDenial = denied && denied.length > 0 ? { deniedMcpServers: [...denied] } : {};
 
+    // `Cebab-6fax.21.1` [security]: a participant's setting scopes FOLLOW its
+    // project's Trust. Derived from `spec.projectId` here — at TURN time, the
+    // same reason the denials above are read here rather than captured at
+    // register — so a Trust toggle mid-run applies on that participant's next
+    // hop. `busSettingScopesFor` is the one function the spawn gate resolves
+    // against too, so the scopes this hop runs with and the scopes the gate
+    // vetted can never disagree. Specs with no `projectId` (the orchestrator,
+    // and runner-only tests) keep the register-time `settingSources`, then the
+    // narrowest `['user']` fallback.
+    const settingSources =
+      spec.projectId !== undefined
+        ? [...busSettingScopesFor(spec.projectId)]
+        : (spec.settingSources ?? ['user']);
+
     // Resolved once so the value that goes to the SDK and the value the cap-hit
     // sentinel reports are the same number by construction, not by two call
     // sites agreeing.
@@ -1706,7 +1721,7 @@ export class AgentRunner {
       ...toolLock,
       ...mcpDenial,
       ...(spec.model ? { model: spec.model } : {}),
-      settingSources: spec.settingSources ?? ['user'],
+      settingSources,
       // `Cebab-vie.17`. UNCONDITIONAL, deliberately breaking the
       // conditional-spread rule that governs `model` and `deniedMcpServers`
       // above. That rule exists because absence there has a distinct correct

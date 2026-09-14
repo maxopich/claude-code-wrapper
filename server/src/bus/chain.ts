@@ -1569,12 +1569,14 @@ export function wireChainSession(p: {
   // Per-participant briefing, prepended once to that agent's first turn (it
   // rides the first prompt rather than living in a project file). The
   // project's own root CLAUDE.md is read here too and injected as framed
-  // text on the same first turn (null when the project has none). The SDK
-  // now also auto-loads project CLAUDE.md because chain participants run
-  // with `settingSources: ['user', 'project', 'local']`; we keep the
-  // explicit injection so the bytes are visible in the on-disk transcript
-  // and the operator's chat (the SDK's auto-load is system-context and
-  // doesn't surface). The duplication is a small token cost, intentional.
+  // text on the same first turn (null when the project has none). A TRUSTED
+  // participant additionally has its project CLAUDE.md auto-loaded by the SDK
+  // (its scopes include `project`); an untrusted one runs `['user']` and the
+  // SDK loads nothing project-scoped, so this explicit injection is then the
+  // only path its rules reach the model. Either way we keep the injection so
+  // the bytes are visible in the on-disk transcript and the operator's chat
+  // (the SDK's auto-load is system-context and doesn't surface). The
+  // duplication, when it occurs, is a small token cost, intentional.
   const briefings = new Map<string, string>();
   const projectRules = new Map<string, ProjectRules | null>();
   /** agentName → where its hop goes. Mock replay reads it (see `mockVars`). */
@@ -1874,7 +1876,11 @@ export function wireChainSession(p: {
     runner.register({
       name: part.agentName,
       cwd: part.cwd,
-      settingSources: ['user', 'project', 'local'],
+      // `Cebab-6fax.21.1` [security]: setting scopes are NOT pinned here. The
+      // runner derives them from this `projectId`'s Trust at each hop
+      // (`busSettingScopesFor`) — trusted → all three layers, untrusted →
+      // `['user']` — so a Trust toggle mid-run applies on the next hop, and
+      // the gate that vetted this participant resolves against the same scopes.
       // Cluster G Phase 3 (G1): thread the participant project so the
       // lifecycle registry's per-hop snapshot can name it for the
       // active-runs sidebar dropdown.

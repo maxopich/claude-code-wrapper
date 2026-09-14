@@ -8,7 +8,6 @@ import { upsertProject, setProjectTrusted } from '../repo/projects.js';
 import { recordTrustDecision } from '../repo/mcp_trust.js';
 import { makeTrustGateState, denyOnceKey } from '../repo/mcp_trust_gate.js';
 import { makeStartGateState } from '../repo/session_start_gate.js';
-import { BUS_SETTING_SCOPES } from '../repo/project_authority.js';
 import { gateProjectsForSpawn } from './server.js';
 
 // [security] Register H04 + Cebab-x1n.6.22 — the seam where a Deny becomes
@@ -86,7 +85,7 @@ describe('[security] gateProjectsForSpawn returns denials the spawn can act on',
       decision: 'denied_remember',
     });
 
-    const denials = await gateProjectsForSpawn(fakeConn(), [projectId], BUS_SETTING_SCOPES);
+    const denials = await gateProjectsForSpawn(fakeConn(), [projectId]);
 
     // The whole point: the caller can now name the server it must block.
     expect(denials.get(projectId)).toEqual(['evil']);
@@ -97,11 +96,7 @@ describe('[security] gateProjectsForSpawn returns denials the spawn can act on',
     const trustGate = makeTrustGateState();
     trustGate.denyOnce.add(denyOnceKey(projectId, 'evil', path.join(projectDir, '.mcp.json')));
 
-    const denials = await gateProjectsForSpawn(
-      fakeConn({ trustGate }),
-      [projectId],
-      BUS_SETTING_SCOPES,
-    );
+    const denials = await gateProjectsForSpawn(fakeConn({ trustGate }), [projectId]);
 
     expect(denials.get(projectId)).toEqual(['evil']);
   });
@@ -122,7 +117,7 @@ describe('[security] gateProjectsForSpawn returns denials the spawn can act on',
       decision: 'trusted',
     });
 
-    const denials = await gateProjectsForSpawn(fakeConn(), [projectId], BUS_SETTING_SCOPES);
+    const denials = await gateProjectsForSpawn(fakeConn(), [projectId]);
 
     // A spurious name here would strip a legitimate server's tools from every
     // run — the failure mode in the opposite direction, and just as bad.
@@ -130,7 +125,7 @@ describe('[security] gateProjectsForSpawn returns denials the spawn can act on',
   });
 
   test('a project with no MCP declarations at all denies nothing', async () => {
-    const denials = await gateProjectsForSpawn(fakeConn(), [projectId], BUS_SETTING_SCOPES);
+    const denials = await gateProjectsForSpawn(fakeConn(), [projectId]);
     expect(denials.size).toBe(0);
   });
 
@@ -166,11 +161,7 @@ describe('[security] gateProjectsForSpawn returns denials the spawn can act on',
       decision: 'trusted',
     });
 
-    const denials = await gateProjectsForSpawn(
-      fakeConn(),
-      [projectId, otherId],
-      BUS_SETTING_SCOPES,
-    );
+    const denials = await gateProjectsForSpawn(fakeConn(), [projectId, otherId]);
 
     expect(denials.get(projectId)).toEqual(['evil']);
     expect(denials.get(otherId)).toBeUndefined();
@@ -199,7 +190,7 @@ describe('[security] gateProjectsForSpawn returns denials the spawn can act on',
       decision: 'denied_remember',
     });
 
-    await gateProjectsForSpawn(fakeConn(), [projectId], BUS_SETTING_SCOPES);
+    await gateProjectsForSpawn(fakeConn(), [projectId]);
 
     const row = getDb()
       .prepare(`SELECT payload_json FROM safety_audit WHERE kind = 'mcp.trust_silent_refusal'`)

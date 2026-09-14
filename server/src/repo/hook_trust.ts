@@ -20,11 +20,14 @@ const MAX_HASHABLE_SCRIPT_BYTES = 64 * 1024 * 1024;
  * `PostToolUse` fire around every tool call, `Stop` fires at the end. None of
  * them pass through `canUseTool`, so none of them can be approved or denied.
  *
- * That became load-bearing in #260. Bus workers and chain participants run
- * with `settingSources: ['user', 'project', 'local']`, so a participant
- * project's hooks execute on every hop for that participant, and bus agents
- * surface nothing to the operator except `AskUserQuestion`. Before this
- * module, that execution produced no record at all.
+ * That became load-bearing in #260. A TRUSTED bus worker or chain participant
+ * runs with `settingSources: ['user', 'project', 'local']`, so its project's
+ * hooks execute on every hop, and bus agents surface nothing to the operator
+ * except `AskUserQuestion`. (An untrusted participant runs `['user']`, so its
+ * project hooks do not load — `Cebab-6fax.21.1` — and the spawn gate resolves
+ * this project's hooks against that same trust-derived scope, so `first_seen`
+ * fires only for what will actually run.) Before this module, that execution
+ * produced no record at all.
  *
  * This module is DETECTION, not prevention. It records what will run and
  * reports what changed; it does not park the spawn. `awaitMcpTrustDecisions`

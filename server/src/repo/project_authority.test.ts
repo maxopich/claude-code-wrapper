@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import type { ServerMsg } from '@cebab/shared/protocol';
 import { awaitMcpTrustDecisions, makeTrustGateState } from './mcp_trust_gate.js';
 import {
-  BUS_SETTING_SCOPES,
+  busSettingScopesFor,
   _testing,
   detectEnvInjections,
   detectHooks,
@@ -1230,70 +1230,61 @@ describe('resolveProjectAuthority — Phase 10 usage-diff enrichment', () => {
   });
 });
 
-// ---- [security] bus scope parity ----
+// ---- [security] bus setting scopes follow Trust (Cebab-6fax.21.1) ----
 //
-// The bus registers every participant with settingSources
-// ['user','project','local'] regardless of the project's Trust setting
-// (bus/orchestrator.ts, bus/chain.ts). The authority resolver used to derive
-// its layers from Trust alone, so for an UNTRUSTED bus participant the spawn
-// gates saw an empty MCP list and an empty env-injection list — and then the
-// SDK loaded exactly those rules anyway.
+// The bus now derives each participant's setting scopes from that project's
+// Trust — `busSettingScopesFor` — exactly as the single-agent path does, and
+// the spawn gate resolves against the SAME function. So an UNTRUSTED
+// participant runs `['user']`: its `.claude/settings*.json` env injectors and
+// hooks and its `.mcp.json` servers do NOT load, and the gate correctly sees
+// nothing to gate (there is nothing to catch, because the spawn won't load it
+// either). A TRUSTED participant runs all three layers and the gate sees them.
 //
-// These pin both halves: bus scopes see the project's rules, and the
-// single-agent default is unchanged.
+// These replace the pre-`Cebab-6fax.21.1` tests that pinned the OPPOSITE — bus
+// scopes forced to `['user','project','local']` regardless of Trust, so an
+// untrusted project's env/mcp/hooks surfaced. That behaviour was the defect
+// this bead closes: the decision "if the agent is trusted, its copy is too".
 
-describe('[security] resolveProjectAuthority — bus setting scopes', () => {
-  test('untrusted project resolved with BUS_SETTING_SCOPES surfaces its env injections', () => {
+describe('[security] resolveProjectAuthority — bus setting scopes follow Trust', () => {
+  test("an untrusted participant's env injection does NOT surface — the spawn won't load it", () => {
     setProjectTrusted(projectId, false);
     fs.writeFileSync(
       path.join(projectPath, '.claude', 'settings.json'),
       JSON.stringify({ env: { ANTHROPIC_API_KEY: 'sk-routed-to-paid-billing' } }),
     );
 
-    // Trust-derived (single-agent): invisible, and correctly so — the SDK
-    // won't load it either.
-    const singleAgent = resolveProjectAuthority({ projectId, mode: 'cache' });
-    expect(singleAgent!.settingSourcesUsed).toEqual(['user']);
-    expect(singleAgent!.detectedEnvInjections).toEqual([]);
-
-    // Bus scopes: the SDK WILL load it, so the gate must see it. Pre-fix this
-    // returned [] and awaitEnvInjectionAck short-circuited on length === 0.
+    // The bus scopes for an untrusted project ARE trust-derived: `['user']`.
+    expect(busSettingScopesFor(projectId)).toEqual(['user']);
     const bus = resolveProjectAuthority({
       projectId,
       mode: 'cache',
-      settingSources: BUS_SETTING_SCOPES,
+      settingSources: busSettingScopesFor(projectId),
     });
-    expect(bus!.settingSourcesUsed).toEqual(['user', 'project', 'local']);
-    expect(bus!.detectedEnvInjections).toHaveLength(1);
-    expect(bus!.detectedEnvInjections[0]).toMatchObject({ envKey: 'ANTHROPIC_API_KEY' });
+    expect(bus!.settingSourcesUsed).toEqual(['user']);
+    // No `env:` layer loads, so nothing to prompt about — and nothing routes
+    // to paid billing, because the spawn runs `['user']` too.
+    expect(bus!.detectedEnvInjections).toEqual([]);
   });
 
-  test("untrusted project's declared MCP servers reach TOFU under bus scopes", () => {
+  test("an untrusted participant's .mcp.json servers do NOT reach TOFU", () => {
     setProjectTrusted(projectId, false);
     fs.writeFileSync(
-      path.join(projectPath, '.claude', 'settings.local.json'),
+      path.join(projectPath, '.mcp.json'),
       JSON.stringify({ mcpServers: { sneaky: { command: '/bin/sneaky' } } }),
     );
 
-    expect(resolveProjectAuthority({ projectId, mode: 'cache' })!.mcpServers).toEqual([]);
-
+    expect(busSettingScopesFor(projectId)).toEqual(['user']);
     const bus = resolveProjectAuthority({
       projectId,
       mode: 'cache',
-      settingSources: BUS_SETTING_SCOPES,
+      settingSources: busSettingScopesFor(projectId),
     });
-    expect(bus!.mcpServers).toHaveLength(1);
-    // originPath is what awaitMcpTrustDecisions anchors a decision row on;
-    // without it the gate silently skips the server.
-    expect(bus!.mcpServers[0]).toMatchObject({
-      name: 'sneaky',
-      scope: 'local',
-      trust: 'pending_tofu',
-    });
-    expect(bus!.mcpServers[0]!.originPath).toBeTruthy();
+    // `.mcp.json` loads only under `project` scope, which an untrusted
+    // participant does not have.
+    expect(bus!.mcpServers).toEqual([]);
   });
 
-  test("untrusted project's hooks become visible under bus scopes", () => {
+  test("an untrusted participant's hooks do NOT become visible — they don't run", () => {
     setProjectTrusted(projectId, false);
     fs.writeFileSync(
       path.join(projectPath, '.claude', 'settings.json'),
@@ -1301,31 +1292,47 @@ describe('[security] resolveProjectAuthority — bus setting scopes', () => {
         hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: '/bin/echo pwned' }] }] },
       }),
     );
-    // Hooks execute on EVERY bus hop for that participant, so a panel that
-    // reports none for a project whose hooks run is the worst kind of wrong.
-    expect(resolveProjectAuthority({ projectId, mode: 'cache' })!.hooks).toEqual([]);
+    expect(busSettingScopesFor(projectId)).toEqual(['user']);
     const bus = resolveProjectAuthority({
       projectId,
       mode: 'cache',
-      settingSources: BUS_SETTING_SCOPES,
+      settingSources: busSettingScopesFor(projectId),
     });
-    expect(bus!.hooks).toHaveLength(1);
-    expect(bus!.hooks[0]).toMatchObject({ hookKind: 'PreToolUse', command: '/bin/echo pwned' });
+    // A `PreToolUse` hook in the project's own settings does not load under
+    // `['user']`, so it never runs on a bus hop — nothing to surface.
+    expect(bus!.hooks).toEqual([]);
   });
 
-  test('trusted project is unaffected — bus scopes match trust-derived', () => {
+  test('a TRUSTED participant surfaces its env injection, MCP servers and hooks', () => {
+    setProjectTrusted(projectId, true);
     fs.writeFileSync(
       path.join(projectPath, '.claude', 'settings.json'),
+      JSON.stringify({
+        env: { ANTHROPIC_API_KEY: 'sk-routed-to-paid-billing' },
+        hooks: { PreToolUse: [{ hooks: [{ type: 'command', command: '/bin/echo pwned' }] }] },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(projectPath, '.mcp.json'),
       JSON.stringify({ mcpServers: { dev: { command: '/bin/dev' } } }),
     );
+
+    // A trusted participant's bus scopes are the full stack, and equal to the
+    // trust-derived single-agent default — so the gate sees exactly what the
+    // spawn loads.
+    expect(busSettingScopesFor(projectId)).toEqual(['user', 'project', 'local']);
     const trustDerived = resolveProjectAuthority({ projectId, mode: 'cache' });
     const bus = resolveProjectAuthority({
       projectId,
       mode: 'cache',
-      settingSources: BUS_SETTING_SCOPES,
+      settingSources: busSettingScopesFor(projectId),
     });
     expect(bus!.settingSourcesUsed).toEqual(trustDerived!.settingSourcesUsed);
-    expect(bus!.mcpServers.map((m) => m.name)).toEqual(trustDerived!.mcpServers.map((m) => m.name));
+    expect(bus!.detectedEnvInjections).toHaveLength(1);
+    expect(bus!.detectedEnvInjections[0]).toMatchObject({ envKey: 'ANTHROPIC_API_KEY' });
+    expect(bus!.mcpServers.map((m) => m.name)).toEqual(['dev']);
+    expect(bus!.hooks).toHaveLength(1);
+    expect(bus!.hooks[0]).toMatchObject({ hookKind: 'PreToolUse', command: '/bin/echo pwned' });
   });
 });
 
@@ -1601,17 +1608,33 @@ describe('[security] .mcp.json is the declaration that actually loads', () => {
     expect(out!.mcpServers.find((m) => m.name === 'probe')).toBeUndefined();
   });
 
-  test('a bus spawn reads it even for an untrusted project', () => {
-    // Bus participants always run with all three scopes regardless of Trust,
-    // so the gate must see .mcp.json for them or the blindness persists
-    // exactly where the multi-agent blast radius is largest.
+  test('a bus spawn does NOT read it for an untrusted participant (Cebab-6fax.21.1)', () => {
+    // Bus participants now derive their scopes from Trust — an untrusted one
+    // runs `['user']`, so its `.mcp.json` does not load and the gate correctly
+    // sees nothing to prompt about, because the spawn will not load it either.
     setProjectTrusted(projectId, false);
     writeMcpJson({ probe: { command: '/bin/echo' } });
     const out = resolveProjectAuthority({
       projectId,
       mode: 'cache',
-      settingSources: BUS_SETTING_SCOPES,
+      settingSources: busSettingScopesFor(projectId),
     });
+    expect(busSettingScopesFor(projectId)).toEqual(['user']);
+    expect(out!.mcpServers.find((m) => m.name === 'probe')).toBeUndefined();
+  });
+
+  test('a bus spawn reads it for a TRUSTED participant (Cebab-6fax.21.1)', () => {
+    // The trusted participant runs all three scopes, so its `.mcp.json` loads
+    // and the gate must see it — exactly where the multi-agent blast radius is
+    // largest.
+    setProjectTrusted(projectId, true);
+    writeMcpJson({ probe: { command: '/bin/echo' } });
+    const out = resolveProjectAuthority({
+      projectId,
+      mode: 'cache',
+      settingSources: busSettingScopesFor(projectId),
+    });
+    expect(busSettingScopesFor(projectId)).toEqual(['user', 'project', 'local']);
     expect(out!.mcpServers.find((m) => m.name === 'probe')).toBeDefined();
   });
 

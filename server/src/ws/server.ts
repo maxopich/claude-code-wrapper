@@ -83,7 +83,7 @@ import { cancelAuthRefresh, startAuthRefresh, type AuthRefreshCallbacks } from '
 import { translate } from './translate.js';
 import { validateClientMsg } from './validate_client_msg.js';
 import {
-  BUS_SETTING_SCOPES,
+  busSettingScopesFor,
   resolveProjectAuthority,
   trustDerivedScopes,
   type SettingScope,
@@ -2616,7 +2616,14 @@ export type McpDenials = Map<number, string[]>;
 export async function gateProjectsForSpawn(
   conn: Conn,
   projectIds: number[],
-  settingSources?: readonly SettingScope[],
+  /**
+   * Scope OVERRIDE, applied to every project in `projectIds`. Omit — the bus
+   * and the ordinary single-agent turn both do — to resolve each project
+   * against its own trust-derived scopes (`busSettingScopesFor`). The one
+   * caller that passes it is the built-in help assistant, which runs with NO
+   * project scopes (`[]`) so nothing project-declared should be gated.
+   */
+  settingSourcesOverride?: readonly SettingScope[],
 ): Promise<McpDenials> {
   const denials: McpDenials = new Map();
   const seen = new Set<number>();
@@ -2624,17 +2631,20 @@ export async function gateProjectsForSpawn(
     if (seen.has(projectId)) continue;
     seen.add(projectId);
     const cached = conn.authorityCache.get(projectId);
+    // [security] Resolve against the scopes the SPAWN will use. For the bus
+    // (and the ordinary single-agent turn) that is this project's trust-derived
+    // set — the SAME function `bus/runner.ts` derives the spawn's
+    // `settingSources` from (`Cebab-6fax.21.1`), so the gate and the spawn can
+    // never disagree. For an untrusted project `busSettingScopesFor` returns
+    // `['user']`, so the MCP and env gates below correctly see nothing
+    // project-scoped to gate — because the spawn will not load it either.
+    // `scope_conformance.test.ts` pins the shared use. The assistant's `[]`
+    // override collapses everything to zero project layers.
+    const scopes = settingSourcesOverride ?? busSettingScopesFor(projectId);
     const authority = resolveProjectAuthority({
       projectId,
       mode: 'cache',
-      // [security] Resolve against the scopes the SPAWN will use, not the
-      // project's Trust setting. Bus callers pass BUS_SETTING_SCOPES because
-      // bus/{orchestrator,chain}.ts register every participant with all three
-      // layers regardless of Trust; resolving trust-derived here would hand
-      // both gates below an empty list for an untrusted project whose
-      // project-declared MCP servers and `env:` block the SDK then loads.
-      // Omitted (single-agent) keeps the trust-derived default.
-      ...(settingSources !== undefined && { settingSources }),
+      settingSources: scopes,
       ...(cached !== undefined && { latestSessionStarted: cached }),
     });
     if (!authority) continue;
@@ -2673,9 +2683,10 @@ export async function gateProjectsForSpawn(
  * process the model must choose to call; a hook is a shell command the CLI
  * runs on its own schedule — `SessionStart` before the model acts,
  * `PreToolUse`/`PostToolUse` around every tool call — and none of them pass
- * through `canUseTool`, so none can be approved or denied. Since #260 widened
- * bus participants to `['user', 'project', 'local']`, a participant project's
- * hooks execute on every hop with no record anywhere.
+ * through `canUseTool`, so none can be approved or denied. A TRUSTED bus
+ * participant runs `['user', 'project', 'local']`, so its project's hooks
+ * execute on every hop with no record anywhere (an untrusted one runs
+ * `['user']` and loads no project hooks — `Cebab-6fax.21.1`).
  *
  * DETECTION, NOT PREVENTION — and deliberately so. The two gates above park
  * the spawn on a promise that only an operator decision resolves. There is no
@@ -5600,7 +5611,6 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
           const orchestratorDenials = await gateProjectsForSpawn(
             conn,
             workers.map((w) => w.projectId),
-            BUS_SETTING_SCOPES,
           );
           const handle = await startOrchestratorSession({
             workers,
@@ -5733,7 +5743,6 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
         const chainDenials = await gateProjectsForSpawn(
           conn,
           participants.map((p) => p.projectId),
-          BUS_SETTING_SCOPES,
         );
         const handle = await startChainSession({
           participants,
@@ -5937,7 +5946,7 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
         sessionId: msg.sessionId,
         activeSessionId: active?.sessionId ?? null,
         sendUserPrompt: orch ? (text) => orch.sendUserPrompt(text) : null,
-        gateProjects: (projectIds) => gateProjectsForSpawn(conn, projectIds, BUS_SETTING_SCOPES),
+        gateProjects: (projectIds) => gateProjectsForSpawn(conn, projectIds),
         applyMcpDenials: (projectId, serverNames) => {
           orch?.applyMcpDenials(projectId, serverNames);
         },
@@ -6166,16 +6175,18 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
         }
         // [security] Same MCP-TOFU + env-injection gates the two session-start
         // paths run. This path had NONE of them: a worker added mid-run
-        // reached `runner.register({ settingSources: ['user','project',
-        // 'local'] })` in orchestrator.ts without the operator ever being
-        // prompted about that project's declared MCP servers or credential-
-        // class `env:` keys — for trusted and untrusted projects alike. The
+        // reached `runner.register(...)` in orchestrator.ts without the
+        // operator ever being prompted about that project's declared MCP
+        // servers or credential-class `env:` keys. The gate resolves against
+        // this project's trust-derived scopes (`Cebab-6fax.21.1`), so a
+        // trusted worker is fully vetted and an untrusted one has nothing
+        // project-scoped to prompt about (it will not load it). The
         // bus-install TOFU above governs whether the project gets a bus slug,
         // which is a different question.
         //
         // Ordering matches the start paths: trust decisions first, then the
         // credential prompt (see gateProjectsForSpawn's header).
-        const addDenials = await gateProjectsForSpawn(conn, [msg.projectId], BUS_SETTING_SCOPES);
+        const addDenials = await gateProjectsForSpawn(conn, [msg.projectId]);
         // H04: `addWorker` registers the participant and delivers its first
         // turn in one call, so the denial must go in as an argument — applying
         // it afterwards would be one turn too late.

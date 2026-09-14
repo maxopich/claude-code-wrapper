@@ -57,10 +57,12 @@ export type MultiAgentEndedReason = 'completed' | 'stopped' | 'crashed';
  * reasons, because it looked like a safety control and was not one.
  *
  * It could not do the job its comment claimed ("stops an adversarially or
- * generated-huge file from dominating a bus agent's turn"). Every project this
- * function injects for — orchestrator workers and chain participants alike —
- * runs `settingSources: ['user', 'project', 'local']`, so **the SDK already
- * auto-loads that same CLAUDE.md into the model's context**. Truncating our
+ * generated-huge file from dominating a bus agent's turn"). For a TRUSTED
+ * participant — orchestrator workers and chain participants alike — the run
+ * uses `settingSources: ['user', 'project', 'local']`, so **the SDK already
+ * auto-loads that same CLAUDE.md into the model's context** (an untrusted one
+ * runs `['user']` and the SDK loads none of it, but this injection still puts
+ * the full bytes in the prompt regardless — `Cebab-6fax.21.1`). Truncating our
  * copy never kept a byte away from the model. It only cut Cebab's own record
  * of what the model was told, which is the exact thing this injection exists
  * to produce (see `readProjectClaudeMd`'s header). The cap was working against
@@ -91,13 +93,15 @@ export type ProjectRules = { framed: string; sizeLabel: string };
 /**
  * Read a bus worker project's ROOT CLAUDE.md for first-turn injection.
  *
- * WHY THIS STILL EXISTS, given the SDK now loads CLAUDE.md itself. It was
- * written when bus agents ran `settingSources: ['user']`, where the SDK loads
- * no project file at all, so this was the only way a worker saw its own
- * rules. That scope has since been widened: workers and chain participants
- * run `['user', 'project', 'local']` (see `chain.ts` and `orchestrator.ts`),
- * and the SDK auto-loads CLAUDE.md for them. Only the orchestrator is still
- * `['user']`, and its cwd is an empty Cebab-owned folder with nothing to load.
+ * WHY THIS STILL EXISTS, given the SDK loads CLAUDE.md itself for a trusted
+ * participant. It was written when bus agents ran `settingSources: ['user']`,
+ * where the SDK loads no project file at all, so this was the only way a worker
+ * saw its own rules. A TRUSTED worker or chain participant now runs
+ * `['user', 'project', 'local']` (see `chain.ts` and `orchestrator.ts`), and
+ * the SDK auto-loads CLAUDE.md for it; an UNTRUSTED one runs `['user']`, where
+ * the SDK loads nothing and this injection is again the only path
+ * (`Cebab-6fax.21.1`). The orchestrator is always `['user']`, and its cwd is an
+ * empty Cebab-owned folder with nothing to load.
  *
  * The injection was kept anyway, and the duplicate read is deliberate: the
  * SDK's auto-load happens inside the model's context where Cebab never sees
