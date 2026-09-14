@@ -244,7 +244,13 @@ describe('runManagedDelete', () => {
     const result = sent.find((m) => m.type === 'managed_delete_result');
     expect(result?.result.ok).toBe(false);
     if (result?.type === 'managed_delete_result' && !result.result.ok) {
-      expect(result.result.error).toContain('running session');
+      // NAMES the blocking run. The operator cannot see the in-process
+      // registry, and the bus refusal is reachable on a run the UI already
+      // calls `failed` (`Cebab-1tty`), so a bare "Stop it first" would send
+      // them at a verb that no-ops. The id is the part that has to survive a
+      // reword.
+      expect(result.result.error).toContain('live-bus-sid');
+      expect(result.result.error).toContain('multi-agent run');
     }
   });
 

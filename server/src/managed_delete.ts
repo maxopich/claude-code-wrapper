@@ -74,21 +74,36 @@ export async function runManagedDelete(
 
   // `Cebab-bxi0`: `snapshotInFlight` is the per-HOP Query registry — it only
   // sees a bus participant whose turn is executing at that exact instant. A bus
-  // run BETWEEN hops (routing, awaiting the operator, or a paused/muted agent)
-  // has no in-flight query for this project, so the check above waved it
-  // through; the delete then removed the `projects` row and the agent vanished
-  // from a live run's roster while it continued. The durable signal is the
-  // in-process registry of genuinely-live sessions (`hasLiveSession`), which
-  // holds a bus run for its whole lifetime, not just mid-hop. A stale `running`
-  // DB row left by a dead process is NOT in that map — so this refuses only a
-  // truly live run, and the `Cebab-6fax.33` end-the-stranded-row handling below
-  // still applies to those.
-  const inLiveBusRun = listMultiAgentSessionIdsForProject(projectId).some((sid) =>
+  // run BETWEEN hops (routing, or a paused/muted agent) has no in-flight query
+  // for this project, so the check above waved it through; the delete then
+  // removed the `projects` row and the agent vanished from a live run's roster
+  // while it continued. NOT an `AskUserQuestion` park, which is the one wait
+  // that happens INSIDE the turn — the query is registered until the stream
+  // loop's `finally`, so `snapshotInFlight` does see it. The durable signal is
+  // the in-process registry of genuinely-live sessions (`hasLiveSession`),
+  // which holds a bus run for its whole lifetime, not just mid-hop. A stale
+  // `running` DB row left by a dead process is NOT in that map — so this
+  // refuses only a truly live run, and the `Cebab-6fax.33` end-the-stranded-row
+  // handling below still applies to those.
+  const liveBusSessionId = listMultiAgentSessionIdsForProject(projectId).find((sid) =>
     hasLiveSession(sid),
   );
 
-  if (singleAgentRunning || inLiveBusRun) {
+  // The message NAMES the run, because the operator's next move depends on
+  // which one it is and they cannot see this map. `Cebab-1tty`: the registry
+  // can also hold a run the UI already renders as `failed` — a reopen that
+  // displaced it detaches the sink without tearing the session down — and then
+  // `Stop` is a no-op on it, so "Stop or End it first" would be advice that
+  // cannot be followed. Until that leak is closed, say which session blocks the
+  // delete rather than prescribing a verb.
+  if (singleAgentRunning) {
     return fail('this agent has a running session — Stop or End it first, then retry the delete');
+  }
+  if (liveBusSessionId !== undefined) {
+    return fail(
+      `this agent takes part in a multi-agent run that is still live in this process ` +
+        `(session ${liveBusSessionId}) — end that run, then retry the delete`,
+    );
   }
 
   // [security] AUDIT BEFORE THE ACT (BE-1). A failed append aborts with nothing
