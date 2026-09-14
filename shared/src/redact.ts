@@ -80,11 +80,17 @@ const MAX_DEPTH = 12;
 /**
  * `Cebab-6fax.32`. The marker that stands in for hook output dropped from a
  * share-safe artifact. An explicit sentence, never a silent gap: a reader can
- * tell "a hook ran and its output is in the raw export" from "no hook ran".
- * The complete text stays in `format=raw`, behind the acknowledge-raw gate.
+ * tell "a hook ran and its output is elsewhere" from "no hook ran".
+ *
+ * IT NAMES A PATH THE OPERATOR HAS (`Cebab-8pks`). It used to say "use the raw
+ * export", and no UI produces one — `format=raw` is reachable by curl with the
+ * acknowledge header and nothing else. The Logs view's Download .ndjson is the
+ * complete local copy and is one click away, so that is what it points at. The
+ * raw export still exists and is still the only complete trace of a session
+ * that has no rows on screen.
  */
 export const HOOK_OUTPUT_OMITTED =
-  '[hook output omitted from the shared log -- use the raw export]';
+  '[hook output omitted from the shared log -- the Logs view Download .ndjson keeps it]';
 
 /**
  * Reported path for a mask applied to the payload ROOT — a top-level string

@@ -46,7 +46,7 @@ The toolbar across the top of the inspector gives you:
 - **Agents** — a dropdown to filter by agent (shown only for multi-agent runs; single-agent runs have just one agent, so it's hidden).
 - **Clear** — appears when any filter is active; "Clear all filters" resets them at once.
 - **Refresh** — "Re-fetch the log from offset 0", reloading the log from the beginning to pick up new rows.
-- **Download .ndjson** — "Download the filtered view as NDJSON (one JSON object per line)". This exports exactly what your current filters show, one JSON object per line, ready to grep or feed to another tool.
+- **Download .ndjson** — writes exactly what your current filters show, one JSON object per line, ready to grep or feed to another tool. This is your **complete local copy**: it keeps what a project's hook scripts printed, under the ordinary credential masking. It is **not** the share-safe file — for that, use the session's `⤓` in the sidebar, which downloads the redacted export.
 - **Reveal sensitive** — "Un-mask sensitive fields. You will be asked to confirm." This un-masks the redacted fields; you confirm first, and the log re-fetches. Press it again to **Re-mask** (also a re-fetch).
 
 If nothing matches, the list reads "No log entries match the current filters." Long logs load in chunks — a **Load more** button appears at the bottom when there's more to fetch.
@@ -90,9 +90,11 @@ Every SDK message in a session is persisted twice: to a row in a SQLite `events`
 
 Session-log exports come in two forms:
 
-- **redacted** (the default) — a share-safe export. It carries only the durable message classes and masks sensitive fields, so a secret can't leak through a partial fragment.
+- **redacted** (the default) — a share-safe export, and what both download buttons in the sidebar produce. It carries only the durable message classes and masks sensitive fields, so a secret can't leak through a partial fragment.
   Hook output — what a project's hook scripts printed — is left out of it and
-  replaced by a marker; the complete text is only in the raw export.
-- **raw** — the only complete trace, and gated behind an explicit acknowledgment because it's unredacted.
+  replaced by a marker.
+- **raw** — the only complete trace, and gated behind an explicit acknowledgment because it's unredacted. No button produces it; it's a `curl` with an acknowledgment header.
+
+The Logs inspector's **Download .ndjson** is a third thing and worth keeping straight: it writes the rows on your screen, hook output included, so it is the complete copy you can get from the UI. Keep it local; send the redacted export instead.
 
 For how this data is stored, where the data directory lives, and how to manage or delete it, see `12-settings-storage-and-data.md`. For the classifier, dangerous-path handling, and the redaction rules themselves, see `08-safety-controls.md`.

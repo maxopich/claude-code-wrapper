@@ -51,7 +51,7 @@ A project can accumulate many sessions over time. They're listed so you can retu
 Cebab gives you a handful of actions on sessions, both individually and on a selection of several at once. From the tooltips in the app:
 
 - **Rename** a session ("Rename session") — give a conversation a memorable name instead of a default one.
-- **Download the log** as a `.jsonl` file — either for one session ("Download session log (.jsonl)") or for each session in a selection ("Download a .jsonl log for each selected session"). This is a transcript of the conversation you can keep or inspect outside the app.
+- **Download the log** as a `.jsonl` file — either for one session (the `⤓` on the row) or for each session in a selection ("Download a .jsonl log for each selected session"). This is the **share-safe** copy: a transcript of the conversation, redacted, without live typing detail or hook output. The complete copy is the Logs inspector's **Download .ndjson** — see `10-logs-artifacts-and-search.md`.
 - **Hide** selected sessions ("Hide selected sessions from the list (recoverable)") — this just removes them from the list to reduce clutter. It's recoverable, so nothing is destroyed.
 - **Soft-delete** selected sessions ("Soft-delete selected sessions (recoverable for 7 days)") — a stronger removal that's still reversible for **7 days**, after which it becomes permanent.
 

@@ -702,8 +702,8 @@ function SessionRow(props: {
       {!editing && !props.selectMode && (
         <button
           className="session-download-btn"
-          title="Download session log (.jsonl)"
-          aria-label="Download session log"
+          title="Download session log (.jsonl) — the share-safe copy: redacted, without live typing detail or hook output"
+          aria-label="Download session log, share-safe redacted copy"
           aria-busy={downloading || undefined}
           disabled={downloading}
           onClick={(e) => {
