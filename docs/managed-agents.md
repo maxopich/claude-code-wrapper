@@ -27,6 +27,7 @@ threat model and has never carried these two.
 - [Why `.git` is excluded](#why-git-is-excluded)
 - [Credentials, and why they are copied in the clear](#credentials-and-why-they-are-copied-in-the-clear)
 - [The symlink rule](#the-symlink-rule)
+- [When an incomplete copy refuses to register](#when-an-incomplete-copy-refuses-to-register)
 - [The supported Node floor](#the-supported-node-floor)
 - [Deleting a managed agent](#deleting-a-managed-agent)
 
@@ -70,6 +71,59 @@ So the two branches are deliberate and each is pinned from both sides in `server
 ## The symlink rule
 
 **It is stricter than "don't follow symlinks"** (`managed_agent.ts`). `fsp.cp({ dereference: false })` satisfies that phrase and is wrong here: it recreates an escaping link faithfully, handing the managed agent a live path out of the space Cebab owns. So does an **absolute** link that resolves _inside_ the source — recreated verbatim it still names the SOURCE after the copy. Only relative links resolving inside-or-at the source root are recreated; everything else is skipped and reported. Directory links are never descended, which is also the loop guard. Measured caps (5 GB / 300k files) are a backstop, not the decision: the operator sees a preflight measured by the _same traversal the copy uses_ and confirms. The copy is `fs.promises` throughout — a synchronous copy of the gigabyte-scale trees this deliberately includes would park the event loop for minutes.
+
+## When an incomplete copy refuses to register
+
+**A copy that lost real content is not registered** (`Cebab-6z6a`). `copyTree`
+tolerates a per-entry error and records it as a `copy_failed` (or
+`unreadable_dir`) skip rather than throwing — the fix `Cebab-ygu.14`/`.13` made
+so one churning cache file could not discard a multi-gigabyte copy. The cost of
+that tolerance is that a copy which lost genuine content still returns
+`ok`-shaped, and registering it hands the operator a managed agent that "looks
+configured and is not". So `runManagedCopy` inspects the skip list before
+`registerManagedProject` and refuses two cases, removing the incomplete tree
+exactly as the partial-throw path does:
+
+- **A credential or settings file did not arrive.** Any skip whose reason is in
+  `MISSING_REASONS` (`copy_failed`, `unreadable_dir`) and whose path is one of
+  the agent's own config files: root `.env` / `.env.*`, `.mcp.json`,
+  `.claude/settings.json`, `.claude/settings.local.json`, or anything under a
+  root `.ssh/`. A missing one of those is what makes an agent silently
+  mis-configured rather than merely incomplete.
+
+  **Not `pathLooksSensitive`, and the difference is the point.** That predicate
+  is the redactor's, and its header states the rule it is built on: a false
+  negative leaks a credential, so it errs wide — any basename whose stem is
+  `token`, `secret`, `credentials`, `key` or `pem`, and anything under a
+  credential-looking directory. Measured, it matches `src/token.ts`,
+  `lib/secret.js`, `ui/Secret.tsx`, `docs/token.md`, `design/Deck.key`,
+  `test/fixtures/server.pem` and `node_modules/marked/lib/token.js`. Erring wide
+  is right for redaction and wrong for a rule that DELETES a finished copy: one
+  transient failure on an ordinary source file with an unlucky name would
+  discard the whole tree, which is the class `Cebab-ygu.14` closed — and
+  `node_modules`, which the copy deliberately includes, is where that churn
+  happens. The list above is explicit and root-anchored for that reason, and
+  widening it is a decision rather than a refactor. A control pins it: a copy
+  that loses `src/token.ts` and `node_modules/marked/token.js` still registers,
+  with both skips reported.
+
+- **A systemic failure.** The source had files but essentially none arrived
+  (`survey.files > 0 && copied.files === 0`), or the failures outnumber what was
+  written (`missing.length > copied.files`) — the shape an ENOSPC/EACCES on the
+  target leaves, as opposed to one transient per-file error. The two clauses
+  catch different things and each is pinned alone: the first is the only one
+  that fires when nothing arrived and nothing was recorded as a failure, the
+  second the only one that fires when some of the tree did arrive.
+
+What is deliberately NOT grounds for refusal: `permissions_unenforced` (the file
+arrived; only its mode is loose), the policy skips `excluded_vcs` /
+`symlink_escapes` / `not_regular` (chosen omissions the preflight already named —
+refusing on `.git`'s `excluded_vcs` would make every git repo uncopyable), and
+`symlink_unsupported` (an intra-tree link whose target is a real file copied
+elsewhere in the tree). A benign non-sensitive `copy_failed` among healthy files
+still registers with the skip reported, which is the `Cebab-ygu.14` behaviour the
+refusal must not undo — pinned by an anti-vacuity control in
+`managed_copy.test.ts`.
 
 ## The supported Node floor
 
