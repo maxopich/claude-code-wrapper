@@ -2054,6 +2054,29 @@ export async function executeReopenSessionConfirmed(args: {
   if (currentActiveSessionId && currentActiveSessionId !== sessionId) {
     try {
       detachCurrentActive();
+      // Cebab-1tty: `detachCurrentActive` is a bare sink swap — it silences
+      // the WS stream but leaves the incumbent's AgentRunner alive and its
+      // entry in the live registry, which NOTHING else here ever clears. So
+      // the `crashed` row we write next would be a lie: the run stays live for
+      // the life of the process, refusing a managed-agent delete that took
+      // part in it, defeating stop_multi_agent, and wedging claimSessionStart.
+      // Tear it down for real first, exactly as the auto-sweep does before its
+      // own `endMultiAgentSession` (`markCrashedAndAnnounceSuperseded`, Register
+      // B02). `stop()` runs its own teardown (endMultiAgentSession +
+      // unregisterLiveSession); the redundant end-call below still covers the
+      // not-live case. A throwing `stop` is logged and swallowed so the row is
+      // never left `running`.
+      const liveActive = getLiveSession(currentActiveSessionId);
+      if (liveActive) {
+        try {
+          await liveActive.handle.stop('crashed');
+        } catch (err) {
+          console.error(
+            `[reopen_session_confirmed] failed to stop live displaced session ${currentActiveSessionId}`,
+            err,
+          );
+        }
+      }
       endMultiAgentSession(currentActiveSessionId, 'crashed');
       send({
         type: 'session_superseded',
