@@ -1258,8 +1258,12 @@ function AppShell({
   }
 
   function confirmManagedCopy(projectId: number) {
-    dispatch({ type: 'managed_copy_started' });
-    wsRef.current?.send({ type: 'copy_project_to_managed', projectId });
+    // `Cebab-1jm3`: SEND FIRST, and read the answer. `send` returns false on a
+    // socket that is not OPEN, and the old order dispatched `copying` before
+    // asking — wedging the modal in the one status with no dismiss, with no
+    // `ws_close` left to come and release it.
+    const sent = wsRef.current?.send({ type: 'copy_project_to_managed', projectId }) ?? false;
+    dispatch({ type: sent ? 'managed_copy_started' : 'managed_copy_send_failed' });
   }
 
   /**

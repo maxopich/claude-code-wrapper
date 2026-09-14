@@ -4220,6 +4220,66 @@ describe('store / managed copy (Cebab-ws0.9)', () => {
     expect(s.managedCopy?.status).toBe('done');
     expect(s.managedCopy?.result).toEqual({ ok: false, error: 'nope' });
   });
+
+  test('a disconnect mid-copy resolves the held-open modal, but leaves a still-dismissable one alone (Cebab-1jm3)', () => {
+    // ygu.31 makes the modal inert while `copying`, so a copy that NEVER
+    // resolves (dropped socket, server restart, a hung tree) would wedge the
+    // modal forever. The result streams over this socket and nothing
+    // re-requests it on reconnect, so a `ws_close` is the observable "it will
+    // never arrive": the modal must flip to a dismissable failure.
+    let s = reduce(open(), { type: 'managed_copy_open', projectId: 4 });
+    s = reduce(s, { type: 'managed_copy_started' });
+    expect(s.managedCopy?.status).toBe('copying');
+
+    s = reduce(s, { type: 'ws_close' });
+    expect(s.managedCopy?.status).toBe('done');
+    expect(s.managedCopy?.result?.ok).toBe(false);
+    expect(s.managedCopy?.projectId).toBe(4);
+
+    // The other half of the fix, in the same case so it reddens with it: only
+    // `copying` is the wedged state — `measuring`/`ready`/`done` already keep a
+    // working dismiss, so ws_close must NOT manufacture a spurious failure for
+    // them. Same reference in, same reference out.
+    const measuring = reduce(open(), { type: 'managed_copy_open', projectId: 5 });
+    expect(measuring.managedCopy?.status).toBe('measuring');
+    const afterClose = reduce(measuring, { type: 'ws_close' });
+    expect(afterClose.managedCopy).toBe(measuring.managedCopy);
+  });
+
+  test('the disconnect message reports an UNKNOWN outcome, never a failed copy (Cebab-1jm3)', () => {
+    // The server does not abort a copy when the socket closes: `runManagedCopy`
+    // takes no AbortSignal and the send closure is a silent no-op on a dead
+    // socket. So the ORDINARY outcome of this path is a copy that finished and
+    // registered its row while this client was gone — wording it as a failure
+    // is wrong in exactly the common case. Pinned as words because the words
+    // are the deliverable: this state has no other observable.
+    let s = reduce(open(), { type: 'managed_copy_open', projectId: 4 });
+    s = reduce(s, { type: 'managed_copy_started' });
+    s = reduce(s, { type: 'ws_close' });
+
+    const error = s.managedCopy?.result?.ok === false ? s.managedCopy.result.error : '';
+    expect(error).toMatch(/not cancelled|may well have finished/i);
+    expect(error).not.toMatch(/the copy failed|copy did not/i);
+  });
+
+  test('a Copy that never left the tab does not wedge the modal (Cebab-1jm3)', () => {
+    // `send` no-ops on a closed socket and returns false. Committing to
+    // `copying` anyway is the same trap by a route `ws_close` cannot rescue —
+    // the socket is ALREADY closed, so no close event is coming. This is also
+    // the one case where the outcome is NOT unknown: nothing was started.
+    let s = reduce(open(), { type: 'managed_copy_open', projectId: 4 });
+    s = reduce(s, { type: 'managed_copy_send_failed' });
+
+    expect(s.managedCopy?.status).toBe('done');
+    expect(s.managedCopy?.result?.ok).toBe(false);
+    const error = s.managedCopy?.result?.ok === false ? s.managedCopy.result.error : '';
+    expect(error).toMatch(/never started/i);
+
+    // Control: with no modal open there is nothing to resolve, and the state is
+    // returned untouched rather than growing a `managedCopy` out of nowhere.
+    const idle = open();
+    expect(reduce(idle, { type: 'managed_copy_send_failed' })).toBe(idle);
+  });
 });
 
 describe('store / tool output survives the fold (Cebab-003)', () => {
