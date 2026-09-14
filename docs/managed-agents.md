@@ -85,14 +85,35 @@ configured and is not". So `runManagedCopy` inspects the skip list before
 exactly as the partial-throw path does:
 
 - **A credential or settings file did not arrive.** Any skip whose reason is in
-  `MISSING_REASONS` (`copy_failed`, `unreadable_dir`) and whose path
-  `pathLooksSensitive` matches — `.env`, `.mcp.json`, `.claude/settings*.json`,
-  `id_rsa`, and the rest of the redactor's list. A missing credential is what
-  makes an agent silently mis-configured rather than merely incomplete.
+  `MISSING_REASONS` (`copy_failed`, `unreadable_dir`) and whose path is one of
+  the agent's own config files: root `.env` / `.env.*`, `.mcp.json`,
+  `.claude/settings.json`, `.claude/settings.local.json`, or anything under a
+  root `.ssh/`. A missing one of those is what makes an agent silently
+  mis-configured rather than merely incomplete.
+
+  **Not `pathLooksSensitive`, and the difference is the point.** That predicate
+  is the redactor's, and its header states the rule it is built on: a false
+  negative leaks a credential, so it errs wide — any basename whose stem is
+  `token`, `secret`, `credentials`, `key` or `pem`, and anything under a
+  credential-looking directory. Measured, it matches `src/token.ts`,
+  `lib/secret.js`, `ui/Secret.tsx`, `docs/token.md`, `design/Deck.key`,
+  `test/fixtures/server.pem` and `node_modules/marked/lib/token.js`. Erring wide
+  is right for redaction and wrong for a rule that DELETES a finished copy: one
+  transient failure on an ordinary source file with an unlucky name would
+  discard the whole tree, which is the class `Cebab-ygu.14` closed — and
+  `node_modules`, which the copy deliberately includes, is where that churn
+  happens. The list above is explicit and root-anchored for that reason, and
+  widening it is a decision rather than a refactor. A control pins it: a copy
+  that loses `src/token.ts` and `node_modules/marked/token.js` still registers,
+  with both skips reported.
+
 - **A systemic failure.** The source had files but essentially none arrived
   (`survey.files > 0 && copied.files === 0`), or the failures outnumber what was
   written (`missing.length > copied.files`) — the shape an ENOSPC/EACCES on the
-  target leaves, as opposed to one transient per-file error.
+  target leaves, as opposed to one transient per-file error. The two clauses
+  catch different things and each is pinned alone: the first is the only one
+  that fires when nothing arrived and nothing was recorded as a failure, the
+  second the only one that fires when some of the tree did arrive.
 
 What is deliberately NOT grounds for refusal: `permissions_unenforced` (the file
 arrived; only its mode is loose), the policy skips `excluded_vcs` /

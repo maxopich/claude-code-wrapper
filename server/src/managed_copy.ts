@@ -19,7 +19,6 @@
 
 import type { ManagedCopySkip, ManagedCopySkipReason, ServerMsg } from '@cebab/shared/protocol';
 import { MANAGED_COPY_SKIP_LIMIT } from '@cebab/shared/protocol';
-import { pathLooksSensitive } from '@cebab/shared';
 import { emit } from './notifications/dispatcher.js';
 import {
   DEFAULT_CAPS,
@@ -56,6 +55,48 @@ const MISSING_REASONS: ReadonlySet<ManagedCopySkipReason> = new Set([
   'copy_failed',
   'unreadable_dir',
 ]);
+
+/**
+ * The files whose ABSENCE leaves a managed agent mis-configured, as opposed to
+ * merely incomplete. Losing one of these refuses the copy and REMOVES the tree,
+ * so the set has to be narrow enough to justify a destructive act.
+ *
+ * DELIBERATELY NOT `pathLooksSensitive` (`Cebab-6z6a`). That predicate is the
+ * redactor's, and its header states the rule it is built on: a false negative
+ * leaks a credential, so it errs wide on purpose — matching any basename whose
+ * stem is `token`, `secret`, `credentials`, `key` or `pem`, and any path under a
+ * credential-looking directory. Measured against it: `src/token.ts`,
+ * `lib/secret.js`, `ui/Secret.tsx`, `docs/token.md`, `design/Deck.key`,
+ * `test/fixtures/server.pem` and `node_modules/marked/lib/token.js` all match.
+ * Erring wide is right for redaction and wrong here, where the consequence runs
+ * the other way: one transient `copy_failed` on any ordinary source file with an
+ * unlucky name would delete a finished multi-gigabyte copy — re-opening the
+ * exact class `Cebab-ygu.14` closed, and `node_modules` (deliberately copied) is
+ * where that churn actually happens.
+ *
+ * So this is an explicit list of the agent's own configuration, matched at the
+ * project ROOT only, and never under `node_modules`. Widening it is a decision,
+ * not a refactor.
+ */
+const CONFIG_CRITICAL_FILES: ReadonlySet<string> = new Set([
+  '.mcp.json',
+  '.claude/settings.json',
+  '.claude/settings.local.json',
+]);
+
+function configCriticalPath(rel: string): boolean {
+  const norm = rel.replace(/\\/g, '/');
+  // A vendored fixture is not this project's configuration, and it is where the
+  // mid-copy churn lives.
+  if (norm === 'node_modules' || norm.startsWith('node_modules/')) return false;
+  if (CONFIG_CRITICAL_FILES.has(norm)) return true;
+  // `.env`, `.env.local`, `.env.production` … at the root, where the CLI reads
+  // them. A nested `.env` belongs to something the agent is not configured by.
+  if (norm === '.env' || norm.startsWith('.env.')) return true;
+  // A private key the project's own tooling would present. Root `.ssh/` only.
+  if (norm.startsWith('.ssh/')) return true;
+  return false;
+}
 
 /** Same cap, for the credential-file list — see `truncateSkips`. */
 function truncatePaths(paths: string[]): { paths: string[]; truncated: number } {
@@ -221,11 +262,10 @@ export async function runManagedCopy(
   // exactly as the partial-throw and unregisterable paths above do.
   const missing = copied.skips.filter((s) => MISSING_REASONS.has(s.reason));
 
-  // A credential or settings file that did not arrive. `pathLooksSensitive`
-  // matches `.env`, `.mcp.json`, `.claude/settings*.json`, `id_rsa`, and the
-  // rest of the redactor's list — the files whose absence makes an agent
-  // silently mis-configured rather than merely incomplete.
-  const sensitiveMissing = missing.filter((s) => pathLooksSensitive(s.rel));
+  // A credential or settings file that did not arrive — one of the files whose
+  // absence makes an agent silently mis-configured rather than merely
+  // incomplete.
+  const sensitiveMissing = missing.filter((s) => configCriticalPath(s.rel));
   if (sensitiveMissing.length > 0) {
     await removeManagedDir(target).catch(() => {});
     const named = sensitiveMissing

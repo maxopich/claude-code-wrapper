@@ -410,6 +410,109 @@ describe('[security] runManagedCopy refuses an incomplete copy (Cebab-6z6a)', ()
     expect(completeOut.registered).toBe(true);
     expect(managedDirs()).toContain('complete');
   });
+
+  test('[security] an ordinary source file with a credential-shaped NAME is not config, and does not destroy the copy', async () => {
+    // The refusal deletes a finished tree, so its predicate has to be narrow.
+    // `pathLooksSensitive` — the redactor's — is deliberately wide: it matches
+    // any basename whose stem is `token`, `secret`, `credentials`, `key` or
+    // `pem`, which covers `src/token.ts`, `ui/Secret.tsx` and
+    // `node_modules/marked/lib/token.js`. Erring wide is right for redaction
+    // and wrong here: one transient failure on a file with an unlucky name
+    // would discard the whole copy, which is the class `Cebab-ygu.14` closed.
+    //
+    // Reddens against a refusal keyed on `pathLooksSensitive`: `named` loses
+    // only such files and MUST still register; `real` loses actual agent
+    // config and MUST still refuse, so the case cannot pass by refusing
+    // nothing.
+    const named = path.join(tmp.root(), 'named');
+    write(path.join(named, 'CLAUDE.md'), '# named\n');
+    write(path.join(named, 'src', 'token.ts'), 'export const t = 1\n');
+    write(path.join(named, 'src', 'a.ts'), 'export const a = 1\n');
+    write(path.join(named, 'node_modules', 'marked', 'token.js'), 'module.exports = {}\n');
+    const namedId = upsertProject('named', named).id;
+
+    const real = path.join(tmp.root(), 'real-config');
+    write(path.join(real, 'CLAUDE.md'), '# real\n');
+    write(path.join(real, 'src', 'a.ts'), 'export const a = 1\n');
+    write(path.join(real, '.mcp.json'), '{"mcpServers":{}}\n');
+    const realId = upsertProject('real-config', real).id;
+
+    const sent: ServerMsg[] = [];
+    let namedOut, realOut;
+    const spy = failCopyOn(
+      (src) =>
+        src.endsWith(`${path.sep}token.ts`) ||
+        src.endsWith(`${path.sep}token.js`) ||
+        src.endsWith(`${path.sep}.mcp.json`),
+    );
+    try {
+      namedOut = await runManagedCopy(namedId, (m) => sent.push(m));
+      realOut = await runManagedCopy(realId, (m) => sent.push(m));
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(namedOut.registered).toBe(true);
+    expect(managedDirs()).toContain('named');
+    const namedResult = resultFor(sent, namedId);
+    expect(namedResult?.result.ok).toBe(true);
+    if (namedResult && namedResult.result.ok) {
+      // Still REPORTED — not refusing is not the same as staying quiet.
+      expect(namedResult.result.skips.some((s) => s.rel.endsWith('token.ts'))).toBe(true);
+    }
+
+    // The discriminating half: real agent config still refuses.
+    expect(realOut.registered).toBe(false);
+    expect(managedDirs()).not.toContain('real-config');
+    const realResult = resultFor(sent, realId);
+    expect(realResult?.result.ok).toBe(false);
+    if (realResult && !realResult.result.ok) {
+      expect(realResult.result.error).toContain('.mcp.json');
+    }
+  });
+
+  test('[security] the ratio clause refuses on its own, with more failures than arrivals', async () => {
+    // The systemic predicate has two clauses and the `doomed` fixture above
+    // satisfies BOTH, so neither is discriminated by it — measured: deleting
+    // either clause leaves that test green. This case isolates the ratio half:
+    // one file arrives, two do not, so `survey.files > 0 && copied.files === 0`
+    // is FALSE and only `missing.length > copied.files` can refuse.
+    const lopsided = path.join(tmp.root(), 'lopsided');
+    write(path.join(lopsided, 'keep.txt'), 'kept\n');
+    write(path.join(lopsided, 'lose-1.txt'), 'x\n');
+    write(path.join(lopsided, 'lose-2.txt'), 'y\n');
+    const lopsidedId = upsertProject('lopsided', lopsided).id;
+
+    // The control for the other direction: two arrive, one does not, so the
+    // ratio does NOT trip and the copy registers with its skip reported. A
+    // refusal rule that fired on any failure would redden here.
+    const majority = path.join(tmp.root(), 'majority');
+    write(path.join(majority, 'keep-1.txt'), 'a\n');
+    write(path.join(majority, 'keep-2.txt'), 'b\n');
+    write(path.join(majority, 'lose-1.txt'), 'c\n');
+    const majorityId = upsertProject('majority', majority).id;
+
+    const sent: ServerMsg[] = [];
+    let lopsidedOut, majorityOut;
+    const spy = failCopyOn((src) => src.includes(`${path.sep}lose-`));
+    try {
+      lopsidedOut = await runManagedCopy(lopsidedId, (m) => sent.push(m));
+      majorityOut = await runManagedCopy(majorityId, (m) => sent.push(m));
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(lopsidedOut.registered).toBe(false);
+    expect(managedDirs()).not.toContain('lopsided');
+    const lopsidedResult = resultFor(sent, lopsidedId);
+    expect(lopsidedResult?.result.ok).toBe(false);
+    if (lopsidedResult && !lopsidedResult.result.ok) {
+      expect(lopsidedResult.result.error).toContain('most of the tree');
+    }
+
+    expect(majorityOut.registered).toBe(true);
+    expect(managedDirs()).toContain('majority');
+  });
 });
 
 describe('[security] a managed agent cannot be committed (Cebab-ws0.11)', () => {
