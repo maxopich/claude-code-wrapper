@@ -7410,7 +7410,10 @@ async function runOneTurn(
       }
     }
   } catch (err) {
-    const wrap = classifyError(err);
+    // Cebab-puap: tell the classifier what only this scope knows. `ac` is
+    // Cebab's own controller — a turn it aborted did not crash, whatever shape
+    // the rejection arrives in.
+    const wrap = classifyError(err, { aborted: ac.signal.aborted });
     send(conn.ws, { type: 'wrapper_error', sessionId, kind: wrap.kind, message: wrap.message });
     await persistMessage(
       sessionId,

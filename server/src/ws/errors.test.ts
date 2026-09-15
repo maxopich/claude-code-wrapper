@@ -147,3 +147,73 @@ describe('the account usage limit is a wait, not a crash (Cebab-6fax.39)', () =>
     );
   });
 });
+
+/**
+ * Cebab-puap. Register S02b added the `AbortError` branch to stop exactly this,
+ * and it has never fired on the path it was written for: the SDK does not throw
+ * a DOM-style AbortError.
+ *
+ * Measured live on SDK 0.3.251 — three sessions, each a SUCCESSFUL turn followed
+ * by a socket close, each persisting `wrapper/process_crashed` with message
+ * "Operation aborted" as the last event, after `result/success`. That row is
+ * durable in three places: the transcript (replay shows a crash after a good
+ * answer), a sticky error-severity "Turn failed" inbox notification with a
+ * Restart button, and a `session.crashed` row in the hash-chained safety audit.
+ */
+describe('classifyError — the caller knows better than the error does (Cebab-puap)', () => {
+  /** The SDK's real abort, reconstructed from its bundle: a custom Error
+   *  subclass carrying the intent in metadata rather than in `.name`. */
+  function sdkAbort(): Error {
+    const err = new Error('Operation aborted');
+    err.name = 'ClaudeSDKError';
+    (err as unknown as { errorClass: string }).errorClass = 'aborted';
+    return err;
+  }
+
+  test("the SDK's abort is NOT an AbortError — the shape check alone still misses it", () => {
+    // The control that names the defect. If a future SDK starts throwing a real
+    // AbortError this reddens, and that is worth knowing: it would mean the
+    // ctx path is no longer the only thing holding this together.
+    expect(classifyError(sdkAbort()).kind).toBe('process_crashed');
+  });
+
+  test('with the caller reporting an abort, the same error is not a crash', () => {
+    expect(classifyError(sdkAbort(), { aborted: true }).kind).toBe('aborted');
+  });
+
+  test('the abort context wins over every other branch, not just the default', () => {
+    // An abort can surface wherever the iteration happened to be, so it can
+    // arrive wearing another branch's clothes. Each of these classifies as
+    // something specific WITHOUT the context, and must not when we know we
+    // aborted — otherwise the fix only covers the errors nothing else claims.
+    const authish = new Error('invalid_grant');
+    const notFound = Object.assign(new Error('spawn claude ENOENT'), {
+      code: 'ENOENT',
+      syscall: 'spawn',
+    });
+    expect(classifyError(authish).kind).toBe('auth_expired');
+    expect(classifyError(notFound).kind).toBe('claude_not_found');
+
+    expect(classifyError(authish, { aborted: true }).kind).toBe('aborted');
+    expect(classifyError(notFound, { aborted: true }).kind).toBe('aborted');
+  });
+
+  test('no abort reported → classification is unchanged', () => {
+    // The anti-vacuity control. Without it, "always return aborted" passes
+    // every case above while erasing every real failure the operator needs to
+    // see — which is the exact opposite of the defect and strictly worse.
+    const boom = new Error('something genuinely broke');
+    expect(classifyError(boom).kind).toBe('process_crashed');
+    expect(classifyError(boom, {}).kind).toBe('process_crashed');
+    expect(classifyError(boom, { aborted: false }).kind).toBe('process_crashed');
+  });
+
+  test('a real AbortError still classifies without any context (GateAbandonedError)', () => {
+    // The branch is kept, not replaced: GateAbandonedError sets
+    // `name = 'AbortError'` deliberately, and its callers have no controller to
+    // consult.
+    const gate = new Error('operator dismissed the gate');
+    gate.name = 'AbortError';
+    expect(classifyError(gate).kind).toBe('aborted');
+  });
+});
