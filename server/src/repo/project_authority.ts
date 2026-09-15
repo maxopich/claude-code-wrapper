@@ -695,6 +695,31 @@ export function resolveToolAuthority(
  * something for it. A screenshot of the AuthorityPanel must not leak the
  * operator's token.
  */
+/**
+ * EVERY key of every layer's `env:` block, deduped, in no particular order.
+ *
+ * `Cebab-en70`: distinct from `detectEnvInjections` below, which filters to
+ * names that are credential-SHAPED (on the scrub list, or matching the
+ * redactor's key heuristic) because its job is to decide what to PROMPT the
+ * operator about. That filter is exactly wrong for redaction: the names it
+ * drops — `MAPBOX_PK`, `SENTRY_DSN`, `OPENAI_ORG` — are the ones the redactor's
+ * own spelling heuristic already misses, so reusing it would have built a
+ * feature that helps only where help was not needed.
+ *
+ * An `env:` block is the operator saying "inject these values into the agent's
+ * environment". For a share-safe artifact, masking all of them is the
+ * defensible direction: over-masking costs a log line's readability, and
+ * under-masking ships a key.
+ */
+export function declaredEnvKeys(layers: SettingsLayer[]): string[] {
+  const out = new Set<string>();
+  for (const layer of layers) {
+    if (!layer.data?.env) continue;
+    for (const key of Object.keys(layer.data.env)) out.add(key);
+  }
+  return [...out];
+}
+
 export function detectEnvInjections(layers: SettingsLayer[]): EnvInjection[] {
   const out: EnvInjection[] = [];
   const scrubbed = new Set(SCRUBBED_ENV_VAR_NAMES);
