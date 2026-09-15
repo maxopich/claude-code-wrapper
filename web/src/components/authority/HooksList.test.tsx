@@ -148,6 +148,60 @@ describe('HooksList', () => {
     expect(container.querySelector('.hook-card')).not.toBeNull();
   });
 
+  /**
+   * Cebab-aklg. The empty state is a STRONG NEGATIVE — "no hooks declared" — and
+   * it was false on any machine with a hook-bearing plugin enabled. The beads
+   * plugin, enabled on the machine this was found on, ships SessionStart and
+   * PreCompact entries that run on every turn of every project.
+   */
+  test('a plugin hook keeps the empty state from claiming "none declared"', () => {
+    act(() => {
+      root.render(
+        <HooksList
+          hooks={[]}
+          plugin={[mk({ hookKind: 'SessionStart', scope: 'plugin', command: 'bd prime' })]}
+        />,
+      );
+    });
+    expect(container.querySelector('.hooks-empty')).toBeNull();
+    expect(container.textContent).not.toContain('No hooks declared');
+    expect(container.querySelector('.hooks-plugin')).not.toBeNull();
+    expect(container.textContent).toContain('bd prime');
+  });
+
+  test('the plugin section says Trust does not gate it', () => {
+    // The lever an operator reaches for is Trust, and for these it does
+    // nothing: `enabledPlugins` is read from the user tier alone, which Cebab's
+    // scope set includes trusted or not. A section that listed them without
+    // saying so would send someone to flip a switch that changes nothing.
+    act(() => {
+      root.render(<HooksList hooks={[]} plugin={[mk({ scope: 'plugin', command: 'bd prime' })]} />);
+    });
+    const note = container.querySelector('.hooks-plugin-note')?.textContent ?? '';
+    expect(note).toContain('every project');
+    expect(note).toContain('Trust does not gate');
+    expect(note).toContain('disabling the plugin');
+  });
+
+  test('project hooks and plugin hooks render in separate sections', () => {
+    // Not merged, visually or on the wire — they answer different questions and
+    // have different levers. See ProjectAuthority.pluginHooks.
+    act(() => {
+      root.render(
+        <HooksList
+          hooks={[mk({ hookKind: 'PreToolUse', command: '/project/cmd' })]}
+          plugin={[mk({ hookKind: 'SessionStart', scope: 'plugin', command: 'plugin-cmd' })]}
+        />,
+      );
+    });
+    expect(container.querySelector('.hooks-plugin')).not.toBeNull();
+    expect(container.textContent).toContain('/project/cmd');
+    expect(container.textContent).toContain('plugin-cmd');
+    // The project hook must not have been swept into the plugin section.
+    const pluginSection = container.querySelector('.hooks-plugin')?.textContent ?? '';
+    expect(pluginSection).not.toContain('/project/cmd');
+  });
+
   test('loaded and unloaded hooks both render, in separate sections', () => {
     act(() => {
       root.render(

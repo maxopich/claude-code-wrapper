@@ -4206,8 +4206,21 @@ export type McpServerView = {
  */
 export type HookView = {
   hookKind: string;
-  scope: 'user' | 'project' | 'local';
+  /**
+   * Which layer declared the hook.
+   *
+   * `Cebab-aklg`: `'plugin'` is NOT a settings scope — it is a manifest, and it
+   * behaves differently from the other three in the way that matters most to an
+   * operator reading this panel. A plugin is enabled by the `enabledPlugins`
+   * key, which the CLI reads from the USER tier only; Cebab's scope set
+   * contains `'user'` in both its trusted and its untrusted branch, so a plugin
+   * hook runs identically whether or not a project is trusted. Turning Trust
+   * OFF stops a project's own hooks and does nothing to these.
+   */
+  scope: 'user' | 'project' | 'local' | 'plugin';
   scopePath: string;
+  /** For `scope: 'plugin'`, the enabled-plugin id (`name@marketplace`). */
+  pluginId?: string;
   command: string;
   args?: string[];
   binarySha?: string;
@@ -4299,6 +4312,24 @@ export type ProjectAuthority = {
   agents: string[];
   plugins: { name: string; path: string }[];
   hooks: HookView[];
+  /**
+   * `Cebab-aklg`: hooks an ENABLED PLUGIN brings, which no settings layer
+   * declares and which `hooks` above therefore cannot contain.
+   *
+   * A SEPARATE FIELD, and the separation is the whole design. The first attempt
+   * merged these into `hooks`, and the test suite refused it for a reason worth
+   * recording: `hooks` feeds `reportHookObservations`, the per-PROJECT
+   * trust-on-first-use ledger. A plugin hook is account-wide — merging it would
+   * write one identical ledger row per project, and announce the same "new hook
+   * detected" once per project, for a fact that has nothing to do with any of
+   * them.
+   *
+   * They also differ in what an operator can do about them: Trust decides
+   * whether a project's own hooks load, and decides nothing here —
+   * `enabledPlugins` is read from the user tier alone, which Cebab's scope set
+   * includes in both its trusted and untrusted branch.
+   */
+  pluginHooks: HookView[];
   detectedEnvInjections: EnvInjection[];
   /**
    * Cebab-66y: what this project DECLARES on disk in a scope the resolve's

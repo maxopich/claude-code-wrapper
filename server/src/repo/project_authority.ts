@@ -85,6 +85,17 @@ import { getDb } from '../db.js';
 // internals we don't need.
 type RawSettings = {
   permissions?: { allow?: string[]; deny?: string[] };
+  /**
+   * `Cebab-aklg`: which plugins are on, keyed `name@marketplace`. An explicit
+   * `false` means the operator turned one off, so the value has to be read
+   * rather than the key's presence — see `detectPluginHooks`.
+   *
+   * USER TIER ONLY, measured in the bundled CLI: its plugin-enable lookup walks
+   * `["userSettings","flagSettings","policySettings"]` and never consults
+   * project or local. Cebab's scope set contains `'user'` in both the trusted
+   * and untrusted branch, so this key is live regardless of Trust.
+   */
+  enabledPlugins?: Record<string, boolean>;
   env?: Record<string, string | null | undefined>;
   mcpServers?: Record<
     string,
@@ -760,6 +771,99 @@ export function detectHooks(layers: SettingsLayer[]): HookView[] {
 }
 
 /**
+ * Hooks that a plugin brings, which no settings layer declares (`Cebab-aklg`).
+ *
+ * WHAT WAS WRONG. `detectHooks` above iterates `SettingsLayer[]`, and a
+ * SettingsLayer is only `~/.claude/settings.json`, `.claude/settings.json` and
+ * `.claude/settings.local.json`. No plugin manifest was ever read. The CLI, by
+ * contrast, registers plugin hooks into the SAME registry as settings hooks —
+ * it logs `Loading hooks from plugin: <name>` and pushes them onto the
+ * PreToolUse / PostToolUse / SessionStart / … arrays. So the panel's hooks row
+ * said "none" while hooks definitely ran.
+ *
+ * Not hypothetical on the machine this was found on: the enabled `beads` plugin
+ * ships `SessionStart` and `PreCompact` entries that execute on every turn, on
+ * every project. A row that says "no hooks" while a hook runs is the panel
+ * asserting a wrong answer, not omitting an unknown one.
+ *
+ * TRUST DOES NOT GATE ANY OF IT, and that is the part worth showing rather than
+ * merely fixing. `enabledPlugins` is read from the USER tier only, and Cebab's
+ * scope set contains `'user'` in both its trusted and untrusted branch — so an
+ * operator who turns Trust OFF to stop a project's hooks is still running
+ * these, and nothing told them so.
+ *
+ * WHY IT IS NOT FOLDED INTO `detectHooks`. That function is on the hot path:
+ * `repo/project_scan.ts` runs it for EVERY project on every `projects` message
+ * (measured at ~3.98 ms for 21 projects, which is the budget that justifies its
+ * existence). Plugin hooks are account-wide and identical for every project, so
+ * paying three extra file reads per project to learn the same answer 21 times
+ * is the wrong trade. This is called from the panel's resolve only — opened
+ * deliberately, once.
+ *
+ * Read failures are silent and yield nothing, matching every other reader here:
+ * a malformed plugin manifest must not take down the panel.
+ */
+export function detectPluginHooks(): HookView[] {
+  const out: HookView[] = [];
+
+  const settings = readSettingsFile(userScopePath());
+  const enabled = settings?.enabledPlugins;
+  if (!enabled || typeof enabled !== 'object') return out;
+
+  const installedPath = path.join(os.homedir(), '.claude', 'plugins', 'installed_plugins.json');
+  const installedRaw = readTextBounded(installedPath, MAX_SETTINGS_BYTES);
+  if (!installedRaw.ok) return out;
+  let installed: { plugins?: Record<string, { installPath?: string }[]> };
+  try {
+    installed = JSON.parse(installedRaw.text) as typeof installed;
+  } catch {
+    return out;
+  }
+
+  for (const [pluginId, isEnabled] of Object.entries(enabled)) {
+    // `enabledPlugins` carries explicit `false` entries for plugins the
+    // operator turned off. Those load nothing and must not be reported.
+    if (isEnabled !== true) continue;
+    const installPath = installed.plugins?.[pluginId]?.[0]?.installPath;
+    if (typeof installPath !== 'string' || installPath.length === 0) continue;
+
+    const manifestPath = path.join(installPath, '.claude-plugin', 'plugin.json');
+    const manifestRaw = readTextBounded(manifestPath, MAX_SETTINGS_BYTES);
+    if (!manifestRaw.ok) continue;
+    let manifest: { hooks?: Record<string, { hooks?: { command?: unknown; args?: unknown }[] }[]> };
+    try {
+      manifest = JSON.parse(manifestRaw.text) as typeof manifest;
+    } catch {
+      continue;
+    }
+    if (!manifest.hooks || typeof manifest.hooks !== 'object') continue;
+
+    // Same flattening as `detectHooks`: the outer array is matcher buckets,
+    // the inner is concrete entries, and the panel renders one card per entry.
+    for (const [hookKind, buckets] of Object.entries(manifest.hooks)) {
+      if (!Array.isArray(buckets)) continue;
+      for (const bucket of buckets) {
+        const entries = bucket?.hooks;
+        if (!Array.isArray(entries)) continue;
+        for (const entry of entries) {
+          if (typeof entry.command !== 'string') continue;
+          const view: HookView = {
+            hookKind,
+            scope: 'plugin',
+            scopePath: manifestPath,
+            pluginId,
+            command: entry.command,
+          };
+          if (Array.isArray(entry.args)) view.args = entry.args as string[];
+          out.push(view);
+        }
+      }
+    }
+  }
+  return out;
+}
+
+/**
  * Project MCP servers from each settings layer into McpServerView rows.
  * Phase 3 attributes scope via SDK precedence (deepest wins) so a server
  * declared at user AND local gets one row attributed to local — matching
@@ -1338,6 +1442,12 @@ export function resolveProjectAuthority(input: ResolverInput): ProjectAuthority 
     agents: input.latestSessionStarted?.agents ?? [],
     plugins: input.latestSessionStarted?.plugins ?? [],
     hooks: detectHooks(layers),
+    // Cebab-aklg: alongside, never merged. `hooks` feeds the per-project hook
+    // TOFU ledger (`reportHookObservations`); an account-wide plugin hook
+    // folded in there would write one identical row per project and announce
+    // itself once per project. The panel joins the two for display; the ledger
+    // must not.
+    pluginHooks: detectPluginHooks(),
     detectedEnvInjections: detectEnvInjections(layers),
     unloadedHooks,
     unloadedMcpServers,

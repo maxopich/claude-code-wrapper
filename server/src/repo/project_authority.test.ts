@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { afterEach, beforeEach, describe, expect, test } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { ServerMsg } from '@cebab/shared/protocol';
 import { awaitMcpTrustDecisions, makeTrustGateState } from './mcp_trust_gate.js';
 import {
@@ -12,6 +12,7 @@ import {
   detectHooks,
   detectMcpServers,
   resolveProjectAuthority,
+  detectPluginHooks,
   resolveToolAuthority,
   tallyToolUsage,
 } from './project_authority.js';
@@ -352,6 +353,143 @@ describe('detectEnvInjections (BE-B11 / BE-B12) — credential-class env scan', 
 
 // ---- detectHooks ----
 
+/**
+ * Cebab-aklg. detectHooks iterates SettingsLayer[], and a SettingsLayer is only
+ * ~/.claude/settings.json, .claude/settings.json and .claude/settings.local.json.
+ * No plugin manifest was ever read — while the CLI registers plugin hooks into
+ * the SAME registry as settings hooks. The panel said "no hooks" on a machine
+ * whose enabled `beads` plugin ships SessionStart and PreCompact entries that
+ * run on every turn.
+ *
+ * These drive the reader through a temp HOME so the assertions are about the
+ * code and not about whichever plugins the developer happens to have installed.
+ */
+describe('detectPluginHooks (Cebab-aklg)', () => {
+  let home: string;
+  let homedirSpy: ReturnType<typeof vi.spyOn>;
+
+  function writePlugin(opts: {
+    id: string;
+    enabled: boolean;
+    hooks?: unknown;
+    installPathOverride?: string;
+  }): string {
+    const installPath =
+      opts.installPathOverride ?? path.join(home, '.claude', 'plugins', 'cache', opts.id);
+    fs.mkdirSync(path.join(installPath, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(installPath, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({ name: opts.id, ...(opts.hooks ? { hooks: opts.hooks } : {}) }),
+    );
+    return installPath;
+  }
+
+  function writeIndexes(entries: { id: string; enabled: boolean; installPath: string }[]): void {
+    fs.mkdirSync(path.join(home, '.claude', 'plugins'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.claude', 'settings.json'),
+      JSON.stringify({
+        enabledPlugins: Object.fromEntries(entries.map((e) => [e.id, e.enabled])),
+      }),
+    );
+    fs.writeFileSync(
+      path.join(home, '.claude', 'plugins', 'installed_plugins.json'),
+      JSON.stringify({
+        version: 2,
+        plugins: Object.fromEntries(
+          entries.map((e) => [e.id, [{ scope: 'user', installPath: e.installPath }]]),
+        ),
+      }),
+    );
+  }
+
+  beforeEach(() => {
+    home = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-plugins-'));
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    homedirSpy = vi.spyOn(os, 'homedir').mockReturnValue(home);
+  });
+
+  afterEach(() => {
+    homedirSpy.mockRestore();
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+
+  test("an enabled plugin's hooks are surfaced, flattened like settings hooks", () => {
+    // The real shape, copied from the beads plugin manifest on this machine.
+    const installPath = writePlugin({
+      id: 'beads@beads-marketplace',
+      enabled: true,
+      hooks: {
+        SessionStart: [{ matcher: '', hooks: [{ type: 'command', command: 'bd prime' }] }],
+        PreCompact: [{ matcher: '', hooks: [{ type: 'command', command: 'bd prime' }] }],
+      },
+    });
+    writeIndexes([{ id: 'beads@beads-marketplace', enabled: true, installPath }]);
+
+    const out = detectPluginHooks();
+    expect(out).toHaveLength(2);
+    expect(out.map((h) => h.hookKind).sort()).toEqual(['PreCompact', 'SessionStart']);
+    for (const h of out) {
+      expect(h.scope).toBe('plugin');
+      expect(h.pluginId).toBe('beads@beads-marketplace');
+      expect(h.command).toBe('bd prime');
+      // The path has to point at something the operator can open.
+      expect(h.scopePath.endsWith(path.join('.claude-plugin', 'plugin.json'))).toBe(true);
+    }
+  });
+
+  test('a plugin the operator turned OFF contributes nothing', () => {
+    // enabledPlugins carries explicit `false` entries, so the VALUE has to be
+    // read. Keying on the presence of the id would report hooks from a plugin
+    // that loads nothing — the panel asserting a wrong answer in the other
+    // direction, which is the failure this whole bead is about.
+    const installPath = writePlugin({
+      id: 'off@mkt',
+      enabled: false,
+      hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'should-not-appear' }] }] },
+    });
+    writeIndexes([{ id: 'off@mkt', enabled: false, installPath }]);
+    expect(detectPluginHooks()).toEqual([]);
+  });
+
+  test('an enabled plugin with no hooks contributes nothing', () => {
+    // The anti-vacuity control's partner: most plugins ship no hooks at all
+    // (the other one installed on this machine does not), so "returns []" must
+    // not be the only thing this reader can do.
+    const installPath = writePlugin({ id: 'plain@mkt', enabled: true });
+    writeIndexes([{ id: 'plain@mkt', enabled: true, installPath }]);
+    expect(detectPluginHooks()).toEqual([]);
+  });
+
+  test('a malformed or missing manifest is skipped, not thrown', () => {
+    // Every other reader in this module fails silent; a broken plugin manifest
+    // must not take the whole panel down with it.
+    const good = writePlugin({
+      id: 'good@mkt',
+      enabled: true,
+      hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'ok' }] }] },
+    });
+    const bad = path.join(home, '.claude', 'plugins', 'cache', 'bad');
+    fs.mkdirSync(path.join(bad, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(path.join(bad, '.claude-plugin', 'plugin.json'), '{ not json');
+    writeIndexes([
+      { id: 'good@mkt', enabled: true, installPath: good },
+      { id: 'bad@mkt', enabled: true, installPath: bad },
+      { id: 'gone@mkt', enabled: true, installPath: path.join(home, 'nowhere') },
+    ]);
+
+    const out = detectPluginHooks();
+    expect(out).toHaveLength(1);
+    expect(out[0].command).toBe('ok');
+  });
+
+  test('no enabledPlugins key at all yields nothing', () => {
+    fs.mkdirSync(path.join(home, '.claude'), { recursive: true });
+    fs.writeFileSync(path.join(home, '.claude', 'settings.json'), JSON.stringify({}));
+    expect(detectPluginHooks()).toEqual([]);
+  });
+});
+
 describe('detectHooks (§11.1) — hook enumeration', () => {
   test('flattens matcher buckets into one HookView per concrete entry', () => {
     const layers: Layer[] = [
@@ -510,6 +648,60 @@ describe('resolveProjectAuthority (BE-B3) — merge cached init + file scans', (
   test('unknown projectId returns null (no throw)', () => {
     const out = resolveProjectAuthority({ projectId: 99999, mode: 'cache' });
     expect(out).toBeNull();
+  });
+
+  /**
+   * Cebab-aklg: the resolver carries BOTH readers, in SEPARATE fields.
+   *
+   * The first version of this change merged plugin hooks into `hooks`, and the
+   * suite refused it — `scope_conformance` and `hook_observation.security` both
+   * reddened. They were right, and the reason is worth keeping: `hooks` feeds
+   * `reportHookObservations`, the per-PROJECT hook trust-on-first-use ledger.
+   * An account-wide plugin hook folded in there writes one identical ledger row
+   * per project and announces the same "new hook" once per project, for a fact
+   * that has nothing to do with any of them.
+   */
+  test('plugin hooks ride their own field and never enter the per-project hook list', () => {
+    const home = path.join(tmpRoot, 'home');
+    const installPath = path.join(home, '.claude', 'plugins', 'cache', 'p');
+    fs.mkdirSync(path.join(installPath, '.claude-plugin'), { recursive: true });
+    fs.writeFileSync(
+      path.join(installPath, '.claude-plugin', 'plugin.json'),
+      JSON.stringify({
+        name: 'p',
+        hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'plugin-hook' }] }] },
+      }),
+    );
+    fs.mkdirSync(path.join(home, '.claude', 'plugins'), { recursive: true });
+    fs.writeFileSync(
+      path.join(home, '.claude', 'settings.json'),
+      JSON.stringify({ enabledPlugins: { 'p@mkt': true } }),
+    );
+    fs.writeFileSync(
+      path.join(home, '.claude', 'plugins', 'installed_plugins.json'),
+      JSON.stringify({ version: 2, plugins: { 'p@mkt': [{ scope: 'user', installPath }] } }),
+    );
+    fs.writeFileSync(
+      path.join(projectPath, '.claude', 'settings.json'),
+      JSON.stringify({
+        hooks: { PreToolUse: [{ hooks: [{ command: '/bin/settings-hook' }] }] },
+      }),
+    );
+
+    const out = resolveProjectAuthority({ projectId, mode: 'cache' })!;
+
+    // The project's own list is UNCHANGED by the plugin. This is the assertion
+    // that keeps the hook ledger clean, and it is the one that would have
+    // caught the first attempt.
+    expect(out.hooks.map((h) => h.command)).toEqual(['/bin/settings-hook']);
+    expect(out.hooks.every((h) => h.scope !== 'plugin')).toBe(true);
+
+    // And the plugin hook is surfaced, rather than dropped — the panel's whole
+    // point. Without this half, "keep them out of `hooks`" is satisfied by not
+    // reading plugins at all.
+    expect(out.pluginHooks.map((h) => h.command)).toEqual(['plugin-hook']);
+    expect(out.pluginHooks[0].scope).toBe('plugin');
+    expect(out.pluginHooks[0].pluginId).toBe('p@mkt');
   });
 
   test('trusted project with project-scope settings.json yields settingSourcesUsed=[user,project,local]', () => {

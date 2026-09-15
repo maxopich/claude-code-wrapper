@@ -67,6 +67,7 @@ function mkAuthority(over: Partial<ProjectAuthority> = {}): ProjectAuthority {
     agents: [],
     plugins: [],
     hooks: [],
+    pluginHooks: [],
     detectedEnvInjections: [],
     ...over,
   };
@@ -101,6 +102,7 @@ function untrustedAuthority(projectId: number): ProjectAuthority {
     settingSourcesUsed: ['user'],
     mcpServers: [],
     hooks: [],
+    pluginHooks: [],
     unloadedMcpServers: [declaredServer],
     unloadedHooks: [projectHook],
   });

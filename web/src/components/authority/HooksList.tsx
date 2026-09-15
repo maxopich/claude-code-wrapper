@@ -26,17 +26,27 @@ const SCOPE_CHIP_CLASS: Record<HookView['scope'], string> = {
   user: 'hook-scope-user',
   project: 'hook-scope-project',
   local: 'hook-scope-local',
+  plugin: 'hook-scope-plugin',
 };
 
 const SCOPE_LABEL: Record<HookView['scope'], string> = {
   user: 'user',
   project: 'project',
   local: 'local',
+  plugin: 'plugin',
 };
 
-export function HooksList(props: { hooks: HookView[]; unloaded?: HookView[] }) {
+export function HooksList(props: {
+  hooks: HookView[];
+  unloaded?: HookView[];
+  /** Cebab-aklg: account-wide, from an enabled plugin's manifest. Kept a
+   *  separate prop rather than mixed into `hooks` because the two answer
+   *  different questions — see `ProjectAuthority.pluginHooks`. */
+  plugin?: HookView[];
+}) {
   const { hooks } = props;
   const unloaded = props.unloaded ?? [];
+  const plugin = props.plugin ?? [];
   if (hooks.length === 0) {
     // Cebab-66y: an empty LOADED list is not an empty project. On an untrusted
     // project the project's own `.claude/settings.json` hooks sit in a scope
@@ -44,12 +54,18 @@ export function HooksList(props: { hooks: HookView[]; unloaded?: HookView[] }) {
     // panel used to assert "none declared" here, which is precisely the
     // strong-negative the operator reads before trusting the project and making
     // those very hooks auto-execute. Render them as inert instead.
-    if (unloaded.length > 0) {
-      return <UnloadedHooks unloaded={unloaded} />;
+    if (unloaded.length > 0 || plugin.length > 0) {
+      return (
+        <>
+          {unloaded.length > 0 && <UnloadedHooks unloaded={unloaded} />}
+          {plugin.length > 0 && <PluginHooks plugin={plugin} />}
+        </>
+      );
     }
     return (
       <div className="hooks-empty">
-        No hooks declared in this project&apos;s settings.json layers.
+        No hooks declared in this project&apos;s settings.json layers, and no enabled plugin
+        declares one.
       </div>
     );
   }
@@ -87,6 +103,7 @@ export function HooksList(props: { hooks: HookView[]; unloaded?: HookView[] }) {
         </section>
       ))}
       {unloaded.length > 0 && <UnloadedHooks unloaded={unloaded} />}
+      {plugin.length > 0 && <PluginHooks plugin={plugin} />}
     </div>
   );
 }
@@ -112,6 +129,36 @@ function UnloadedHooks(props: { unloaded: HookView[] }) {
             key={`unloaded:${h.hookKind}:${h.scope}:${h.scopePath}:${h.command}:${i}`}
             hook={h}
           />
+        ))}
+      </ul>
+    </section>
+  );
+}
+
+/**
+ * Cebab-aklg: hooks an enabled PLUGIN brings.
+ *
+ * Separated from the project's own hooks in the render for the same reason they
+ * are a separate field on the wire: an operator reading this section is asking
+ * "what will this project run, and what can I do about it", and these answer it
+ * differently. Trust decides whether the rows above load. It decides nothing
+ * here — `enabledPlugins` is read from the user tier alone, which Cebab's scope
+ * set includes whether or not the project is trusted — so the only lever is
+ * disabling the plugin itself.
+ */
+function PluginHooks(props: { plugin: HookView[] }) {
+  const { plugin } = props;
+  return (
+    <section className="hooks-plugin">
+      <div className="hooks-plugin-note">
+        {plugin.length} {plugin.length === 1 ? 'hook comes' : 'hooks come'} from an enabled plugin
+        and {plugin.length === 1 ? 'runs' : 'run'} on every turn of <strong>every</strong> project.
+        Trust does not gate {plugin.length === 1 ? 'it' : 'them'}; disabling the plugin is the only
+        lever.
+      </div>
+      <ul className="hooks-plugin-list">
+        {plugin.map((h, i) => (
+          <HookCard key={`plugin:${h.pluginId ?? ''}:${h.hookKind}:${h.command}:${i}`} hook={h} />
         ))}
       </ul>
     </section>

@@ -1,3 +1,4 @@
+import type { HookView } from '@cebab/shared/protocol';
 import { useEffect, useRef, useState } from 'react';
 import { timeAgo } from '../../format';
 import { readStored, writeStored } from '../../prefs';
@@ -353,12 +354,18 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode) {
       </AuthoritySection>
       <AuthoritySection
         title="Hooks"
-        count={shownHooks.length}
+        count={shownHooks.length + authority.pluginHooks.length}
         sublabel={
           authority.hooks.length === 0
             ? unloadedHooks.length > 0
               ? `${unloadedHooks.length} declared but not loaded — Trust is off`
-              : 'none declared'
+              : // Cebab-aklg: "none declared" is the strong negative, and it is
+                // false whenever a plugin brings one. These run on every turn
+                // of every project and Trust does not gate them, so saying
+                // nothing here is the same wrong answer this bead is about.
+                authority.pluginHooks.length > 0
+                ? `${authority.pluginHooks.length} from plugins — Trust does not gate these`
+                : 'none declared'
             : hasLocalHook(authority.hooks)
               ? 'project-local hook present — review'
               : unloadedHooks.length > 0
@@ -372,7 +379,7 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode) {
         defaultOpen={hasLocalHook(shownHooks) || unloadedHooks.length > 0}
         stripe={hasLocalHook(shownHooks) || unloadedHooks.length > 0 ? 'removed' : 'none'}
       >
-        <HooksList hooks={shownHooks} unloaded={unloadedHooks} />
+        <HooksList hooks={shownHooks} unloaded={unloadedHooks} plugin={authority.pluginHooks} />
       </AuthoritySection>
       {/* Phase 8 — UI-B41 / B42 / B43: the three name-only enumerations
        *  from the SDK init payload. All collapsed-by-default since their
@@ -421,6 +428,6 @@ function countAllowDenyRules(tools: { allowed: boolean; denied: boolean; rulingS
   return n;
 }
 
-function hasLocalHook(hooks: { scope: 'user' | 'project' | 'local' }[]): boolean {
+function hasLocalHook(hooks: HookView[]): boolean {
   return hooks.some((h) => h.scope === 'local');
 }
