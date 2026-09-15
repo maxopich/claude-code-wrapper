@@ -202,6 +202,15 @@ export const SCRUBBED_ENV_VAR_NAMES: ReadonlyArray<string> = [
   'ANTHROPIC_ORGANIZATION_ID',
   // Alternate transport the CLI dials instead of the default endpoint.
   'ANTHROPIC_UNIX_SOCKET',
+  // Cebab-rgkt. The odd one out on this list, and the reason it was missed:
+  // every other name REPLACES the identity, so "would override OAuth" reads as
+  // the organising idea. This one keeps the subscription credential and
+  // redirects where it is sent — the same exposure with the opposite shape.
+  // The CLI honours it: the shipped binary carries a "custom
+  // ANTHROPIC_BASE_URL" state, refuses tool search when the value "is not a
+  // first-party Anthropic host", and reads it as half of the gateway pair
+  // ("CLAUDE_CODE_USE_GATEWAY is set but ANTHROPIC_BASE_URL … is missing").
+  'ANTHROPIC_BASE_URL',
   // Backend switches that re-route off the Anthropic API entirely.
   'CLAUDE_CODE_USE_BEDROCK',
   'CLAUDE_CODE_USE_VERTEX',
@@ -245,6 +254,8 @@ export const SCRUBBED_ENV_POSTURES: Readonly<Record<string, string>> = {
   ANTHROPIC_FEDERATION_RULE_ID: 'WIF auth (federation identity would override OAuth)',
   ANTHROPIC_ORGANIZATION_ID: 'WIF auth (federation identity would override OAuth)',
   ANTHROPIC_UNIX_SOCKET: 'Alternate transport (dials a socket instead of the API endpoint)',
+  ANTHROPIC_BASE_URL:
+    'Alternate endpoint (redirects API traffic while keeping the subscription credential)',
   CLAUDE_CODE_USE_BEDROCK: 'Bedrock backend (re-routes off Anthropic API)',
   CLAUDE_CODE_USE_VERTEX: 'Vertex backend (re-routes off Anthropic API)',
   CLAUDE_CODE_USE_FOUNDRY: 'Foundry backend (re-routes off Anthropic API)',
