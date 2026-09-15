@@ -92,6 +92,7 @@ describe('getScrubbedEnvVars — name-only env audit', () => {
       'ANTHROPIC_FEDERATION_RULE_ID',
       'ANTHROPIC_ORGANIZATION_ID',
       'ANTHROPIC_UNIX_SOCKET',
+      'ANTHROPIC_BASE_URL',
       'CLAUDE_CODE_USE_BEDROCK',
       'CLAUDE_CODE_USE_VERTEX',
       'CLAUDE_CODE_USE_FOUNDRY',
@@ -294,5 +295,100 @@ describe('[security] every scrubbed name has its own posture label (Cebab-6fax.8
     // Two empty collections satisfy both assertions above.
     expect(SCRUBBED_ENV_VAR_NAMES.length).toBeGreaterThan(5);
     expect(Object.keys(SCRUBBED_ENV_POSTURES).length).toBeGreaterThan(5);
+  });
+});
+
+/**
+ * Cebab-rgkt: the endpoint-redirect name that applies with NO selection switch.
+ *
+ * WHAT WAS MISSED, AND WHY. Every other name on `SCRUBBED_ENV_VAR_NAMES`
+ * REPLACES the identity — an API key, a bearer token, a backend switch — so
+ * "would override OAuth" reads as the organising idea of the list.
+ * `ANTHROPIC_BASE_URL` is the opposite shape: it keeps the operator's
+ * subscription credential and changes where that credential is sent. Same
+ * exposure, and it did not match the mental model, so it was absent from the
+ * list, from the postures map, from the authority panel and from the
+ * env-injection gate. `grep -rn BASE_URL` over the repo returned zero hits.
+ *
+ * WHY A DERIVED TEST RATHER THAN ONE MORE HAND-TYPED NAME. `Cebab-m99x` is the
+ * precedent: a hand-listed expectation and a hand-listed constant agreed with
+ * each other and were both wrong, and the fix was to read the shipped bundle.
+ * The bundle carries a STRUCTURED answer here, which is better than a name
+ * list — each endpoint var is declared with the selection switch that activates
+ * it, and exactly one has no switch at all. That one applies unconditionally,
+ * which is precisely the property that makes it dangerous and the others not.
+ *
+ * So this does not assert "ANTHROPIC_BASE_URL is on the list". It asserts the
+ * RULE: whichever endpoint var the CLI activates with no selection switch must
+ * be scrubbed. If a future SDK adds a second unconditional endpoint var, or
+ * moves the current one behind a switch, this reddens and says which.
+ */
+describe('[security] an endpoint redirect with no selection switch is scrubbed (Cebab-rgkt)', () => {
+  /**
+   * Resolved through the SERVER workspace for the reason recorded above: npm
+   * may hoist the package or keep it under `server/node_modules`, and a
+   * root-anchored path breaks on a lockfile change with no source change.
+   */
+  function bundleSource(): string {
+    const require_ = createRequire(import.meta.url);
+    const entry = require_.resolve('@anthropic-ai/claude-agent-sdk');
+    const bundle = path.join(path.dirname(entry), 'sdk.mjs');
+    return fs.readFileSync(fs.existsSync(bundle) ? bundle : entry, 'utf8');
+  }
+
+  /**
+   * The bundle declares its endpoint vars as `{ endpoint, selection?, companions }`
+   * records. `selection` names the `CLAUDE_CODE_USE_*` switch that activates that
+   * endpoint — already on the scrub list — so an endpoint with a selection is
+   * inert until its switch is set. An endpoint with NO selection is live on its
+   * own.
+   */
+  function unconditionalEndpointVars(source: string): string[] {
+    const out: string[] = [];
+    const re = /\{\s*endpoint:\s*"([A-Z0-9_]+)"/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(source)) !== null) {
+      // The record runs to the first `}` that closes it; `companions` is a flat
+      // string array, so the first `}` after the match is the record's own.
+      const recordEnd = source.indexOf('}', m.index);
+      if (recordEnd === -1) continue;
+      const record = source.slice(m.index, recordEnd);
+      if (!/\bselection:/.test(record)) out.push(m[1]);
+    }
+    return [...new Set(out)];
+  }
+
+  test('the extraction actually found the CLI endpoint table (anti-vacuity floor)', () => {
+    const source = bundleSource();
+    const all: string[] = [];
+    const re = /\{\s*endpoint:\s*"([A-Z0-9_]+)"/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(source)) !== null) all.push(m[1]);
+
+    // Without this floor, a minifier change that renames the shape makes the
+    // extractor return [] — and an empty list satisfies "every one of them is
+    // scrubbed" while measuring nothing. A RED here means re-derive the
+    // extraction; it does NOT mean the scrub list is wrong.
+    expect(all.length).toBeGreaterThanOrEqual(3);
+    // And the table must contain at least one WITH a selection switch, or the
+    // discriminator this test rests on is not present in what we parsed.
+    expect(all.length).toBeGreaterThan(unconditionalEndpointVars(source).length);
+  });
+
+  test('every unconditional endpoint var is on the scrub list', () => {
+    const unconditional = unconditionalEndpointVars(bundleSource());
+    expect(unconditional.length).toBeGreaterThan(0);
+
+    const missing = unconditional.filter((n) => !SCRUBBED_ENV_VAR_NAMES.includes(n));
+    expect(missing).toEqual([]);
+  });
+
+  test('it carries a posture string that names the redirect, not an override', () => {
+    // The posture is what the authority panel renders. Describing this as an
+    // auth override would be the same misreading that kept it off the list:
+    // the credential is not replaced, the destination is.
+    const posture = SCRUBBED_ENV_POSTURES.ANTHROPIC_BASE_URL;
+    expect(posture).toBeTruthy();
+    expect(posture.toLowerCase()).toContain('redirect');
   });
 });
