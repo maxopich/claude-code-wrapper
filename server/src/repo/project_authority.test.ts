@@ -86,6 +86,66 @@ describe('resolveToolAuthority (BE-B7) — allow/deny attribution', () => {
     expect(out).toMatchObject({ allowed: true, rulingScope: 'user' });
   });
 
+  /**
+   * Cebab-as7x. The case above uses a server called `broken` — a name that is
+   * already its own tool prefix, which is why the raw-name comparison it tested
+   * looked correct for as long as it existed.
+   *
+   * The CLI replaces every character outside [A-Za-z0-9_] when it builds a tool
+   * name, so a server called "claude.ai Gmail" contributes `mcp__claude_ai_Gmail__*`.
+   * `s.name === mcpServer` found nothing for those, the availability cascade did
+   * not run, and the failure direction was the dangerous one: a needs-auth
+   * connector's tools were reported as AVAILABLE.
+   *
+   * Every claude.ai connector has a name of this shape, so on the machine this
+   * was found on the cascade was not running for five of twelve loaded servers.
+   */
+  test('the cascade fires for a server whose name is not its tool prefix (Cebab-as7x)', () => {
+    const out = resolveToolAuthority(
+      'mcp__claude_ai_Gmail__send_email',
+      [fixtureLayer('user', { permissions: { allow: ['mcp__claude_ai_Gmail__send_email'] } })],
+      {
+        mcpServers: [
+          {
+            name: 'claude.ai Gmail',
+            status: 'needs-auth',
+            scope: 'user',
+            tools: [],
+            trust: 'unknown',
+          },
+        ],
+      },
+    );
+    expect(out.denied).toBe(true);
+    expect(out.allowed).toBe(false);
+    // The ruling came from MCP runtime status, not from a settings rule —
+    // same distinction the plain-name case asserts.
+    expect(out.rulingScope).toBe('default');
+  });
+
+  test('a healthy server with the same name shape is still allowed (anti-vacuity)', () => {
+    // The control. Without it, "deny everything whose prefix does not equal a
+    // name" would satisfy the case above while denying every connector tool on
+    // a perfectly healthy session.
+    const out = resolveToolAuthority(
+      'mcp__claude_ai_Gmail__send_email',
+      [fixtureLayer('user', { permissions: { allow: ['mcp__claude_ai_Gmail__send_email'] } })],
+      {
+        mcpServers: [
+          {
+            name: 'claude.ai Gmail',
+            status: 'connected',
+            scope: 'user',
+            tools: [],
+            trust: 'unknown',
+          },
+        ],
+      },
+    );
+    expect(out.denied).toBe(false);
+    expect(out.allowed).toBe(true);
+  });
+
   test('mcp__server__tool from a needs-auth server → denied (BE-B6 cascade)', () => {
     // A server in `needs-auth` cannot serve its tools; the resolver
     // cascades effectively-unavailable into ToolView regardless of
@@ -435,6 +495,72 @@ describe('resolveProjectAuthority (BE-B3) — merge cached init + file scans', (
     expect(read).toMatchObject({ allowed: true, rulingScope: 'project' });
     const bash = out!.tools.find((t) => t.name === 'Bash');
     expect(bash).toMatchObject({ rulingScope: 'default' });
+  });
+
+  /**
+   * Cebab-as7x: every McpServerView construction site fills `tools: []`,
+   * because each builds a row from a DECLARATION and the tool list does not
+   * exist until a session has started. Nothing ever filled it in afterwards, so
+   * the panel's per-server count read "0 tools" for every server — the one
+   * affordance that answers "which of these is actually giving me anything" on
+   * a project with a dozen of them.
+   */
+  test('per-server tool lists are attributed from the session snapshot (Cebab-as7x)', () => {
+    fs.writeFileSync(
+      path.join(projectPath, '.mcp.json'),
+      JSON.stringify({
+        mcpServers: { atlas: { command: '/bin/atlas' }, sloth: { command: '/bin/sloth' } },
+      }),
+    );
+    const out = resolveProjectAuthority({
+      projectId,
+      mode: 'cache',
+      latestSessionStarted: {
+        tools: [
+          'Bash',
+          'mcp__atlas__atlas_echo',
+          'mcp__atlas__atlas_ping',
+          'mcp__claude_ai_Gmail__send',
+        ],
+        mcpServers: [
+          { name: 'atlas', status: 'connected' },
+          { name: 'sloth', status: 'pending' },
+          { name: 'claude.ai Gmail', status: 'connected' },
+        ],
+      },
+    })!;
+
+    const atlas = out.mcpServers.find((m) => m.name === 'atlas');
+    expect(atlas?.tools).toEqual(['mcp__atlas__atlas_echo', 'mcp__atlas__atlas_ping']);
+
+    // The name-is-not-the-prefix case, end to end through the resolver.
+    const gmail = out.mcpServers.find((m) => m.name === 'claude.ai Gmail');
+    expect(gmail?.tools).toEqual(['mcp__claude_ai_Gmail__send']);
+
+    // A server that contributed none keeps an empty list — the honest answer
+    // for one that loaded and did not connect, and the anti-vacuity control
+    // for "attribute everything to everyone".
+    const sloth = out.mcpServers.find((m) => m.name === 'sloth');
+    expect(sloth?.tools).toEqual([]);
+  });
+
+  test('with no session snapshot every tool list is empty', () => {
+    // The pre-spawn gate path (`gateProjectsForSpawn`) resolves with no
+    // snapshot before every single spawn, so this is the common case, not an
+    // edge one.
+    //
+    // NOT a test of the population step's guard — there is no guard, because a
+    // revert-check proved one would be a no-op: with no snapshot the tool list
+    // is already empty and the filter returns empty. What this pins is that the
+    // resolver invents nothing when it has not looked; `sdkSnapshot` is the
+    // field that distinguishes "did not look" from "found none".
+    fs.writeFileSync(
+      path.join(projectPath, '.mcp.json'),
+      JSON.stringify({ mcpServers: { atlas: { command: '/bin/atlas' } } }),
+    );
+    const out = resolveProjectAuthority({ projectId, mode: 'cache' })!;
+    expect(out.mcpServers.find((m) => m.name === 'atlas')?.tools).toEqual([]);
+    expect(out.tools).toEqual([]);
   });
 
   test('untrusted project: project + local scopes skipped (settingSourcesUsed=[user] only)', () => {

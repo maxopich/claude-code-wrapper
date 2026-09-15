@@ -62,3 +62,48 @@ export function notConnected(
   if (servers === undefined) return [];
   return servers.filter((s) => !isConnected(s));
 }
+
+/**
+ * The prefix an MCP server's tools carry on the session's tool list.
+ *
+ * Tools arrive as `mcp__<prefix>__<tool>`, and the prefix is NOT the server
+ * name — the CLI replaces every character outside `[A-Za-z0-9_]` with `_`.
+ * Measured live 2026-09-15 on a session with twelve loaded servers:
+ *
+ *   "claude.ai Google Calendar"  →  mcp__claude_ai_Google_Calendar__…
+ *   "atlas"                      →  mcp__atlas__…
+ *
+ * IT EXISTS BECAUSE TWO READERS GOT IT WRONG IN OPPOSITE DIRECTIONS, and both
+ * failed silently (`Cebab-as7x`):
+ *
+ *   - `McpServersList` renders a per-server tool count that every construction
+ *     site filled with `[]`, so every card read "0 tools" however many the
+ *     server contributed.
+ *   - `toolViewFor` marked an `mcp__x__y` tool unavailable by looking up a
+ *     server whose `name` equals the prefix. For any server whose name carries
+ *     a space or a dot — every claude.ai connector — that lookup found nothing,
+ *     so the availability rule it implements did not run at all. The failure
+ *     mode is the dangerous direction: a `needs-auth` connector's tools were
+ *     presented as available.
+ *
+ * Sharing the rule is the same argument `isConnected` makes one function up: a
+ * second hand-written copy is how the two answers drift, and here they had not
+ * merely drifted — neither was right.
+ */
+export function mcpToolPrefix(serverName: string): string {
+  return serverName.replace(/[^A-Za-z0-9_]/g, '_');
+}
+
+/**
+ * The `mcp__…` tool names on `toolNames` that belong to `serverName`.
+ *
+ * Returns them in the order the SDK reported, and returns `[]` for a server
+ * that contributed none — which is the honest answer for a server that loaded
+ * and did not connect, and must stay distinguishable from "we never looked".
+ * Callers that have no tool list at all should pass none and leave the field
+ * absent rather than pass `[]`.
+ */
+export function toolsForMcpServer(serverName: string, toolNames: readonly string[]): string[] {
+  const prefix = `mcp__${mcpToolPrefix(serverName)}__`;
+  return toolNames.filter((t) => t.startsWith(prefix));
+}

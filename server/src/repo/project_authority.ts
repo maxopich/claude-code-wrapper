@@ -9,7 +9,7 @@ import type {
   ProjectAuthority,
   ToolView,
 } from '@cebab/shared/protocol';
-import { isConnected, isSensitiveKey } from '@cebab/shared';
+import { isConnected, isSensitiveKey, mcpToolPrefix, toolsForMcpServer } from '@cebab/shared';
 import { SCRUBBED_ENV_POSTURES, SCRUBBED_ENV_VAR_NAMES } from '../runner/claude.js';
 import { readTextBounded } from '../safe_fs.js';
 
@@ -630,7 +630,13 @@ export function resolveToolAuthority(
     if (sepIdx > 5) {
       source = 'mcp';
       mcpServer = toolName.slice(5, sepIdx);
-      const owner = options?.mcpServers?.find((s) => s.name === mcpServer);
+      // Cebab-as7x: match on the TOOL PREFIX, not on the raw name. The CLI
+      // replaces every character outside [A-Za-z0-9_] when it builds a tool
+      // name, so `s.name === mcpServer` found nothing for any server carrying a
+      // space or a dot — every claude.ai connector — and this whole branch
+      // quietly did not run for them. The failure direction was the dangerous
+      // one: a `needs-auth` connector's tools were presented as available.
+      const owner = options?.mcpServers?.find((s) => mcpToolPrefix(s.name) === mcpServer);
       // Conservative: anything other than "connected" treated as unavailable.
       // The predicate is shared (`Cebab-ws0.15`) so this view, the operator's
       // banner and the model's note cannot drift apart about one session.
@@ -1232,6 +1238,27 @@ export function resolveProjectAuthority(input: ResolverInput): ProjectAuthority 
   // MCP availability. When the cache is empty, no tools are resolved
   // (operator opens an empty Tools section).
   const initTools = input.latestSessionStarted?.tools ?? [];
+
+  // Cebab-as7x: attribute the session's tools to the servers that contributed
+  // them. Every construction site above fills `tools: []` because it builds a
+  // row from a DECLARATION, where the tool list is not yet known; the tool list
+  // only exists once a session has started, which is here. Without this the
+  // panel's per-server count read "0 tools" for every server, which is the only
+  // affordance that answers "which of these is actually giving me anything" on
+  // a project with several.
+  //
+  // Unguarded on purpose. The obvious `if (initTools.length > 0)` wrapper was
+  // written first, with a comment claiming it preserved the distinction between
+  // "we did not look" and "it contributed none" — and a revert-check showed it
+  // changed nothing: with no snapshot `initTools` is `[]`, so the filter
+  // assigns `[]` and the guard is a no-op. Shipping it would have been a
+  // comment asserting a semantic the code cannot express. The distinction is
+  // real and it lives one level up, on `ProjectAuthority.sdkSnapshot`, which
+  // says outright whether an init was ever seen.
+  for (const server of declaredMcp) {
+    server.tools = toolsForMcpServer(server.name, initTools);
+  }
+
   const tools: ToolView[] = initTools.map((t) =>
     resolveToolAuthority(t, layers, { mcpServers: declaredMcp }),
   );
