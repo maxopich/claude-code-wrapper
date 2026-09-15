@@ -90,15 +90,19 @@ describe('SlashCommandPalette — render', () => {
     expect(document.activeElement).toBe(findInput());
   });
 
-  test('renders Cebab section with all 5 quick commands by default', () => {
+  test('renders the Cebab section with every quick command by default', () => {
+    // Cebab-6bny: was "all 5", and `/skills` was one of them — a command the
+    // headless CLI refuses ("/skills isn't available in this environment.",
+    // measured live). The count is no longer in the name, so removing another
+    // dead command does not require editing a title that claims a number.
     render();
     const rows = findRows();
     const cmds = rows.map((r) => r.querySelector('code')?.textContent);
     expect(cmds).toContain('/context');
     expect(cmds).toContain('/compact');
-    expect(cmds).toContain('/skills');
     expect(cmds).toContain('/mcp');
     expect(cmds).toContain('/cost');
+    expect(cmds).not.toContain('/skills');
   });
 
   test('renders SDK section when sdkCommands provided', () => {

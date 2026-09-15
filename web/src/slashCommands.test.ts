@@ -17,9 +17,23 @@ describe('SLASH_COMMANDS registry', () => {
     const commands = SLASH_COMMANDS.map((c) => c.command);
     expect(commands).toContain('/context');
     expect(commands).toContain('/compact');
-    expect(commands).toContain('/skills');
     expect(commands).toContain('/mcp');
     expect(commands).toContain('/cost');
+  });
+
+  /**
+   * Cebab-6bny. MEASURED LIVE, one turn per command: `/skills` answered
+   * "/skills isn't available in this environment." while the other four
+   * returned real output. The CLI's headless dispatcher refuses `local-jsx`
+   * commands — the interactive ones that render their own UI — and every Cebab
+   * turn is non-interactive, so the button could never do what it said.
+   *
+   * Asserted as an ABSENCE rather than just deleted from the list above,
+   * because the list is a hand-maintained copy of someone else's command table
+   * and "add the obvious-looking command back" is the regression this invites.
+   */
+  test('does not offer a command the headless CLI refuses', () => {
+    expect(SLASH_COMMANDS.map((c) => c.command)).not.toContain('/skills');
   });
 
   test('every entry has source="cebab" (registry holds Cebab-local only)', () => {
