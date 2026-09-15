@@ -2278,7 +2278,42 @@ export type ServerMsg =
       cwd?: string;
       permissionMode?:
         'default' | 'acceptEdits' | 'bypassPermissions' | 'plan' | 'dontAsk' | 'auto';
-      apiKeySource?: 'user' | 'project' | 'org' | 'temporary' | 'oauth';
+      /**
+       * Where the credential for API requests came from, verbatim from the
+       * SDK.
+       *
+       * Cebab-ujth: THIS UNION USED TO BE EXACTLY THE VALUES A CURRENT CLI
+       * NEVER SENDS. It read `'user' | 'project' | 'org' | 'temporary' |
+       * 'oauth'`, and the SDK's own doc for the field says of those five:
+       * "legacy members that current CLIs never emit; they remain only so the
+       * type stays backward compatible". Every value actually observed on the
+       * wire — `'none'` on this machine, measured — was outside the declared
+       * type, and `translate.ts` carried a cast that laundered the real string
+       * into it. So the type asserted the opposite of the truth and the one
+       * checker that could have noticed was told not to look.
+       *
+       * `'none'` is the common case and the one to read carefully: it means no
+       * API KEY is in use, which is consistent with the claude.ai subscription,
+       * with a bearer token, and with a third-party cloud backend alike. It is
+       * NOT evidence of a subscription — see `ModelIdentityCard`, which used to
+       * render it as one.
+       *
+       * The trailing `(string & {})` keeps every known value in autocomplete
+       * while leaving the field forward-compatible: a value a future CLI
+       * invents must arrive as itself rather than be cast into a neighbour.
+       */
+      apiKeySource?:
+        | 'ANTHROPIC_API_KEY'
+        | 'apiKeyHelper'
+        | '/login managed key'
+        | 'none'
+        // Legacy members the SDK still declares; current CLIs never emit them.
+        | 'user'
+        | 'project'
+        | 'org'
+        | 'temporary'
+        | 'oauth'
+        | (string & {});
       claudeCodeVersion?: string;
       outputStyle?: string;
       fastModeState?: 'off' | 'cooldown' | 'on';

@@ -98,9 +98,11 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
             // gracefully ignores unknowns.
             permissionMode: init.permission_mode as 'default' | 'acceptEdits' | 'bypassPermissions',
           }),
-          ...(init.apiKeySource !== undefined && {
-            apiKeySource: init.apiKeySource as 'user' | 'project' | 'org' | 'temporary' | 'oauth',
-          }),
+          // Cebab-ujth: the cast is gone. It used to narrow the SDK's string
+          // into `'user' | 'project' | 'org' | 'temporary' | 'oauth'` — which
+          // the SDK documents as the values current CLIs NEVER emit — so every
+          // real value was laundered into a type that excluded it.
+          ...(init.apiKeySource !== undefined && { apiKeySource: init.apiKeySource }),
           ...(init.claude_code_version !== undefined && {
             claudeCodeVersion: init.claude_code_version,
           }),
