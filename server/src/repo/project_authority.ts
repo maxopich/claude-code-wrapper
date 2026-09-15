@@ -1067,6 +1067,25 @@ function bumpDenied(t: ToolUsageTally, name: string): void {
  * resolve produced it.
  */
 export type ResolverInput = {
+  /**
+   * `Cebab-qz7m`: whether to decorate the tool list with per-tool usage counts.
+   *
+   * The tally exists for ONE reader — the authority panel's usage-diff mode.
+   * It walks every `assistant` row and every permission wrapper row across
+   * every session of the project and JSON.parses each, synchronously.
+   * Measured: ~1.4 us per event, so 150 ms at 100k events and 281 ms at 200k.
+   *
+   * The pre-spawn gate resolves before every message and reads exactly three
+   * fields of the result — `mcpServers`, `detectedEnvInjections`, `hooks`. It
+   * never touches `tools`, so it was paying that walk and throwing it away, on
+   * every message, growing with how long the project had been used.
+   *
+   * DEFAULTS TO `'tally'`, and that direction is deliberate: a caller who
+   * forgets to think about this pays performance, not correctness. The opposite
+   * default would silently empty the panel's usage columns for the next caller
+   * who forgets — a wrong answer rather than a slow one.
+   */
+  toolUsage?: 'tally' | 'skip';
   projectId: number;
   mode: 'cache' | 'probe';
   /**
@@ -1281,7 +1300,17 @@ export function resolveProjectAuthority(input: ResolverInput): ProjectAuthority 
   // it to decorate nothing was pure waste that grew with how long the
   // project had been used. Nothing downstream changes: the loop below is a
   // no-op over an empty `tools`, so an empty tally is byte-identical output.
-  const tally: ToolUsageTally = initTools.length > 0 ? tallyToolUsage(input.projectId) : new Map();
+  // `Cebab-qz7m`: the `initTools.length > 0` guard was the whole protection
+  // here, and its own comment (Cebab-8ml) explains why it was thought
+  // sufficient — "tools is empty whenever there is no cached SDK snapshot, the
+  // common case on the pre-spawn gate". Probe-on-selection (Cebab-ws0.7) ended
+  // that: the selection probe fills the connection's authority cache, the gate
+  // passes it in, and by the time the operator sends a message the snapshot
+  // exists. The guard stayed green and stopped guarding.
+  const tally: ToolUsageTally =
+    input.toolUsage !== 'skip' && initTools.length > 0
+      ? tallyToolUsage(input.projectId)
+      : new Map();
   for (const tool of tools) {
     const counts = tally.get(tool.name);
     if (!counts) continue;
