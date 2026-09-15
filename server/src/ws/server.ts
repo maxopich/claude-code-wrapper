@@ -43,7 +43,7 @@ import {
   setSessionTitle,
 } from '../repo/sessions.js';
 import { listEvents, listEventsTail } from '../repo/events.js';
-import { persistMessage } from '../runner/persist.js';
+import { persistMessage, persistOperatorPrompt } from '../runner/persist.js';
 import { closeLogger } from '../runner/logger.js';
 import { pickRunner, type Runner } from '../runner/index.js';
 import { readManagedFile, writeManagedFile } from '../managed_file.js';
@@ -7230,6 +7230,24 @@ async function runOneTurn(
       (m) => send(conn.ws, m),
     );
   };
+
+  // Cebab-4baz: persist the operator's own message. Nothing did.
+  // `conn.capturedPrompts` above is in-memory and exists only so a held
+  // rate-limit can re-deliver the same bytes; it dies with the connection. The
+  // CLI never echoes the prompt back — an SDK `user` message carries tool
+  // results — so without this the events table and the JSONL held the agent's
+  // half of the conversation and not the operator's, and a reopened session
+  // rendered as a monologue.
+  //
+  // HERE rather than beside `capturedPrompts.set`, which is the intuitive spot:
+  // every spawn gate sits between the two, and a turn refused by one never
+  // happened. Recording a prompt for it would put a question in the transcript
+  // that was never asked. This runs immediately before the stream loop, so it
+  // still takes the first seq of the turn and replays ahead of the answer.
+  //
+  // Persist-only: no ServerMsg is sent, because the client already renders its
+  // own bubble on send and an echo would double it.
+  await persistOperatorPrompt(sessionId, msg.text, randomUUID(), onLogFailure);
 
   conn.inFlight.set(sessionId, { ac, projectId: project.id, runner, permissionMode });
 
