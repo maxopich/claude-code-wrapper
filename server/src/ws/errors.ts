@@ -13,9 +13,27 @@ type ErrLike = {
  * back to message-substring matching. Tightened regexes to avoid false-positives
  * (e.g. "json" appearing in an unrelated SDK validation error).
  */
-export function classifyError(err: unknown): { kind: WrapperErrorKind; message: string } {
+export function classifyError(
+  err: unknown,
+  /**
+   * `Cebab-puap`: what the CALLER knows, which beats anything this function can
+   * infer from the error.
+   *
+   * Pass `aborted: true` when the caller's own AbortController fired. Cebab
+   * owns that controller and aborts it itself, so "did we end this turn" is a
+   * fact already in hand — no shape to sniff, no message to match, and nothing
+   * that a future SDK rewording can silently break.
+   */
+  ctx?: { aborted?: boolean },
+): { kind: WrapperErrorKind; message: string } {
   const e = (err && typeof err === 'object' ? err : {}) as ErrLike;
   const message = err instanceof Error ? err.message : String(err);
+
+  // Before every shape and message branch: if we aborted it, it did not crash.
+  // Ordering matters — an abort can surface as a spawn error, a stream error or
+  // a parse error depending on where the iteration happened to be, and each of
+  // those has a branch below that would claim it.
+  if (ctx?.aborted) return { kind: 'aborted', message };
 
   if (e.code === 'ENOENT' && (e.syscall === 'spawn' || /claude/i.test(message))) {
     return { kind: 'claude_not_found', message };
@@ -26,6 +44,25 @@ export function classifyError(err: unknown): { kind: WrapperErrorKind; message: 
   // row with a Restart button for a turn they ended themselves. Sticky
   // operational notifications are persisted by the dispatcher, so the false
   // failure survived reload.
+  //
+  // `Cebab-puap`: THIS BRANCH NEVER FIRED ON THE PATH IT WAS WRITTEN FOR, and
+  // the `ctx.aborted` check above is what actually closes it. Measured on SDK
+  // 0.3.251: the SDK does not throw a DOM-style AbortError. From its own
+  // bundle,
+  //
+  //   function P2(){return Tn(new fr("Operation aborted"),
+  //       {telemetryMessage:"Operation aborted", errorClass:"aborted"})}
+  //
+  // where `fr` is the SDK's Error subclass and the abort intent rides an
+  // `errorClass` metadata field rather than `.name`. Three live sessions, each
+  // a successful turn followed by a socket close, each persisted a
+  // `wrapper/process_crashed` row after `result/success`.
+  //
+  // Kept, and not replaced by a message match: `GateAbandonedError` sets
+  // `name = 'AbortError'` deliberately, and a caller that has no controller to
+  // consult still gets the right answer here. A regex on "Operation aborted"
+  // would have been the tempting fix and the wrong one — the SDK has at least
+  // two abort strings, and a wording change breaks it silently.
   if (e.name === 'AbortError') {
     return { kind: 'aborted', message };
   }
