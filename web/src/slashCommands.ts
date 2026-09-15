@@ -39,10 +39,31 @@ export type SlashCommand = {
 };
 
 /**
- * The Cebab-local list — the 5 commands the v0 operator could reach via
- * the always-visible quick-row buttons. The palette renders these in a
- * "Cebab quick commands" section and the SDK-discovered list in a
- * "Discovered from session" section underneath.
+ * The Cebab-local list — the commands the operator can reach via the
+ * always-visible quick-row buttons. The palette renders these in a "Cebab
+ * quick commands" section and the SDK-discovered list in a "Discovered from
+ * session" section underneath.
+ *
+ * `Cebab-6bny`: MEASURED LIVE, 2026-09-15, one turn per command against a real
+ * session. Four of the five worked and `/skills` did not:
+ *
+ *   /context  → the context-usage table
+ *   /compact  → subscription usage summary
+ *   /mcp      → "No MCP servers are configured…" + its usage line
+ *   /cost     → session and weekly usage
+ *   /skills   → "/skills isn't available in this environment."
+ *
+ * The CLI's headless dispatcher refuses `local-jsx` commands — the interactive
+ * ones that render their own UI — and every Cebab turn is non-interactive. So
+ * the button could never do what it said, and it was shipped in the row that is
+ * always on screen.
+ *
+ * BEFORE ADDING ONE HERE, SPEND THE TURN. The list is a hand-maintained copy of
+ * someone else's command table, and this is the failure mode that copy has:
+ * reading the CLI bundle is not enough (an attempt to settle these five from
+ * the shipped binary returned a type for `/context` that the live run
+ * contradicts, because the declarations sit close enough together to straddle
+ * any fixed-size window). One real turn per command is cheap and decisive.
  */
 export const SLASH_COMMANDS: ReadonlyArray<SlashCommand> = [
   {
@@ -55,12 +76,6 @@ export const SLASH_COMMANDS: ReadonlyArray<SlashCommand> = [
     command: '/compact',
     label: '/compact',
     description: 'Compact the conversation to free context',
-    source: 'cebab',
-  },
-  {
-    command: '/skills',
-    label: '/skills',
-    description: 'List available skills',
     source: 'cebab',
   },
   {
