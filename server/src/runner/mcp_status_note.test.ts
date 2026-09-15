@@ -91,9 +91,58 @@ describe('mcpStatusNoteSpec — what it reports', () => {
       mcpStatusNoteSpec([{ name: 'x', status: 'failed' }]).systemPromptAppend ?? ''
     ).toLowerCase();
     // The words appear only inside the prohibition, so assert on the
-    // prohibition rather than on the words being absent.
-    expect(note).toMatch(/do\s*\n?\s*not restart, reinstall, re-authenticate or reconfigure/);
+    // prohibition rather than on the words being absent. Whitespace-insensitive
+    // because the prose is hand-wrapped: a reflow is not a regression, and a
+    // regex that reddens on one is a test about line lengths.
+    const flat = note.replace(/\s+/g, ' ');
+    expect(flat).toContain('not restart, reinstall, re-authenticate or reconfigure');
     expect(note).toContain('no cause');
+  });
+
+  /**
+   * Cebab-cqd. The note is built from the LAST session start Cebab saw for the
+   * project — the selection probe, or the previous turn — never from the turn
+   * being spawned. `pending` is a transient init state that settles to
+   * `connected`, so on an account with claude.ai connectors the reading names
+   * servers that are fine by the time the turn runs.
+   *
+   * The note used to answer that with a flat claim about the session it was
+   * being injected into: "Tools from those servers are not on this session's
+   * tool list." A model told its tools do not exist — and told in the same
+   * breath not to attempt a workaround — declines a request it could have
+   * served, with the tools sitting on its list the whole time.
+   */
+  test('it defers to the tool list instead of asserting what is on it', () => {
+    const flat = (
+      mcpStatusNoteSpec([{ name: 'gmail', status: 'pending' }]).systemPromptAppend ?? ''
+    )
+      .toLowerCase()
+      .replace(/\s+/g, ' ');
+
+    // The deferral must be present and must name the resolution explicitly:
+    // tool list wins, use the tool, say nothing about the status.
+    expect(flat).toContain('your own tool list is authoritative for this session');
+    expect(flat).toContain('use the tool');
+
+    // And the retracted claim must be gone. This is the assertion that would
+    // redden if the old sentence were restored alongside the new one — which
+    // is the likelier regression than a straight revert, and would leave the
+    // model with two contradictory instructions.
+    expect(flat).not.toContain("tools from those servers are not on this session's tool list");
+  });
+
+  test('the prohibition still binds for a server whose tools really are absent', () => {
+    // The anti-vacuity control for the deferral above. A note that softened
+    // into "use your tool list" and nothing else would pass the previous test
+    // while throwing away the whole point of Cebab-ws0.15: the model must still
+    // be stopped from inventing a remedy for a server that genuinely did not
+    // come up.
+    const flat = (mcpStatusNoteSpec([{ name: 'x', status: 'needs-auth' }]).systemPromptAppend ?? '')
+      .toLowerCase()
+      .replace(/\s+/g, ' ');
+    expect(flat).toContain('genuinely absent from your tool list');
+    expect(flat).toContain('not restart, reinstall, re-authenticate or reconfigure');
+    expect(flat).toContain('unavailable in this session');
   });
 });
 

@@ -27,11 +27,28 @@
  * transient init state that settles to `connected`, so on an account with
  * claude.ai connectors this note routinely names several servers that are in
  * fact fine. `shared/src/mcp_status.ts` accepted that cost in writing before it
- * was observed; what keeps it honest rather than wrong is the note's own first
- * sentence, which attributes the reading to the last session start and says it
- * is not live. Do not "fix" it by excluding `pending` — that is the status
- * allow-list the shared module argues against, and the likelier fix is to stop
- * reporting account-scoped connectors alongside a project's own declarations.
+ * was observed. Do not "fix" it by excluding `pending` — that is the status
+ * allow-list the shared module argues against, and the first failure mode the
+ * SDK invents would go silent.
+ *
+ * WHAT WAS FIXED INSTEAD (`Cebab-cqd`), because the over-reporting was never
+ * the harm on its own. Naming a server that turns out to be fine costs the
+ * model a sentence. What cost it the capability was the NEXT line, which used
+ * to read "Tools from those servers are not on this session's tool list" — a
+ * flat claim about the session being spawned, derived from a reading taken in a
+ * different one. Attributing the reading honestly in sentence one does not stop
+ * sentence two from being false: a model told its Gmail tools do not exist, and
+ * told in the same breath not to attempt a workaround, will decline a request it
+ * could have served, and the tools were sitting on its list the whole time.
+ *
+ * So the note no longer asserts what the tool list contains. It defers to it.
+ * The model can read its own tool list, that list is the authoritative answer
+ * for the session it is actually in, and a stale reading now resolves in favour
+ * of the live one. Measured on this machine 2026-09-15: twelve loaded servers,
+ * one `pending` and two `needs-auth`, 60 `mcp__` tools on the list — the
+ * `needs-auth` pair contributed none (so the note is right about them and the
+ * model still learns why), while a transient `pending` is exactly the case
+ * where the deferral saves a capability the old prose threw away.
  *
  * WHY IT IS RECOMPUTED EVERY TURN. Measured (`src/system_prompt_smoke.ts`): a
  * system prompt supplied on a `--resume` turn binds, so the note tracks the
@@ -100,14 +117,19 @@ export function mcpStatusNoteSpec(servers: readonly McpServerStatus[] | undefine
       '',
       ...lines,
       '',
-      "Tools from those servers are not on this session's tool list. The status",
-      'strings above are quoted verbatim from the runtime; no cause for any of them',
-      'has been established, and you should not guess at one.',
+      'The status strings above are quoted verbatim from the runtime; no cause for',
+      'any of them has been established, and you should not guess at one.',
       '',
-      'There is no action available from inside this session that changes this. Do',
-      'not restart, reinstall, re-authenticate or reconfigure these servers, and do',
-      'not tell the user that doing so will help. If a request needs those tools,',
-      'say plainly that the capability is unavailable in this session and name the',
+      'YOUR OWN TOOL LIST IS AUTHORITATIVE FOR THIS SESSION, AND THIS READING IS',
+      'NOT. If a tool from one of those servers IS on your tool list, the reading',
+      'above is out of date — the server came up after it was taken. Use the tool',
+      'normally and do not mention the status.',
+      '',
+      'For a server whose tools are genuinely absent from your tool list: there is',
+      'no action available from inside this session that changes that. Do not',
+      'restart, reinstall, re-authenticate or reconfigure these servers, and do not',
+      'tell the user that doing so will help. If a request needs those tools, say',
+      'plainly that the capability is unavailable in this session and name the',
       'server.',
     ].join('\n'),
   };
