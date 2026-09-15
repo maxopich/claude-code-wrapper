@@ -1,5 +1,6 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, test } from 'vitest';
-import { rateLimitDispatch, wrapperErrorDispatch } from './server.js';
+import { isRateLimited, rateLimitDispatch, wrapperErrorDispatch } from './server.js';
 
 // Cluster A Phase 6: pure-function unit tests for the two dispatch helpers
 // extracted from `runOneTurn`. These exist so each branch of the §7-floor
@@ -7,49 +8,84 @@ import { rateLimitDispatch, wrapperErrorDispatch } from './server.js';
 // server, the SDK, or the dispatcher LRU. The integration is exercised by
 // `ci_smoke.ts` end-to-end after this PR lands.
 
-describe('rateLimitDispatch — hit vs cleared split (Cluster A Phase 6)', () => {
+describe('rateLimitDispatch — hit vs cleared vs silence (Cluster A Phase 6; Cebab-mo7j)', () => {
   // Stable "now" so the test doesn't race the wall clock.
   const NOW = 1_700_000_000_000;
 
-  test('resetsAtMs in the future → hit (warn) with retry-after time', () => {
+  /**
+   * Cebab-mo7j. THE CASE THIS SUITE DID NOT HAVE, and the reason it stayed
+   * green through the defect: every assertion below used `status: 'limited'`,
+   * a value no SDK release emits, while the ONE case using the real value
+   * (`'allowed'`) omitted `resetsAtMs` — the field a real event always
+   * carries. So the suite exercised two shapes that do not occur and never the
+   * one that occurs on every healthy turn.
+   *
+   * This is that shape, copied from the repo's own captured fixture
+   * (`fixtures/hello.jsonl`), converted to the ms field the dispatch reads.
+   */
+  test('the real healthy-turn event says nothing at all', () => {
+    const healthy = { status: 'allowed', resetsAtMs: NOW + 7 * 60 * 60 * 1000 };
+    expect(isRateLimited(healthy, NOW)).toBe(false);
+    expect(rateLimitDispatch(healthy, NOW)).toBeNull();
+  });
+
+  // The anti-vacuity control for the case above: the same future reset time
+  // with a status that is NOT the known-good value must still warn. Without
+  // this, "return null" would pass the test above while silencing real limits.
+  test('the same future reset with a non-allowed status still warns', () => {
     const out = rateLimitDispatch({ status: 'limited', resetsAtMs: NOW + 60_000 }, NOW);
-    expect(out.subCode).toBe('hit');
-    expect(out.severity).toBe('warn');
-    expect(out.title).toBe('Rate limit');
+    expect(out?.subCode).toBe('hit');
+    expect(out?.severity).toBe('warn');
+    expect(out?.title).toBe('Rate limit');
     // The message embeds the formatted local-time "Retry after …" — we
     // assert the prefix + the presence of "Retry after" rather than the
     // exact locale formatting (test machines may render different locales).
-    expect(out.message).toContain('limited');
-    expect(out.message).toContain('Retry after');
+    expect(out?.message).toContain('limited');
+    expect(out?.message).toContain('Retry after');
   });
 
-  test('resetsAtMs already in the past → cleared (info)', () => {
-    const out = rateLimitDispatch({ status: 'limited', resetsAtMs: NOW - 60_000 }, NOW);
-    expect(out.subCode).toBe('cleared');
-    expect(out.severity).toBe('info');
-    expect(out.title).toBe('Rate limit cleared');
-    // Status string is passed through verbatim — forward-compat with SDK
-    // adding new status variants.
-    expect(out.message).toBe('limited');
-  });
-
-  test('resetsAtMs absent entirely → cleared (info) with default message', () => {
-    const out = rateLimitDispatch({ status: 'allowed' }, NOW);
-    expect(out.subCode).toBe('cleared');
-    expect(out.severity).toBe('info');
-    expect(out.message).toBe('allowed');
-  });
-
-  test('resetsAtMs absent AND status absent → cleared with fallback message', () => {
-    const out = rateLimitDispatch({}, NOW);
-    expect(out.subCode).toBe('cleared');
-    expect(out.message).toBe('limit lifted');
+  // The direction of the rule, stated as a test: one known-good value, and
+  // anything unrecognised counts as a limit. An allow-list of BAD statuses
+  // would make the first limit variant the SDK invents silently invisible.
+  test('an unknown status with a future reset is treated as a limit, not as healthy', () => {
+    const out = rateLimitDispatch({ status: 'some_future_variant', resetsAtMs: NOW + 60_000 }, NOW);
+    expect(out?.subCode).toBe('hit');
+    expect(out?.severity).toBe('warn');
   });
 
   test('status defaults to "limited" when only resetsAtMs is set (hit path)', () => {
     const out = rateLimitDispatch({ resetsAtMs: NOW + 10_000 }, NOW);
-    expect(out.subCode).toBe('hit');
-    expect(out.message.startsWith('limited')).toBe(true);
+    expect(out?.subCode).toBe('hit');
+    expect(out?.message.startsWith('limited')).toBe(true);
+  });
+
+  /**
+   * `cleared` is a TRANSITION, so it needs a session that was told about a
+   * limit. Previously every non-hit event produced one, which would have moved
+   * the per-turn announcement from warn to info rather than removing it.
+   */
+  test('a lifted limit is announced only to a session that was told about one', () => {
+    const lifted = { status: 'allowed', resetsAtMs: NOW + 60_000 };
+    expect(rateLimitDispatch(lifted, NOW, { limitWasActive: true })).toMatchObject({
+      subCode: 'cleared',
+      severity: 'info',
+      title: 'Rate limit cleared',
+      // Status string is passed through verbatim — forward-compat with the SDK
+      // adding new status variants.
+      message: 'allowed',
+    });
+    expect(rateLimitDispatch(lifted, NOW, { limitWasActive: false })).toBeNull();
+  });
+
+  test('an expired reset clears a session that was limited, and is silent otherwise', () => {
+    const expired = { status: 'limited', resetsAtMs: NOW - 60_000 };
+    expect(rateLimitDispatch(expired, NOW, { limitWasActive: true })?.subCode).toBe('cleared');
+    expect(rateLimitDispatch(expired, NOW)).toBeNull();
+  });
+
+  test('an empty payload falls back to the default cleared message', () => {
+    expect(rateLimitDispatch({}, NOW, { limitWasActive: true })?.message).toBe('limit lifted');
+    expect(rateLimitDispatch({}, NOW)).toBeNull();
   });
 
   // Register S01. The event carries BOTH `resetsAt` (raw SDK seconds) and
@@ -61,8 +97,8 @@ describe('rateLimitDispatch — hit vs cleared split (Cluster A Phase 6)', () =>
     // The realistic shape: SDK seconds ~1.7e9, ms clock ~1.7e12.
     const resetsAtSeconds = Math.floor(NOW / 1000) + 60;
     const out = rateLimitDispatch({ status: 'limited', resetsAtMs: resetsAtSeconds * 1000 }, NOW);
-    expect(out.subCode).toBe('hit');
-    expect(out.severity).toBe('warn');
+    expect(out?.subCode).toBe('hit');
+    expect(out?.severity).toBe('warn');
   });
 
   test('a raw-seconds value is NOT silently treated as a live limit', () => {
@@ -70,15 +106,44 @@ describe('rateLimitDispatch — hit vs cleared split (Cluster A Phase 6)', () =>
     // this reads as long-expired rather than quietly re-breaking the branch.
     // (Fails loudly here instead of shipping a permanently-cleared banner.)
     const resetsAtSeconds = Math.floor(NOW / 1000) + 60;
-    const out = rateLimitDispatch({ status: 'limited', resetsAtMs: resetsAtSeconds }, NOW);
-    expect(out.subCode).toBe('cleared');
+    const out = rateLimitDispatch({ status: 'limited', resetsAtMs: resetsAtSeconds }, NOW, {
+      limitWasActive: true,
+    });
+    expect(out?.subCode).toBe('cleared');
   });
 
   test('the retry-after text renders the reset time, not the epoch', () => {
     // With seconds this formatted a 1970 timestamp — unreachable before the
     // fix, wrong the moment it became reachable.
     const out = rateLimitDispatch({ status: 'limited', resetsAtMs: NOW + 60_000 }, NOW);
-    expect(out.message).toContain(new Date(NOW + 60_000).toLocaleTimeString());
+    expect(out?.message).toContain(new Date(NOW + 60_000).toLocaleTimeString());
+  });
+});
+
+/**
+ * Cebab-mo7j: `isRateLimited` exists so the notification and the
+ * `session_running { status: 'rate_limited' }` banner cannot disagree. The
+ * banner's own predicate used to be `out.status === 'hard'`, which no SDK
+ * release emits — so it never fired. These pin the shared answer directly.
+ */
+describe('isRateLimited — the single predicate both surfaces read (Cebab-mo7j)', () => {
+  const NOW = 1_700_000_000_000;
+
+  test("the string 'hard' is not special, and a real limit does not need it", () => {
+    // The dead comparison would have answered false for this; the whole point
+    // is that an actual limit is recognised whatever the SDK calls it.
+    expect(isRateLimited({ status: 'hard', resetsAtMs: NOW + 60_000 }, NOW)).toBe(true);
+    expect(isRateLimited({ status: 'five_hour_limit', resetsAtMs: NOW + 60_000 }, NOW)).toBe(true);
+  });
+
+  test('allowed is the one value that means no limit, whatever the clock says', () => {
+    expect(isRateLimited({ status: 'allowed', resetsAtMs: NOW + 60_000 }, NOW)).toBe(false);
+    expect(isRateLimited({ status: 'allowed' }, NOW)).toBe(false);
+  });
+
+  test('no reset time means no limit to wait out', () => {
+    expect(isRateLimited({ status: 'limited' }, NOW)).toBe(false);
+    expect(isRateLimited({}, NOW)).toBe(false);
   });
 });
 
@@ -159,5 +224,69 @@ describe('wrapperErrorDispatch — sub-code routing (Cluster A Phase 6)', () => 
     ] as const) {
       expect(wrapperErrorDispatch(kind, 'sess-1')).not.toBeNull();
     }
+  });
+});
+
+/**
+ * Cebab-mo7j: a SOURCE scan, because the unit tests above cannot see this.
+ *
+ * The defect being pinned was not in the pure function — it was at the call
+ * site, where the `session_running { status: 'rate_limited' }` banner was
+ * gated on `out.status === 'hard'`. Reverting that comparison leaves every
+ * behavioural test in this file green, because `runOneTurn` is a several
+ * -thousand-line function inside a live SDK stream and nothing here reaches
+ * it. The measured revert-check is what makes this test exist rather than a
+ * comment asking the next author to remember: mutation 1 (the pure rule)
+ * reddens three cases; mutation 2 (this call site) reddened none.
+ *
+ * The same shape as `[security] no bus gate call site pins its own scopes` in
+ * `bus/scope_conformance.test.ts`, and for the same reason: some invariants
+ * live in which function a call site calls, and a scan is the only reader.
+ */
+describe('[security] the rate-limit banner reads the shared predicate (Cebab-mo7j)', () => {
+  const raw = readFileSync(new URL('./server.ts', import.meta.url), 'utf8');
+
+  /**
+   * Comments are not call sites. This file's own prose quotes the dead
+   * comparison in order to explain it, so a scan of the raw text would fail on
+   * the very commit that removes the defect — and the tempting fix (rewording
+   * the comment) would leave a gate that any future comment can break.
+   *
+   * Replaced with spaces rather than deleted so byte offsets still line up
+   * with the raw file, which is what lets the second test walk backwards from
+   * a marker to its enclosing guard.
+   */
+  const code = raw
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => ' '.repeat(m.length))
+    .replace(/(^|[^:])\/\/[^\n]*/g, (m, p1) => p1 + ' '.repeat(m.length - p1.length));
+
+  test('the comment stripper leaves the code it is supposed to scan', () => {
+    // The stripper is the part of this gate most able to fail open: one that
+    // returned empty would satisfy every `not.toMatch` below while measuring
+    // nothing. So pin what must SURVIVE it, not just what must be absent.
+    expect(code).toContain('export function isRateLimited(');
+    expect(code).toContain("status: 'rate_limited',");
+    expect(code.length).toBeGreaterThan(raw.length / 2);
+    // And pin that it really did remove the prose: the explanatory comment
+    // above the guard quotes the dead comparison, and the raw file therefore
+    // still contains it.
+    expect(raw).toMatch(/status\s*===\s*'hard'/);
+  });
+
+  test("no call site compares a rate-limit status to a literal 'hard'", () => {
+    expect(code).not.toMatch(/status\s*===\s*'hard'/);
+  });
+
+  test('the rate_limited banner emit is guarded by isRateLimited', () => {
+    const at = code.indexOf("status: 'rate_limited',");
+    // Anti-vacuity, and the half that matters most: if the banner emit is ever
+    // renamed or removed, this must fail rather than pass by finding nothing.
+    expect(at).toBeGreaterThan(-1);
+
+    const before = code.slice(0, at);
+    const guardAt = before.lastIndexOf('if (');
+    expect(guardAt).toBeGreaterThan(-1);
+    const guard = before.slice(guardAt, before.indexOf('\n', guardAt));
+    expect(guard).toContain('isRateLimited(');
   });
 });
