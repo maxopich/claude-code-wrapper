@@ -966,9 +966,31 @@ export function wrapperErrorDispatch(
  *   - resetsAtMs in the future → hit (warn)
  *   - resetsAtMs absent OR already in the past → cleared (info)
  *
- * The SDK's `status` string is forward-compat noise and may differ per
- * provider; relying on the reset timestamp keeps the branch resilient. Pure
- * function so the runOneTurn live-stream call site stays a thin wrapper
+ * Cebab-mo7j: THE STATUS STRING IS THE DISCRIMINATOR, AND THE TIMESTAMP IS NOT.
+ * This header used to say the opposite — "the SDK's `status` string is
+ * forward-compat noise … relying on the reset timestamp keeps the branch
+ * resilient" — and the timestamp turned out to carry no signal at all. A
+ * subscription's five-hour window is a ROLLING window, so `resetsAt` is
+ * unconditionally in the future, including on turns that were allowed. The
+ * repo's own captured fixture is the proof (`fixtures/hello.jsonl`, from a
+ * healthy session):
+ *
+ *   { status: 'allowed', resetsAt: 1777993800, rateLimitType: 'five_hour', … }
+ *
+ * Under the old rule that dispatched `hit`/warn, so a healthy turn raised an
+ * amber "Rate limit — allowed Retry after 7:10:00 PM." toast. Every turn, all
+ * day. The cost is not the noise but what the noise does to the signal: the
+ * toast that means an ACTUAL limit became indistinguishable from the ones that
+ * mean nothing, and the habit that trains is to ignore it.
+ *
+ * The direction of the new rule is deliberate and matches `isConnected` in
+ * `shared/src/mcp_status.ts`: ONE known-good value, and everything else counts
+ * as a limit. An allow-list of bad statuses would make the first limit variant
+ * the SDK invents invisible — silence on a real limit — whereas an unknown
+ * status here merely warns about a turn that was fine. For a rate limit, fail
+ * loud is the correct side to be wrong on.
+ *
+ * Pure function so the runOneTurn live-stream call site stays a thin wrapper
  * and this branch can be unit-tested without spinning up the WS stack.
  *
  * Register S01: the parameter is `resetsAtMs`, with the unit in the NAME, and
@@ -989,13 +1011,52 @@ export type RateLimitDispatch = {
   message: string;
 };
 
+/**
+ * The one `rate_limit_info.status` value that means "this turn was not
+ * limited". Everything else is treated as a limit — see the direction argument
+ * on `rateLimitDispatch` above.
+ */
+const RATE_LIMIT_STATUS_ALLOWED = 'allowed';
+
+/**
+ * Is this event reporting a limit the operator is actually subject to?
+ *
+ * Exported because two call sites need the same answer and must not drift: the
+ * notification dispatch below, and the `session_running { status:
+ * 'rate_limited' }` emit in `runOneTurn`. That second site used to test
+ * `out.status === 'hard'` — a status string that appears nowhere in the SDK,
+ * nowhere in a captured fixture, and nowhere in this repo except that one
+ * comparison. It was therefore dead: the countdown banner it gates could not
+ * fire, on any turn, ever.
+ */
+export function isRateLimited(
+  out: { status?: string; resetsAtMs?: number },
+  now: number = Date.now(),
+): boolean {
+  if (out.status === RATE_LIMIT_STATUS_ALLOWED) return false;
+  return typeof out.resetsAtMs === 'number' && out.resetsAtMs > now;
+}
+
+/**
+ * `null` means SAY NOTHING, and it is the common case.
+ *
+ * A `cleared` envelope is only honest as a TRANSITION — "the limit you were
+ * told about has lifted". Emitting one for an event that merely reports a
+ * healthy turn re-creates the defect one severity level down: an info toast per
+ * turn instead of a warn toast per turn. So the caller passes whether this
+ * session has actually been told about a limit, and a session that never hit
+ * one produces no envelope at all.
+ */
 export function rateLimitDispatch(
   out: { status?: string; resetsAtMs?: number },
   now: number = Date.now(),
-): RateLimitDispatch {
-  const isActiveLimit = typeof out.resetsAtMs === 'number' && out.resetsAtMs > now;
-  if (isActiveLimit && typeof out.resetsAtMs === 'number') {
-    const resetText = ` Retry after ${new Date(out.resetsAtMs).toLocaleTimeString()}.`;
+  opts: { limitWasActive?: boolean } = {},
+): RateLimitDispatch | null {
+  if (isRateLimited(out, now)) {
+    const resetText =
+      typeof out.resetsAtMs === 'number'
+        ? ` Retry after ${new Date(out.resetsAtMs).toLocaleTimeString()}.`
+        : '';
     return {
       subCode: 'hit',
       severity: 'warn',
@@ -1003,6 +1064,7 @@ export function rateLimitDispatch(
       message: `${out.status ?? 'limited'}${resetText}`,
     };
   }
+  if (!opts.limitWasActive) return null;
   return {
     subCode: 'cleared',
     severity: 'info',
@@ -2382,6 +2444,21 @@ type Conn = {
   /** Cluster B Phase 3: per-project authority cache; see CachedSessionStarted. */
   authorityCache: Map<number, CachedSessionStarted>;
   /**
+   * Cebab-mo7j: session ids this connection has told the operator are rate
+   * limited, so the "limit lifted" envelope can be a real TRANSITION rather
+   * than a per-turn announcement that nothing is wrong.
+   *
+   * Per-connection, and that is the honest scope: the thing it remembers is
+   * whether THIS socket emitted the notification, so the follow-up belongs to
+   * the same window that showed the warning. A second tab that never saw the
+   * warning has nothing to clear, and telling it a limit lifted would be the
+   * same unfounded claim in the other direction. It is plain data, so it is
+   * collected with the Conn — contrast `trustGate` below, where register B20
+   * records why a promise map is not (a parked promise keeps its own frame,
+   * and that frame keeps this Conn alive).
+   */
+  rateLimitedSessions: Set<string>;
+  /**
    * Cebab-ws0.7: this connection's settle timer for probe-on-selection.
    *
    * Per-connection because the snapshot it fills is — `authorityCache` above
@@ -3030,6 +3107,7 @@ function onConnection(ws: WebSocket): void {
     multiAgentSinkEpoch: 0,
     multiAgentStartClaim: null,
     authorityCache: new Map(),
+    rateLimitedSessions: new Set(),
     probeScheduler: createProbeScheduler({
       hasSnapshot: (projectId) => conn.authorityCache.has(projectId),
       // Identical to what the Refresh button does, which is the point: a
@@ -7269,19 +7347,25 @@ async function runOneTurn(
           // Cluster A Phase 6: dedupeKey carries the sub-code so a
           // hit→cleared transition produces two distinct envelopes (rather
           // than collapsing into one warn with stale countdown text).
-          const dispatch = rateLimitDispatch(out);
-          emitNotification(
-            {
-              class: 'operational',
-              severity: dispatch.severity,
-              dedupeKey: `rate_limit:${dispatch.subCode}:${sessionId}`,
-              title: dispatch.title,
-              message: dispatch.message,
-              sessionId,
-              reasonCode: dispatch.subCode,
-            },
-            (msg) => send(conn.ws, msg),
-          );
+          const dispatch = rateLimitDispatch(out, Date.now(), {
+            limitWasActive: conn.rateLimitedSessions.has(sessionId),
+          });
+          if (dispatch) {
+            if (dispatch.subCode === 'hit') conn.rateLimitedSessions.add(sessionId);
+            else conn.rateLimitedSessions.delete(sessionId);
+            emitNotification(
+              {
+                class: 'operational',
+                severity: dispatch.severity,
+                dedupeKey: `rate_limit:${dispatch.subCode}:${sessionId}`,
+                title: dispatch.title,
+                message: dispatch.message,
+                sessionId,
+                reasonCode: dispatch.subCode,
+              },
+              (msg) => send(conn.ws, msg),
+            );
+          }
           // Cluster D Phase 4b (BE-D2 / spec §4.1): hard rate-limit
           // flips `session_running.status` to `'rate_limited'`. The
           // turn is still in flight at this point (the SDK may yet
@@ -7289,7 +7373,13 @@ async function runOneTurn(
           // emit running=true with the status set so the operator
           // banner shows the countdown without waiting for the
           // finally-block running=false.
-          if (out.status === 'hard') {
+          // Cebab-mo7j: was `out.status === 'hard'`. No SDK release, captured
+          // fixture or test in this repo has ever produced that string, so the
+          // countdown banner below was unreachable — the one surface that tells
+          // the operator a turn is waiting on a reset could not appear. It now
+          // shares `isRateLimited` with the notification above, so the banner
+          // and the toast cannot disagree about whether a limit is in force.
+          if (isRateLimited(out)) {
             send(conn.ws, {
               type: 'session_running',
               projectId: project.id,
