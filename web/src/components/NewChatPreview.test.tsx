@@ -49,6 +49,7 @@ function mkAuthority(over: Partial<ProjectAuthority> = {}): ProjectAuthority {
     agents: [],
     plugins: [],
     hooks: [],
+    pluginHooks: [],
     detectedEnvInjections: [],
     ...over,
   };

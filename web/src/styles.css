@@ -9456,6 +9456,33 @@ pre {
   color: var(--warn-ink);
   border-color: color-mix(in srgb, var(--warn) 35%, var(--line-3));
 }
+/* Cebab-aklg: a plugin hook is not a settings scope and does not sit on the
+   user/project/local trust ladder — it runs whether or not the project is
+   trusted, because `enabledPlugins` is read from the user tier alone. Warn ink
+   rather than local's warn border: worth noticing, but the border is reserved
+   for the least-vetted tier and this is not that. */
+.hook-scope-plugin {
+  color: var(--warn-ink);
+}
+/* Cebab-aklg: the plugin-hook section reuses the unloaded section's shape —
+   both are "here is something the list above does not cover". */
+.hooks-plugin {
+  margin-top: 10px;
+}
+.hooks-plugin-note {
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  margin-bottom: 6px;
+}
+.hooks-plugin-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 .hook-card-path {
   font-family: var(--font-mono);
   font-size: var(--t-xs);
