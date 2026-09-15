@@ -1230,3 +1230,47 @@ describe('[security] the export and the events table agree on what is durable', 
     expect(isStreamPartial('some_future_type')).toBe(false);
   });
 });
+
+/**
+ * Cebab-en70 [security]: the share-safe export is the surface that ships a
+ * transcript off the machine, so it is where an env-injected secret leaks. The
+ * names come from the project's own `env:` block — Cebab knows them, so the
+ * redactor stops guessing from how a key is spelled.
+ */
+describe('[security] redactJsonlLine — declared env keys (Cebab-en70)', () => {
+  const line = (text: string): string => JSON.stringify({ type: 'assistant', text });
+
+  test('a declared key is masked whole, including a URL-shaped value', () => {
+    // Assembled at runtime for the same reason as the case below.
+    const fakePassword = ['s3cret', 'password'].join('');
+    const raw = line(`DATABASE_URL=postgres://user:${fakePassword}@db.internal.example/app`);
+
+    // The control: without the names, the shared heuristic stops at the scheme
+    // and the password ships — with a `<redacted>` token in the line making it
+    // look handled. That is the defect, asserted directly.
+    const unaided = redactJsonlLine(raw) ?? '';
+    expect(unaided).toContain(fakePassword);
+
+    const aided = redactJsonlLine(raw, ['DATABASE_URL']) ?? '';
+    expect(aided).not.toContain(fakePassword);
+    expect(aided).not.toContain('db.internal.example');
+  });
+
+  test('passing no names leaves the existing behaviour exactly as it was', () => {
+    // Assembled at RUNTIME, not written as a literal. A credential-shaped
+    // string in a source file is a secret-scanner finding whatever it actually
+    // is (`project_secret_shaped_test_data`), and this one tripped gitleaks'
+    // `generic-api-key` rule on CI while the locally-installed version passed
+    // it — two versions, two rule sets, and the source literal is what made the
+    // difference matter. Widening `.gitleaks.toml` would be the other fix and
+    // the worse one: it loosens the scanner for the whole repo to keep one test
+    // readable.
+    const fakeKey = ['abcdefghij', 'klmnopqrst', 'uvwxyz0123', '456789'].join('');
+    const raw = line(`AWS_SECRET_ACCESS_KEY=${fakeKey}`);
+    expect(redactJsonlLine(raw, [])).toBe(redactJsonlLine(raw));
+    expect(redactJsonlLine(raw)).not.toContain(fakeKey);
+    // The negative half: the masking must be what removed it, not the string
+    // simply never being there.
+    expect(raw).toContain(fakeKey);
+  });
+});

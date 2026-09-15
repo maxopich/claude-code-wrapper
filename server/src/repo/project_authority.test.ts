@@ -13,6 +13,7 @@ import {
   detectMcpServers,
   resolveProjectAuthority,
   detectPluginHooks,
+  declaredEnvKeys,
   resolveToolAuthority,
   tallyToolUsage,
 } from './project_authority.js';
@@ -227,6 +228,39 @@ describe('resolveToolAuthority (BE-B7) — allow/deny attribution', () => {
 });
 
 // ---- detectEnvInjections ----
+
+/**
+ * Cebab-en70: the reader the REDACTOR needs, which is not the one the gate
+ * needs. `detectEnvInjections` below filters to credential-SHAPED names because
+ * its job is deciding what to prompt about; the names it drops are precisely
+ * the ones the redactor's own spelling heuristic already misses.
+ */
+describe('declaredEnvKeys (Cebab-en70) — every env key, unfiltered', () => {
+  test('returns names detectEnvInjections deliberately drops', () => {
+    const layers: Layer[] = [
+      fixtureLayer('user', { env: { MAPBOX_PK: 'x', SENTRY_DSN: 'y', NODE_ENV: 'production' } }),
+    ];
+    // The contrast IS the point of this function, so assert it directly: if
+    // detectEnvInjections ever started returning these, this reader would be
+    // redundant and should go.
+    expect(detectEnvInjections(layers).map((i) => i.envKey)).not.toContain('MAPBOX_PK');
+    expect(declaredEnvKeys(layers).sort()).toEqual(['MAPBOX_PK', 'NODE_ENV', 'SENTRY_DSN']);
+  });
+
+  test('dedupes a key declared at more than one scope', () => {
+    const layers: Layer[] = [
+      fixtureLayer('user', { env: { SHARED: 'a' } }),
+      fixtureLayer('project', { env: { SHARED: 'b', ONLY_PROJECT: 'c' } }),
+    ];
+    expect(declaredEnvKeys(layers).sort()).toEqual(['ONLY_PROJECT', 'SHARED']);
+  });
+
+  test('a layer with no env block contributes nothing', () => {
+    expect(declaredEnvKeys([fixtureLayer('user', { permissions: { allow: ['Read'] } })])).toEqual(
+      [],
+    );
+  });
+});
 
 describe('detectEnvInjections (BE-B11 / BE-B12) — credential-class env scan', () => {
   test('finds ANTHROPIC_API_KEY declared at project scope', () => {

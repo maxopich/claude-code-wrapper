@@ -72,6 +72,31 @@ export type RedactOptions = {
    * Deliberately NOT added to `SENSITIVE_KEY_PATTERNS`.
    */
   omitHookOutput?: boolean;
+  /**
+   * `Cebab-en70` [security]. Extra env-var NAMES to treat as credential-bearing
+   * for this payload, on top of `SENSITIVE_KEY_PATTERNS`.
+   *
+   * The patterns are a heuristic over how a key is SPELLED — `*_API_KEY`,
+   * `*_TOKEN`, `*_SECRET` and friends. That catches most credentials and misses
+   * the ones whose names do not advertise themselves: `MAPBOX_PK`, `OPENAI_ORG`,
+   * `SENTRY_DSN`, `DATABASE_URL`, `STRIPE_PUBLISHABLE`. Guessing harder is not
+   * the answer — every widening masks more ordinary text, and the list can never
+   * be finished.
+   *
+   * What makes this cheap and exact instead: for an env block Cebab ALREADY
+   * KNOWS THE NAMES. `detectEnvInjections` reads them out of the settings layers
+   * and the start gate shows them to the operator to acknowledge. So the caller
+   * can say "these specific names are secrets here" and stop guessing.
+   *
+   * Matched case-insensitively and EXACTLY — not as substrings. A declared
+   * `PATH`-like name must not start masking every assignment whose key contains
+   * it, which is the failure mode a substring rule would have.
+   *
+   * A declared name also SKIPS the value-shape heuristics, because a
+   * declaration outranks a guess about what a credential looks like. See the
+   * measurement at the skip.
+   */
+  declaredSecretKeys?: readonly string[];
 };
 
 const REDACTED_TOKEN = '<redacted>';
@@ -538,7 +563,105 @@ function isDottedCodeReference(value: string): boolean {
  * which the value class accepts, so this function's own output can never be a
  * candidate value on a second pass.
  */
-export function maskCredentialAssignments(str: string): string {
+/**
+ * Mask `NAME=value` for names the operator DECLARED, taking the whole value.
+ *
+ * `Cebab-en70` [security]. A separate pass from `maskCredentialAssignments`
+ * below, because the two differ in the one place that matters: how much of the
+ * value they are willing to capture.
+ *
+ * THE MEASUREMENT THAT FORCED THIS. That function's value class is
+ * `[A-Za-z0-9_.+=~-]{8,}` — code punctuation (`/`, `:`, `@`) excluded on
+ * purpose, which is what keeps `crypto.randomBytes(32` and `Map<string` out of
+ * the candidate set. For a URL-shaped secret it stops at the scheme:
+ *
+ *   DATABASE_URL=postgres://user:s3cretpassword@db.internal.example/app
+ *   → DATABASE_URL=<redacted>://user:s3cretpassword@db.internal.example/app
+ *
+ * The password shipped, and the `<redacted>` token sitting in the line made it
+ * look handled. `SENTRY_DSN=https://…` fared worse: `https` is five characters,
+ * under the length floor, so nothing matched at all. Connection strings and
+ * DSNs are among the most common things an operator puts in an `env:` block.
+ *
+ * Widening the shared pattern is not the fix — it would re-admit every code
+ * false positive that class was measured to remove. What makes a wider capture
+ * safe HERE is that the name is not a guess: the operator listed it.
+ *
+ * No regex is built from the names. They come from a settings file, and an
+ * alternation assembled out of them is an injection surface and a
+ * backtracking one; this scans with `indexOf` and walks forward by hand, which
+ * is linear and cannot be made to blow up.
+ */
+export function maskDeclaredAssignments(
+  str: string,
+  declaredSecretKeys: ReadonlySet<string>,
+): string {
+  if (declaredSecretKeys.size === 0) return str;
+  const haystack = str.toLowerCase();
+  /** [start, end) of each value to mask. Collected, then applied in order. */
+  const spans: Array<[number, number]> = [];
+
+  for (const key of declaredSecretKeys) {
+    if (key.length === 0) continue;
+    let from = 0;
+    for (;;) {
+      const at = haystack.indexOf(key, from);
+      if (at === -1) break;
+      from = at + key.length;
+
+      // The name must stand alone — `MY_DATABASE_URL` must not match a
+      // declared `DATABASE_URL`, or a short declared name would drag in every
+      // longer key that ends with it.
+      const before = at === 0 ? '' : str[at - 1];
+      if (before !== '' && /[A-Za-z0-9_]/.test(before)) continue;
+
+      let i = at + key.length;
+      // `NAME"` / `NAME'` — a quoted key in JSON or YAML.
+      if (str[i] === '"' || str[i] === "'") i += 1;
+      while (str[i] === ' ' || str[i] === '\t') i += 1;
+      if (str[i] !== '=' && str[i] !== ':') continue;
+      i += 1;
+      while (str[i] === ' ' || str[i] === '\t') i += 1;
+      const quote = str[i] === '"' || str[i] === "'" ? str[i] : '';
+      if (quote) i += 1;
+
+      // The value runs to the closing quote, or to whitespace when unquoted.
+      const start = i;
+      while (i < str.length) {
+        const ch = str[i];
+        if (quote ? ch === quote : /\s/.test(ch)) break;
+        i += 1;
+      }
+      // A comma or a trailing brace belongs to the surrounding JSON, not the
+      // value. Only for unquoted values — inside quotes they are value bytes.
+      let end = i;
+      if (!quote) while (end > start && /[,;}\]]/.test(str[end - 1])) end -= 1;
+
+      // Same floor as the shared masker: below it a "value" is a flag, not a
+      // credential (`DEBUG=1`, `TZ=UTC`).
+      if (end - start < 8) continue;
+      spans.push([start, end]);
+    }
+  }
+  if (spans.length === 0) return str;
+
+  // Overlapping spans would emit the token twice; sort and coalesce.
+  spans.sort((a, b) => a[0] - b[0]);
+  let out = '';
+  let cursor = 0;
+  for (const [start, end] of spans) {
+    if (start < cursor) continue;
+    out += str.slice(cursor, start) + REDACTED_TOKEN;
+    cursor = end;
+  }
+  return out + str.slice(cursor);
+}
+
+export function maskCredentialAssignments(
+  str: string,
+  /** `Cebab-en70`: lower-cased names the caller declared as secrets here. */
+  declaredSecretKeys?: ReadonlySet<string>,
+): string {
   CREDENTIAL_ASSIGNMENT.lastIndex = 0;
   /** [start, end) of each value to mask, in ascending order. */
   let spans: Array<[number, number]> | undefined;
@@ -552,14 +675,31 @@ export function maskCredentialAssignments(str: string): string {
     // past the NAME re-enters the same text one candidate later. Strictly
     // increasing (`name` is at least one character), so it cannot loop.
     CREDENTIAL_ASSIGNMENT.lastIndex = match.index + name.length;
-    if (!isSensitiveKey(name)) continue;
+    // `Cebab-en70`: the heuristic OR an exact declared name. Exact and
+    // case-insensitive — a substring rule would let a short declared name mask
+    // every assignment that merely contains it.
+    const declared = declaredSecretKeys?.has(name.toLowerCase()) === true;
+    if (!isSensitiveKey(name) && !declared) continue;
     // A sentence-final period is punctuation, not key material. Trailing dots
     // only — `=` stays, because it is base64 padding.
     let value = matched;
     while (value.endsWith('.')) value = value.slice(0, -1);
     if (value.length < 8) continue;
-    if (NON_CREDENTIAL_VALUES.has(value)) continue;
-    if (isDottedCodeReference(value)) continue;
+    // `Cebab-en70`: the two value-SHAPE heuristics below are guesses about
+    // whether something looks like a credential, and a declaration outranks a
+    // guess. They stay for keys matched by spelling alone, and are skipped for
+    // a key the operator explicitly listed in an `env:` block.
+    //
+    // Measured, and the reason this is not a style preference: with the shape
+    // checks applied to declared keys too, `SENTRY_DSN` and `MAPBOX_PK` were
+    // MISSED while `DATABASE_URL`, `OPENAI_ORG` and `STRIPE_PUBLISHABLE` were
+    // masked — because a Sentry DSN and a Mapbox token are dotted by
+    // construction and `isDottedCodeReference` reads them as `foo.bar.baz`
+    // module paths. Those two are exactly the names this option exists for.
+    if (!declared) {
+      if (NON_CREDENTIAL_VALUES.has(value)) continue;
+      if (isDottedCodeReference(value)) continue;
+    }
     const start = match.index + match[0].length - matched.length;
     (spans ??= []).push([start, start + value.length]);
     // Accepted: skip past the value so it is not re-scanned as a name.
@@ -685,6 +825,8 @@ type WalkScope = {
   /** `Cebab-6fax.32`: opt-in hook-output omission, threaded so `walk` needn't
    *  carry a second parameter through every recursion. */
   readonly omitHookOutput: boolean;
+  /** `Cebab-en70`: lower-cased declared env keys, or undefined when none. */
+  readonly declaredSecretKeys: ReadonlySet<string> | undefined;
 };
 
 function scopeHasSensitivePath(scope: WalkScope): boolean {
@@ -708,6 +850,10 @@ export function redactSensitive(payload: unknown, options: RedactOptions = {}): 
     root: payload,
     cached: undefined,
     omitHookOutput: options.omitHookOutput === true,
+    declaredSecretKeys:
+      options.declaredSecretKeys && options.declaredSecretKeys.length > 0
+        ? new Set(options.declaredSecretKeys.map((k) => k.toLowerCase()))
+        : undefined,
   };
   const redacted = walk(payload, '', 0, fields, scope);
   return { redacted, fields };
@@ -761,7 +907,15 @@ function walk(
     // string is credential-bearing, so it keeps masking wholesale; this rule
     // fires on the strings that carry a secret and nothing else to notice it by,
     // and masks the span so the transcript survives.
-    const spanMasked = maskCredentialAssignments(value);
+    // `Cebab-en70`: declared names first, taking whole values; then the shared
+    // heuristic for everything else. Order matters — the declared pass emits
+    // `<redacted>`, which the second pass then leaves alone (it is under no
+    // key it recognises), whereas running it second would find only the
+    // fragments the first pass already replaced.
+    const declaredMasked = scope.declaredSecretKeys
+      ? maskDeclaredAssignments(value, scope.declaredSecretKeys)
+      : value;
+    const spanMasked = maskCredentialAssignments(declaredMasked, scope.declaredSecretKeys);
     if (spanMasked !== value) {
       fields.push(path || ROOT_FIELD);
       return spanMasked;

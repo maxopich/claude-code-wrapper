@@ -17,6 +17,12 @@ import { mountAuthTokenRoute } from './auth_token_route.js';
 import { mountSessionLogExport } from './session_log_export.js';
 import { mountWebApp } from './static_web.js';
 import { getSession } from './repo/sessions.js';
+import { getProject } from './repo/projects.js';
+import {
+  declaredEnvKeys,
+  loadSettingsLayers,
+  trustDerivedScopes,
+} from './repo/project_authority.js';
 import { getMultiAgentSession } from './repo/multi_agent.js';
 import { startSessionPurgeCron } from './bulk_session_op.js';
 
@@ -152,6 +158,36 @@ function main(): void {
       const m = getMultiAgentSession(sid);
       if (m) return m.started_at;
       return null;
+    },
+    /**
+     * `Cebab-en70` [security]: the env-var NAMES this session's project
+     * declares in a settings `env:` block.
+     *
+     * Cebab already knows them, so the redactor can mask them by name instead
+     * of guessing from how they are spelled. That closes the class the spelling
+     * heuristic cannot see: `MAPBOX_PK`, `OPENAI_ORG`, `SENTRY_DSN`,
+     * `DATABASE_URL`.
+     *
+     * `declaredEnvKeys`, NOT `detectEnvInjections` — the obvious reuse and the
+     * wrong one. That function filters to credential-SHAPED names because its
+     * job is deciding what to prompt about, and the names it drops are precisely
+     * the ones the redactor already misses. Reusing it would have shipped a
+     * feature that helps only where help was not needed.
+     *
+     * Resolved against the project's CURRENT layers rather than what was
+     * declared when the session ran. That is the safe direction for a
+     * share-safe artifact: a key added since only widens what gets masked, and
+     * a key removed since stops being masked only because it is no longer
+     * declared anywhere. Multi-agent sids have no single project and get
+     * nothing, which leaves the spelling heuristic running as before.
+     */
+    getDeclaredSecretKeys: (sid: string): readonly string[] => {
+      const s = getSession(sid);
+      if (!s) return [];
+      const project = getProject(s.project_id);
+      if (!project) return [];
+      const layers = loadSettingsLayers(project.path, trustDerivedScopes(project.trusted === 1));
+      return declaredEnvKeys(layers);
     },
   });
 

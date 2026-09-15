@@ -180,7 +180,11 @@ export const exportFilename = sessionLogExportFilename;
  * line, and `parsed.type` on `null` THROWS — into the `catch` below, where it
  * would be misreported as "not JSON" and shipped verbatim.
  */
-export function redactJsonlLine(line: string): string | null {
+export function redactJsonlLine(
+  line: string,
+  /** `Cebab-en70`: env-var names this session's project declared as injected. */
+  declaredSecretKeys?: readonly string[],
+): string | null {
   if (line.length === 0) return line;
   try {
     const parsed: unknown = JSON.parse(line);
@@ -192,7 +196,13 @@ export function redactJsonlLine(line: string): string | null {
     // stderr, a `gcloud`/`aws` wrapper's stdout) — arbitrary program text that
     // is exactly where a non-vendor-shaped credential shows up. The full trace
     // stays in `format=raw`, which never reaches this function.
-    const { redacted } = redactSensitive(parsed, { omitHookOutput: true });
+    const { redacted } = redactSensitive(parsed, {
+      omitHookOutput: true,
+      // `Cebab-en70`: names the operator declared, masked exactly. The
+      // spelling heuristic below still runs — this only ADDS names it would
+      // have missed (`MAPBOX_PK`, `SENTRY_DSN`, `DATABASE_URL`).
+      ...(declaredSecretKeys && declaredSecretKeys.length > 0 && { declaredSecretKeys }),
+    });
     return JSON.stringify(redacted);
   } catch {
     return JSON.stringify({
@@ -210,6 +220,18 @@ export type ExportEndpointDeps = {
    * keeps the endpoint testable without a DB dependency.
    */
   getSessionStartMs?: (sessionId: string) => number | null;
+  /**
+   * `Cebab-en70` [security]: the env-var NAMES this session's project declares
+   * in a settings `env:` block, so the redactor masks them by name rather than
+   * by guessing from how they are spelled.
+   *
+   * Injected rather than imported for the same reason as the lookup above — it
+   * needs the DB and the settings layers, and this module stays testable
+   * without either. Absent or empty means "no declarations", which is the
+   * correct answer for a project with no env block and the safe default for a
+   * caller that has not wired it: the spelling heuristic still applies.
+   */
+  getDeclaredSecretKeys?: (sessionId: string) => readonly string[];
 };
 
 /**
@@ -430,6 +452,11 @@ export function mountSessionLogExport(app: Express, deps: ExportEndpointDeps = {
       return;
     }
 
+    // `Cebab-en70`: resolved ONCE for the export, not per line. It reads the
+    // project's settings layers, and a 100k-line log would otherwise re-read
+    // them 100k times to learn the same answer.
+    const declaredSecretKeys = deps.getDeclaredSecretKeys?.(sid);
+
     // Redacted path: line-by-line. `readline` handles CRLF + final-line
     // edge cases. Backpressure: pause the readline when `res.write`
     // returns false; resume on drain.
@@ -451,7 +478,7 @@ export function mountSessionLogExport(app: Express, deps: ExportEndpointDeps = {
     // and to fire `rl.resume()` once per listener when drain finally landed.
     let waitingForDrain = false;
     rl.on('line', (line: string) => {
-      const out = redactJsonlLine(line);
+      const out = redactJsonlLine(line, declaredSecretKeys);
       // `Cebab-ygu.47`: a dropped line is a NO-OP here and nothing else. It must
       // not touch `waitingForDrain`, pause/resume the readline, call `res.end()`
       // (`rl.on('close')` is the sole end — an early end on a trailing partial

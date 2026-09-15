@@ -1268,3 +1268,101 @@ describe('[security] hook output omitted from share surfaces (Cebab-6fax.32)', (
     expect(prose.fields).toEqual([]);
   });
 });
+
+/**
+ * Cebab-en70 [security]. `SENSITIVE_KEY_PATTERNS` is a heuristic over how a key
+ * is SPELLED — `*_API_KEY`, `*_TOKEN`, `*_SECRET`. It catches most credentials
+ * and misses the ones whose names do not advertise themselves. Widening the
+ * patterns is not the answer: every widening masks more ordinary text, and the
+ * list can never be finished.
+ *
+ * For an env block Cebab already knows the names — `detectEnvInjections` reads
+ * them out of the settings layers and the start gate shows them to the operator
+ * to acknowledge — so the caller can name them exactly and stop guessing.
+ */
+describe('[security] redactSensitive — declared env keys (Cebab-en70)', () => {
+  /** A share-safe export passes the names out of the project's `env:` block. */
+  const declared = ['DATABASE_URL', 'SENTRY_DSN', 'MAPBOX_PK', 'DEBUG'];
+  const mask = (text: string, keys: readonly string[] = declared): string =>
+    (redactSensitive({ text }, { declaredSecretKeys: keys }).redacted as { text: string }).text;
+
+  it('masks a key the spelling heuristic cannot see', () => {
+    const line = 'MAPBOX_PK=pk.eyJhbGciOiJIUzI1NiJ9.aaaaaaaaaaaaaaaa';
+    // The CONTROL first. Without it this passes on a redactor that masks
+    // everything — a different and worse defect than the one being fixed.
+    expect((redactSensitive({ text: line }).redacted as { text: string }).text).toBe(line);
+
+    const out = mask(line);
+    expect(out).not.toContain('eyJhbGciOiJIUzI1NiJ9');
+    // The NAME is not a secret and must survive: an operator reading a shared
+    // log still needs to know which key was present.
+    expect(out).toContain('MAPBOX_PK');
+    expect(out).toContain('<redacted>');
+  });
+
+  /**
+   * The measurement that shaped this. The shared masker's value class is
+   * `[A-Za-z0-9_.+=~-]{8,}` — code punctuation excluded on purpose — so on a
+   * URL-shaped secret it stopped at the scheme:
+   *
+   *   DATABASE_URL=<redacted>://user:<the password>@db.internal.example/app
+   *
+   * The password shipped, and the `<redacted>` token in the line made it look
+   * handled. That is the case this pair exists for, and a substring check for
+   * `<redacted>` would have declared it fixed.
+   */
+  it('takes the WHOLE value of a declared key, not the part that looks tidy', () => {
+    // Assembled at runtime, never written as a literal: a credential-shaped
+    // string in a source file is a secret-scanner finding whatever it really
+    // is (`project_secret_shaped_test_data`), and the sibling case in
+    // `session_log_export.test.ts` tripped gitleaks' generic-api-key rule on CI
+    // while the locally-installed version passed it.
+    const fakePassword = ['s3cret', 'password'].join('');
+    const out = mask(`DATABASE_URL=postgres://user:${fakePassword}@db.internal.example/app`);
+    expect(out).not.toContain(fakePassword);
+    expect(out).not.toContain('db.internal.example');
+    expect(out).toBe('DATABASE_URL=<redacted>');
+  });
+
+  it('masks a value the shared masker skips entirely', () => {
+    // `SENTRY_DSN=https://…` matched nothing before: `https` is five
+    // characters, under the length floor, so no candidate was ever formed.
+    const out = mask('SENTRY_DSN=https://abc123def456@o123456.ingest.sentry.io/7890123');
+    expect(out).toBe('SENTRY_DSN=<redacted>');
+  });
+
+  it('matches the name exactly, not as a suffix', () => {
+    // A declared `DATABASE_URL` must not drag in every longer key that ends
+    // with it — they are different variables and one was not declared.
+    const line = 'MY_DATABASE_URL=postgres://other:alsosecret@host/db';
+    expect(mask(line)).toBe(line);
+  });
+
+  it('is case-insensitive on the name', () => {
+    expect(mask('mapbox_pk=pk.eyJhbGciOiJIUzI1NiJ9.aaaaaaaaaaaaaaaa')).toContain('<redacted>');
+  });
+
+  it('leaves a short value alone — a flag is not a credential', () => {
+    // `DEBUG` is declared, and an env block legitimately holds flags. Below the
+    // length floor nothing is masked, so a declared-everything list does not
+    // turn the log into redaction tokens.
+    expect(mask('DEBUG=1')).toBe('DEBUG=1');
+  });
+
+  it('declared keys ADD to the heuristic rather than replacing it', () => {
+    // The likelier regression than a straight revert: a caller that declares
+    // one key must not lose the masking it already had for everything else.
+    const out = mask(
+      `file_path=/Users/x/src/index.ts AWS_SECRET_ACCESS_KEY=${['abcdefghij', 'klmnopqrst', 'uvwxyz'].join('')}`,
+    );
+    expect(out).toContain('/Users/x/src/index.ts');
+    expect(out).not.toContain('abcdefghijklmnop');
+  });
+
+  it('an empty or absent list changes nothing', () => {
+    const line = 'MAPBOX_PK=pk.eyJhbGciOiJIUzI1NiJ9.aaaaaaaaaaaaaaaa';
+    const base = redactSensitive({ text: line }).redacted;
+    expect(redactSensitive({ text: line }, { declaredSecretKeys: [] }).redacted).toEqual(base);
+    expect(redactSensitive({ text: line }, {}).redacted).toEqual(base);
+  });
+});
