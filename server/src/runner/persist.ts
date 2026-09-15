@@ -43,7 +43,14 @@ export async function persistMessage(
   const raw = JSON.stringify(msg);
   insertEvent(sessionId, seq, type, subtype, raw);
 
-  // bumpSession only on terminal events; partials already returned above.
+  // Bump the session's recency for every message that reaches the events table
+  // — partials already returned above. The line here used to read "bumpSession
+  // only on terminal events", which is what the `result` branch below looks
+  // like in isolation; the `else` bumps too, and has for as long as it has
+  // existed. `last_event_at` is what orders the sidebar, so bumping on every
+  // durable message is the correct behaviour and the comment was simply
+  // describing the wrong half. The distinction that IS real: only the `result`
+  // branch passes a cost delta.
   if (type === 'result') {
     // `total_cost_usd` is this INVOCATION's cost, not a running session total:
     // it equals `sum(modelUsage[*].costUSD)`, and those are per-invocation
@@ -68,4 +75,55 @@ export async function persistMessage(
   }
 
   return seq;
+}
+
+/**
+ * Persist the operator's own message for a single-agent turn (`Cebab-4baz`).
+ *
+ * WHY THIS HAS TO EXIST. Nothing else writes it. The typed prompt reaches the
+ * spawn and an in-memory map (`Conn.capturedPrompts`, which exists for the
+ * rate-limit retry) and stops there — the CLI does not echo it back, because an
+ * SDK `user` message carries TOOL RESULTS, not the prompt. Measured on a real
+ * two-turn session: zero rows and zero JSONL lines contained the prompt text.
+ *
+ * The consequence is a record-keeping one rather than a capability one. The
+ * model keeps full context through `--resume`, so the conversation continues
+ * correctly; but the user bubble existed only in browser memory, so a page
+ * reload, a new tab, or opening a session the client had not already loaded
+ * rebuilt the transcript from persisted rows — and a long conversation reopened
+ * as a monologue.
+ *
+ * IT IS WRITTEN AS `type: 'user'`, NOT AS A WRAPPER SUBTYPE. `translate()`
+ * already has a `user` case that produces the `user_message` ServerMsg, and the
+ * web store already renders it, so replay works with no new code on either
+ * side. That reuse is the point: a bespoke `wrapper/operator_prompt` would have
+ * needed its own translate case, its own client branch, and its own way of
+ * being forgotten by the next reader of either.
+ *
+ * `cebabOrigin` marks the row as Cebab-authored. Nothing reads it today, and it
+ * is here for the day the CLI starts echoing prompts itself — at which point
+ * replay would show each message twice, and the marker is what lets the
+ * duplicate be identified rather than guessed at.
+ *
+ * NOT SENT LIVE, deliberately. The client renders its own bubble the moment the
+ * operator hits send; echoing this back would double it. Persisting only means
+ * it appears exactly where the gap was — on replay.
+ */
+export async function persistOperatorPrompt(
+  sessionId: string,
+  text: string,
+  uuid: string,
+  onLogFailure?: (reason: LogFailureReason) => void,
+): Promise<number | null> {
+  return persistMessage(
+    sessionId,
+    {
+      type: 'user',
+      session_id: sessionId,
+      uuid,
+      message: { role: 'user', content: text },
+      cebabOrigin: 'operator_prompt',
+    } as never,
+    onLogFailure,
+  );
 }
