@@ -66,18 +66,49 @@ describe('ModelIdentityCard', () => {
     });
     const text = container.textContent ?? '';
     expect(text).toContain('claude-sonnet-4-5');
-    expect(text).toContain('OAuth subscription'); // apiKeySource=none label
+    expect(text).toContain('no API key reported'); // apiKeySource=none label
     expect(text).toContain('default'); // permissionMode
     expect(text).toContain('/u/proj'); // cwd
   });
 
-  test('apiKeySource=none uses ok posture class', () => {
+  /**
+   * Cebab-ujth. This pair used to assert the defect: `'none'` rendered as
+   * "OAuth subscription (no key on wire)" with the ok tint. The SDK's own doc
+   * for the field says `'none'` means "no API key in use - e.g. claude.ai OAuth
+   * login, a bearer token, or a third-party cloud provider", so the row was
+   * asserting a subscription in exactly the cases where a bearer token or a
+   * Bedrock/Vertex backend was in play.
+   *
+   * Rewritten rather than deleted: the question each one asks — what does this
+   * row say, and how is it tinted — is still the right question. Only the
+   * expected answer was wrong.
+   */
+  test('apiKeySource=none reports what was measured and claims no channel', () => {
     act(() => {
       root.render(<ModelIdentityCard authority={mkAuthority({ apiKeySource: 'none' })} />);
     });
-    const dd = container.querySelector('.model-identity-key-ok');
+    const dd = container.querySelector('.model-identity-key-neutral');
     expect(dd).not.toBeNull();
-    expect(dd?.textContent).toContain('OAuth');
+    const text = dd?.textContent ?? '';
+    // It must name all three possibilities rather than pick one.
+    expect(text).toContain('no API key reported');
+    expect(text).toContain('bearer token');
+    expect(text).toContain('third-party backend');
+    // And the retracted claim must be gone — this is the assertion that
+    // reddens if the affirmative wording comes back.
+    expect(container.textContent ?? '').not.toContain('OAuth subscription');
+  });
+
+  test('apiKeySource=none is not tinted as a good outcome', () => {
+    // The anti-vacuity control for the wording above. A label that reads
+    // honestly while still carrying the ok-green tint tells the skimming
+    // operator the opposite of what it says, and the tint is what most people
+    // actually read on this row.
+    act(() => {
+      root.render(<ModelIdentityCard authority={mkAuthority({ apiKeySource: 'none' })} />);
+    });
+    expect(container.querySelector('.model-identity-key-ok')).toBeNull();
+    expect(container.querySelector('.model-identity-key-warn')).toBeNull();
   });
 
   test('apiKeySource=ANTHROPIC_API_KEY uses warn posture class', () => {

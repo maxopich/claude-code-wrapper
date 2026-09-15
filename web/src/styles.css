@@ -8645,6 +8645,13 @@ pre {
   color: var(--warn-ink);
   font-weight: 600;
 }
+/* Cebab-ujth: `none` is not a good answer or a bad one — it is the absence of
+   an API key, which is consistent with a subscription, a bearer token and a
+   third-party backend alike. It gets the neutral ink the permission row's
+   default state uses, not the ok green it used to borrow. */
+.model-identity-key-neutral {
+  color: var(--fg-1);
+}
 .model-identity-muted {
   color: var(--fg-2);
   font-style: italic;

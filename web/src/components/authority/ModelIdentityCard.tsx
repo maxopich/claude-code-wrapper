@@ -6,10 +6,14 @@ import type { ProjectAuthority } from '@cebab/shared/protocol';
 // The four fields are the operator's at-a-glance answer to "what model is
 // this, and does my Anthropic token leak through?":
 //   - model            — exact SDK-reported model id (sonnet-4-5, opus-4, etc.)
-//   - apiKeySource     — 'none' (subscription via OAuth) vs anything else
-//                        (= a token is in play, which Cebab specifically
-//                        scrubs in subscriptionOnlyEnv but can leak through
-//                        a trusted-project `env:` injection — see Phase 5
+//   - apiKeySource     — a NAMED source means an API key is in use; 'none'
+//                        means no API KEY is, which is consistent with the
+//                        subscription, with a bearer token, and with a
+//                        third-party backend alike (Cebab-ujth — this line
+//                        used to read "'none' (subscription via OAuth)", and
+//                        the card said so out loud). Cebab scrubs the
+//                        credential names in subscriptionOnlyEnv but cannot
+//                        reach a settings-file `env:` injection — see Phase 5
 //                        env gate). Highlighted amber when NOT 'none'.
 //   - permissionMode   — 'default' / 'acceptEdits' / 'bypassPermissions' /
 //                        'plan' — the runtime auth posture the SDK loaded
@@ -42,13 +46,43 @@ function permPostureClass(mode?: string): string {
   return 'model-identity-perm-default';
 }
 
+/**
+ * Cebab-ujth: `'none'` IS NOT EVIDENCE OF A SUBSCRIPTION.
+ *
+ * This row used to render `'none'` as `OAuth subscription (no key on wire)`,
+ * tinted ok. That reads as an affirmative answer to the one question the row
+ * exists for — am I running on my subscription, or is a credential on the wire
+ * — and it is an answer the field cannot give. The SDK's own type doc says so:
+ *
+ *   'none' (no API key in use - e.g. claude.ai OAuth login, a bearer token, or
+ *   a third-party cloud provider)
+ *
+ * So a bearer token (`ANTHROPIC_AUTH_TOKEN`), a setup token
+ * (`CLAUDE_CODE_OAUTH_TOKEN`) and every third-party backend (Bedrock / Vertex /
+ * Foundry, selected by a `CLAUDE_CODE_USE_*` switch) all report `'none'` as
+ * well — because none of them is an API KEY. The row asserted "subscription"
+ * in precisely the cases where it was not one.
+ *
+ * That is reachable by an edit to a file the operator is likely to be editing:
+ * a `~/.claude/settings.json` `env` block applies to every project regardless
+ * of Trust, and Cebab cannot scrub a file (`Cebab-rgkt`).
+ *
+ * The row now reports what was measured and stops there. Distinguishing the
+ * three cases needs the resolved auth channel, which `system/init` does not
+ * carry; inferring it from the absence of a key is what produced the wrong
+ * answer.
+ */
 function apiKeySourcePostureClass(src?: string): string {
-  if (!src || src === 'none') return 'model-identity-key-ok';
+  if (!src) return 'model-identity-muted';
+  // A named key source means a credential IS in use, whatever it is.
+  if (src === 'none') return 'model-identity-key-neutral';
   return 'model-identity-key-warn';
 }
 
 function apiKeySourceLabel(src?: string): string {
-  if (!src || src === 'none') return 'OAuth subscription (no key on wire)';
+  if (!src) return '(unknown — init not received yet)';
+  if (src === 'none')
+    return 'no API key reported (subscription, bearer token or third-party backend — not distinguished)';
   return src;
 }
 
