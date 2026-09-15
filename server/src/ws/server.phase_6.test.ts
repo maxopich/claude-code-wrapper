@@ -290,3 +290,54 @@ describe('[security] the rate-limit banner reads the shared predicate (Cebab-mo7
     expect(guard).toContain('isRateLimited(');
   });
 });
+
+/**
+ * Cebab-qz7m: a SOURCE scan, for the same reason as the rate-limit one above —
+ * the saving is invisible to any behavioural test reachable from here.
+ *
+ * `gateProjectsForSpawn` reads three fields of the resolved authority
+ * (`mcpServers`, `detectedEnvInjections`, `hooks`) and discards `tools`. The
+ * usage tally decorates `tools` only, so skipping it changes nothing the gate
+ * returns — which is exactly why it was free to be wasteful, and exactly why no
+ * assertion on the gate's OUTPUT can notice if the skip is removed.
+ *
+ * What it cost, measured synthetically at realistic row sizes: 16 ms at 10k
+ * events, 150 ms at 100k, 281 ms at 200k — synchronous, before every message,
+ * growing with how long the project had been used.
+ */
+describe('[security] the pre-spawn gate does not pay for a tally it discards (Cebab-qz7m)', () => {
+  const raw = readFileSync(new URL('./server.ts', import.meta.url), 'utf8');
+  const code = raw
+    .replace(/\/\*[\s\S]*?\*\//g, (m) => ' '.repeat(m.length))
+    .replace(/(^|[^:])\/\/[^\n]*/g, (m, p1) => p1 + ' '.repeat(m.length - p1.length));
+
+  test('the stripper leaves the code it is supposed to scan', () => {
+    // Same fail-open hazard as the scan above: a stripper returning empty
+    // satisfies every assertion below while measuring nothing.
+    expect(code).toContain('resolveProjectAuthority(');
+    expect(code.length).toBeGreaterThan(raw.length / 2);
+  });
+
+  test("the gate's resolve passes toolUsage: 'skip'", () => {
+    // Anchor on the gate's own call, not on "the file contains the string" —
+    // the panel's resolve is in the same file and must NOT carry it.
+    const at = code.indexOf('reportHookObservations(');
+    expect(at).toBeGreaterThan(-1);
+    // Walk back to the resolve that produced the authority this line reads.
+    const before = code.slice(0, at);
+    const resolveAt = before.lastIndexOf('resolveProjectAuthority({');
+    expect(resolveAt).toBeGreaterThan(-1);
+    const call = before.slice(resolveAt, before.indexOf('});', resolveAt));
+    expect(call).toContain("toolUsage: 'skip'");
+  });
+
+  test('the panel resolve does NOT skip the tally', () => {
+    // The other direction, and the one that matters if someone "optimises"
+    // further: the usage-diff columns are the tally's only reader, and a panel
+    // that skipped it would render them empty — a wrong answer, not a slow one.
+    const panelAt = code.lastIndexOf('resolveProjectAuthority({');
+    expect(panelAt).toBeGreaterThan(-1);
+    const panelCall = code.slice(panelAt, code.indexOf('});', panelAt));
+    expect(panelCall).not.toContain("toolUsage: 'skip'");
+  });
+});

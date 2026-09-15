@@ -539,6 +539,52 @@ describe('resolveProjectAuthority (BE-B3) — merge cached init + file scans', (
    * affordance that answers "which of these is actually giving me anything" on
    * a project with a dozen of them.
    */
+  /**
+   * Cebab-qz7m. `tallyToolUsage` walks every assistant row and every permission
+   * wrapper row across every session of the project and JSON.parses each,
+   * synchronously — measured at ~1.4 us per event, so 150 ms at 100k events and
+   * 281 ms at 200k.
+   *
+   * The pre-spawn gate resolves before EVERY message and reads exactly three
+   * fields of the result. It never touches `tools`, so the whole walk was
+   * waste, paid per message, growing with how long the project had been used.
+   */
+  test('toolUsage: skip leaves the counts off, and the default still fills them', () => {
+    const sid = 'sess-tally';
+    createSession(sid, projectId);
+    insertEvent(
+      sid,
+      nextSeq(sid),
+      'assistant',
+      null,
+      JSON.stringify({
+        type: 'assistant',
+        message: { content: [{ type: 'tool_use', id: 'tu1', name: 'Read', input: {} }] },
+      }),
+    );
+
+    const withTally = resolveProjectAuthority({
+      projectId,
+      mode: 'cache',
+      latestSessionStarted: { tools: ['Read'] },
+    })!;
+    // The control FIRST: without it, "skip returns no counts" is satisfied by a
+    // tally that never worked, and this test would pass on a broken resolver.
+    expect(withTally.tools.find((t) => t.name === 'Read')?.calledCount).toBe(1);
+
+    const skipped = resolveProjectAuthority({
+      projectId,
+      mode: 'cache',
+      toolUsage: 'skip',
+      latestSessionStarted: { tools: ['Read'] },
+    })!;
+    expect(skipped.tools.find((t) => t.name === 'Read')?.calledCount).toBeUndefined();
+    // Everything else the gate DOES read must be unaffected — skipping the
+    // tally must not quietly thin the rest of the answer.
+    expect(skipped.tools.map((t) => t.name)).toEqual(['Read']);
+    expect(skipped.settingSourcesUsed).toEqual(withTally.settingSourcesUsed);
+  });
+
   test('per-server tool lists are attributed from the session snapshot (Cebab-as7x)', () => {
     fs.writeFileSync(
       path.join(projectPath, '.mcp.json'),

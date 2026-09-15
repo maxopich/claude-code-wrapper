@@ -2766,6 +2766,12 @@ export async function gateProjectsForSpawn(
       projectId,
       mode: 'cache',
       settingSources: scopes,
+      // `Cebab-qz7m`: this path reads `mcpServers`, `detectedEnvInjections` and
+      // `hooks` below, and nothing else. The usage tally decorates `tools`,
+      // which is discarded here — a synchronous walk of every event row of
+      // every session of the project, before every message, measured at 150 ms
+      // on a 100k-event project and growing linearly.
+      toolUsage: 'skip',
       ...(cached !== undefined && { latestSessionStarted: cached }),
     });
     if (!authority) continue;
