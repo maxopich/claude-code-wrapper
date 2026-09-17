@@ -617,7 +617,18 @@ function ruleTargetTool(rule: string): string {
  */
 function ruleIsUnevaluatable(target: string, toolName: string): boolean {
   if (target === toolName) return false;
-  if (target.includes('*')) return true;
+  const star = target.indexOf('*');
+  if (star !== -1) {
+    // RELEVANCE, still not evaluation. Everything before the first `*` must be
+    // a literal prefix of the tool name — a necessary condition under ANY
+    // semantics where `*` stands for a run of characters, so applying it
+    // decides nothing the CLI might decide differently. Without it, one
+    // wildcard rule anywhere made EVERY tool report "cannot decide":
+    // `mcp__slack__*` flagged `Read` and `Bash`, `mcp__*` flagged `Read`. That
+    // trades a wrong answer on a few rows for a non-answer on all of them,
+    // which is not what "silence beats a confident wrong answer" licenses.
+    return toolName.startsWith(target.slice(0, star));
+  }
   return target.startsWith('mcp__') && toolName.startsWith(`${target}__`);
 }
 

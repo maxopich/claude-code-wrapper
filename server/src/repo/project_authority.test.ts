@@ -281,6 +281,44 @@ describe('resolveToolAuthority (BE-B7) — allow/deny attribution', () => {
       ]);
       expect(coincidental.unevaluatedRules).toBeUndefined();
     });
+
+    test('a wildcard that cannot cover the tool is NOT unevaluated — one glob must not blank the whole panel', () => {
+      // The relevance half, and it is the half that decides whether this
+      // feature is usable. `*` stands for a run of characters, so everything
+      // before the first `*` has to be a literal prefix of the tool name for
+      // the rule to have any chance of covering it. Without that condition a
+      // single unrelated glob anywhere in the operator's settings turned EVERY
+      // row into "cannot decide" — measured: `mcp__slack__*` flagged `Read` and
+      // `Bash`, and `mcp__*` flagged `Read`. Trading a wrong answer on a few
+      // rows for a non-answer on all of them is not an improvement.
+      const otherServer = resolveToolAuthority('mcp__github__create_issue', [
+        fixtureLayer('user', { permissions: { allow: ['mcp__slack__*'] } }),
+      ]);
+      expect(otherServer.unevaluatedRules).toBeUndefined();
+
+      // A built-in tool is untouched by an MCP-wide glob, and by another
+      // built-in's glob.
+      for (const rule of ['mcp__*', 'mcp__slack__*', 'Bash*']) {
+        const builtin = resolveToolAuthority('Read', [
+          fixtureLayer('user', { permissions: { allow: [rule] } }),
+        ]);
+        expect(builtin.unevaluatedRules).toBeUndefined();
+      }
+
+      // POSITIVE control, folded in so the case cannot pass by the resolver
+      // simply never attaching the field: the same glob against a tool it CAN
+      // cover is still reported.
+      const covered = resolveToolAuthority('mcp__slack__post_message', [
+        fixtureLayer('user', { permissions: { allow: ['mcp__slack__*'] } }),
+      ]);
+      expect(covered.unevaluatedRules).toEqual([{ rule: 'mcp__slack__*', scope: 'user' }]);
+
+      // And the server-wide glob does cover an MCP tool.
+      const wide = resolveToolAuthority('mcp__github__create_issue', [
+        fixtureLayer('user', { permissions: { deny: ['mcp__*'] } }),
+      ]);
+      expect(wide.unevaluatedRules).toEqual([{ rule: 'mcp__*', scope: 'user' }]);
+    });
   });
 });
 
