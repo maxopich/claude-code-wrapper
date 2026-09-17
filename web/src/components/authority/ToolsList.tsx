@@ -263,12 +263,23 @@ export function ToolsList(props: ToolsListProps) {
         ) : (
           filtered.map((t, idx) => {
             const risk = classifyRisk(t);
+            // Cebab-0viu: the resolver matched no rule by exact equality, but a
+            // rule it does NOT evaluate (a glob, or the bare-server form
+            // `mcp__<server>`) mentions this tool. Cebab cannot say whether the
+            // CLI would admit or refuse it, so this row must not assert "not
+            // allowed" nor wear the unavailable badge. `!allowed && !denied` is
+            // what keeps a tool an exact rule already settled out of this case.
+            const cannotDecide = !!t.unevaluatedRules && !t.allowed && !t.denied;
             const isEffectivelyUnavailable =
-              !t.allowed ||
-              t.denied ||
-              (t.source === 'mcp' && t.mcpServer ? needsAuthServers.has(t.mcpServer) : false);
-            const reason =
-              t.denied && t.rulingScope !== 'default'
+              !cannotDecide &&
+              (!t.allowed ||
+                t.denied ||
+                (t.source === 'mcp' && t.mcpServer ? needsAuthServers.has(t.mcpServer) : false));
+            const reason = cannotDecide
+              ? `cannot decide — a rule Cebab does not evaluate may match: ${t
+                  .unevaluatedRules!.map((r) => `${r.rule} (${r.scope})`)
+                  .join(', ')}`
+              : t.denied && t.rulingScope !== 'default'
                 ? `denied (scope: ${t.rulingScope})`
                 : t.denied
                   ? 'denied (no visible rule — SDK default deny)'

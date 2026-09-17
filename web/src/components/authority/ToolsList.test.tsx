@@ -159,6 +159,71 @@ describe('ToolsList — rendering', () => {
   });
 });
 
+describe('ToolsList — Cebab-0viu cannot-decide (unevaluated rules)', () => {
+  // A tool matched only by a rule Cebab does not evaluate (`mcp__github__*`)
+  // arrives allowed=false, denied=false with the rule strings on
+  // `unevaluatedRules`. That row must NOT assert "not allowed" and must NOT wear
+  // the unavailable badge — it must say it cannot decide. A second tool with the
+  // SAME allowed=false shape but NO unevaluatedRules is the control, rendered in
+  // the same list: it must keep the old badge + "not allowed". Both live in one
+  // test so the control cannot pass vacuously on the pre-change component — the
+  // cannot-decide assertions redden it there.
+  test('a cannot-decide row drops the badge and says so; an unruled tool still does not', () => {
+    act(() => {
+      root.render(
+        <ToolsList
+          tools={[
+            mkTool({
+              name: 'mcp__github__create_issue',
+              source: 'mcp',
+              mcpServer: 'github',
+              allowed: false,
+              denied: false,
+              rulingScope: 'default',
+              unevaluatedRules: [{ rule: 'mcp__github__*', scope: 'project' }],
+            }),
+            mkTool({
+              name: 'mcp__gitlab__create_mr',
+              source: 'mcp',
+              mcpServer: 'gitlab',
+              allowed: false,
+              denied: false,
+              rulingScope: 'default',
+            }),
+          ]}
+          mcpServers={[]}
+        />,
+      );
+    });
+    const rows = Array.from(container.querySelectorAll<HTMLDetailsElement>('details.tool-row'));
+    const rowFor = (name: string) =>
+      rows.find((r) => r.querySelector('.tool-row-name')?.textContent === name)!;
+
+    // The cannot-decide row: badge suppressed even though allowed=false.
+    const undecided = rowFor('mcp__github__create_issue');
+    expect(undecided.querySelector('.tool-row-unavailable-badge')).toBeNull();
+    expect(undecided.className).not.toContain('tool-row-unavailable');
+    act(() => {
+      undecided.open = true;
+    });
+    const undecidedReason = undecided.querySelector('.tool-row-reason')?.textContent ?? '';
+    expect(undecidedReason).not.toContain('not allowed');
+    expect(undecidedReason).toContain('cannot decide');
+    // The offending rule is named so the operator can find it.
+    expect(undecidedReason).toContain('mcp__github__*');
+
+    // Control folded in: a genuinely-unruled tool (no unevaluatedRules) keeps
+    // the old behaviour — the cannot-decide path must not swallow a real no-rule
+    // tool.
+    const unruled = rowFor('mcp__gitlab__create_mr');
+    expect(unruled.querySelector('.tool-row-unavailable-badge')).not.toBeNull();
+    act(() => {
+      unruled.open = true;
+    });
+    expect(unruled.querySelector('.tool-row-reason')?.textContent).toContain('not allowed');
+  });
+});
+
 describe('ToolsList — search (UI-B11 debounced)', () => {
   test('filtering by name narrows the list after debounce', () => {
     vi.useFakeTimers();

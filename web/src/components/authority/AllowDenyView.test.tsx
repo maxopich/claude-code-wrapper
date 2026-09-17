@@ -142,6 +142,31 @@ describe('AllowDenyView', () => {
     }
   });
 
+  test('Cebab-0viu: a tool matched only by an unevaluated rule surfaces a note, not silence', () => {
+    // allowed=false, denied=false → dropped from both panes. Before this the
+    // view said nothing while the Tools section showed "cannot decide"; now the
+    // note names the rule so the two surfaces agree.
+    act(() => {
+      root.render(
+        <AllowDenyView
+          tools={[
+            mk({
+              name: 'mcp__github__create_issue',
+              allowed: false,
+              denied: false,
+              rulingScope: 'default',
+              unevaluatedRules: [{ rule: 'mcp__github__*', scope: 'project' }],
+            }),
+          ]}
+        />,
+      );
+    });
+    const note = container.querySelector('.allow-deny-unevaluated-note');
+    expect(note).not.toBeNull();
+    expect(note?.textContent).toContain('mcp__github__*');
+    expect(note?.textContent).toContain('Cannot decide');
+  });
+
   test('rows sort alphabetically inside each pane', () => {
     act(() => {
       root.render(

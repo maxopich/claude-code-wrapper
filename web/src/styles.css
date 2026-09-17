@@ -9225,6 +9225,16 @@ pre {
   border-top: 1px solid var(--line-3);
 }
 
+/* Cebab-0viu: whole-view note for tools matched only by a rule Cebab cannot
+   evaluate — spans both panes because such a rule may be allow OR deny. */
+.allow-deny-unevaluated-note {
+  flex-basis: 100%;
+  padding: 6px 10px;
+  font-size: var(--t-xs);
+  color: var(--fg-2);
+  font-style: italic;
+}
+
 /* ---- EnvScrubInspector ---- */
 .env-scrub-empty {
   padding: 12px;

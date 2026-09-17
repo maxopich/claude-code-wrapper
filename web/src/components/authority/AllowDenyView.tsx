@@ -50,10 +50,17 @@ const SCOPE_CHIP_CLASS: Record<ToolView['rulingScope'], string> = {
 
 export function AllowDenyView(props: { tools: ToolView[] }) {
   const { tools } = props;
-  const { allowRows, denyRows, defaultDenyCount } = useMemo(() => {
+  const { allowRows, denyRows, defaultDenyCount, unevaluatedNote } = useMemo(() => {
     const allow: ToolView[] = [];
     const deny: ToolView[] = [];
     let dflt = 0;
+    // Cebab-0viu: a tool matched only by a rule Cebab does not evaluate (a
+    // glob, or the bare-server form `mcp__<server>`) is neither denied nor an
+    // explicit allow, so it falls out of BOTH panes above. Left unmentioned,
+    // this view would silently disagree with the Tools section, which now shows
+    // that row as "cannot decide". Surface the same fact here as a note naming
+    // the rules, rather than dropping the row on the floor.
+    const unevaluatedRuleStrings = new Set<string>();
     for (const t of tools) {
       if (t.denied) {
         deny.push(t);
@@ -62,12 +69,18 @@ export function AllowDenyView(props: { tools: ToolView[] }) {
         // Only explicit allows — implicit/default allows aren't a "rule" the
         // operator configured.
         allow.push(t);
+      } else if (t.unevaluatedRules) {
+        for (const r of t.unevaluatedRules) unevaluatedRuleStrings.add(`${r.rule} (${r.scope})`);
       }
     }
     // Stable alpha sort for both panes.
     allow.sort((a, b) => a.name.localeCompare(b.name));
     deny.sort((a, b) => a.name.localeCompare(b.name));
-    return { allowRows: allow, denyRows: deny, defaultDenyCount: dflt };
+    const note =
+      unevaluatedRuleStrings.size > 0
+        ? `Cannot decide for rules Cebab does not evaluate: ${[...unevaluatedRuleStrings].sort().join(', ')} — see Tools section for per-tool detail.`
+        : undefined;
+    return { allowRows: allow, denyRows: deny, defaultDenyCount: dflt, unevaluatedNote: note };
   }, [tools]);
 
   return (
@@ -83,6 +96,7 @@ export function AllowDenyView(props: { tools: ToolView[] }) {
             : undefined
         }
       />
+      {unevaluatedNote && <div className="allow-deny-unevaluated-note">{unevaluatedNote}</div>}
     </div>
   );
 }
