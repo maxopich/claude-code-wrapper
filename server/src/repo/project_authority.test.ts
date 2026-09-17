@@ -225,6 +225,101 @@ describe('resolveToolAuthority (BE-B7) — allow/deny attribution', () => {
     expect(out.source).toBe('cebab-injected');
     expect(out.mcpServer).toBe('cebab_bus');
   });
+
+  // ---- Cebab-0viu: rules Cebab does not evaluate ----
+  //
+  // `resolveToolAuthority` matches a rule against a tool by EXACT string
+  // equality (`ruleTargetTool`), so a wildcard allow like `mcp__github__*` — the
+  // normal way to admit one server's whole toolset — matches nothing, and the
+  // panel then asserted the tool was "not allowed" / unavailable. It must
+  // instead say it CANNOT DECIDE, and the resolver surfaces that by carrying the
+  // unmatched rule strings on `unevaluatedRules` (absent when nothing skipped).
+  //
+  // Each case pairs a POSITIVE (the field IS attached) with its ABSENT control
+  // in one test on purpose: the control alone passes on the pre-change resolver
+  // (which never attaches the field), so keeping it as its own case would make
+  // that case a vacuous green. Folded in beside a positive that reddens on the
+  // pre-change code, the anti-vacuity assertion still runs and the whole case is
+  // a behavioural detector.
+  describe('Cebab-0viu — unevaluated (wildcard / bare-server) rules', () => {
+    test('a wildcard allow is unevaluated, an exact-match allow is not (absent, not [])', () => {
+      const wildcard = resolveToolAuthority('mcp__github__create_issue', [
+        fixtureLayer('project', { permissions: { allow: ['mcp__github__*'] } }),
+      ]);
+      // Exact equality did not match, so Cebab has no allow/deny of its own,
+      // but the rule is surfaced as one Cebab could not evaluate, with its scope.
+      expect(wildcard.allowed).toBe(false);
+      expect(wildcard.denied).toBe(false);
+      expect(wildcard.unevaluatedRules).toEqual([{ rule: 'mcp__github__*', scope: 'project' }]);
+
+      // ABSENT control, folded in: an EXACT-match rule for the same tool settles
+      // it by equality, so the field must stay off entirely — not `[]`. Pins the
+      // wire contract against a resolver that always attaches the field.
+      const exact = resolveToolAuthority('mcp__github__create_issue', [
+        fixtureLayer('project', { permissions: { allow: ['mcp__github__create_issue'] } }),
+      ]);
+      expect(exact.allowed).toBe(true);
+      expect(exact.unevaluatedRules).toBeUndefined();
+    });
+
+    test('the bare-server form is unevaluated, a coincidental prefix is not', () => {
+      // `mcp__github` carries no `*`, but the CLI documents it as the admit-the-
+      // whole-server form; it is an `mcp__`-prefixed proper prefix of the tool
+      // name, which exact equality cannot settle.
+      const bareServer = resolveToolAuthority('mcp__github__create_issue', [
+        fixtureLayer('user', { permissions: { allow: ['mcp__github'] } }),
+      ]);
+      expect(bareServer.allowed).toBe(false);
+      expect(bareServer.denied).toBe(false);
+      expect(bareServer.unevaluatedRules).toEqual([{ rule: 'mcp__github', scope: 'user' }]);
+
+      // ABSENT control, folded in: `mcp__git` is a string prefix of the tool
+      // name but not the server boundary, so it is NOT the documented bare-server
+      // form and must stay off — being too wide is its own bug.
+      const coincidental = resolveToolAuthority('mcp__github__create_issue', [
+        fixtureLayer('user', { permissions: { allow: ['mcp__git'] } }),
+      ]);
+      expect(coincidental.unevaluatedRules).toBeUndefined();
+    });
+
+    test('a wildcard that cannot cover the tool is NOT unevaluated — one glob must not blank the whole panel', () => {
+      // The relevance half, and it is the half that decides whether this
+      // feature is usable. `*` stands for a run of characters, so everything
+      // before the first `*` has to be a literal prefix of the tool name for
+      // the rule to have any chance of covering it. Without that condition a
+      // single unrelated glob anywhere in the operator's settings turned EVERY
+      // row into "cannot decide" — measured: `mcp__slack__*` flagged `Read` and
+      // `Bash`, and `mcp__*` flagged `Read`. Trading a wrong answer on a few
+      // rows for a non-answer on all of them is not an improvement.
+      const otherServer = resolveToolAuthority('mcp__github__create_issue', [
+        fixtureLayer('user', { permissions: { allow: ['mcp__slack__*'] } }),
+      ]);
+      expect(otherServer.unevaluatedRules).toBeUndefined();
+
+      // A built-in tool is untouched by an MCP-wide glob, and by another
+      // built-in's glob.
+      for (const rule of ['mcp__*', 'mcp__slack__*', 'Bash*']) {
+        const builtin = resolveToolAuthority('Read', [
+          fixtureLayer('user', { permissions: { allow: [rule] } }),
+        ]);
+        expect(builtin.unevaluatedRules).toBeUndefined();
+      }
+
+      // POSITIVE control, folded in so the case cannot pass by the resolver
+      // simply never attaching the field: the same glob against a tool it CAN
+      // cover is still reported.
+      const covered = resolveToolAuthority('mcp__slack__post_message', [
+        fixtureLayer('user', { permissions: { allow: ['mcp__slack__*'] } }),
+      ]);
+      expect(covered.unevaluatedRules).toEqual([{ rule: 'mcp__slack__*', scope: 'user' }]);
+
+      // And the server-wide glob does cover an MCP tool.
+      const wide = resolveToolAuthority('mcp__github__create_issue', [
+        fixtureLayer('user', { permissions: { deny: ['mcp__*'] } }),
+      ]);
+      expect(wide.unevaluatedRules).toEqual([{ rule: 'mcp__*', scope: 'user' }]);
+    });
+  });
 });
 
 // ---- detectEnvInjections ----

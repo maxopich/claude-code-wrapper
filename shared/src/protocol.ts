@@ -4123,6 +4123,23 @@ export type ToolView = {
   rulingScope: 'user' | 'project' | 'local' | 'default';
   calledCount?: number;
   deniedCount?: number;
+  /**
+   * `Cebab-0viu`: `permissions.allow` / `.deny` entries that MENTION this tool
+   * but that Cebab does not evaluate — so it cannot say whether the CLI's own
+   * matcher admits or refuses the call. The resolver matches a rule against a
+   * tool by exact string equality (`ruleTargetTool`), which a glob
+   * (`mcp__github__*`, `mcp__*`) or the documented bare-server form
+   * `mcp__<server>` never satisfies even when the CLI would. Reimplementing the
+   * CLI's glob semantics is deliberately out of scope; a guessed glob would
+   * agree with itself and could be wrong. Instead the panel reports "cannot
+   * decide" rather than asserting "not allowed" — each entry names the rule
+   * string and the scope it came from so the copy can quote them.
+   *
+   * ABSENT — not `false`, not `[]` — when every rule was settled by exact
+   * equality, so a pre-existing row (nothing to report) stays distinguishable
+   * from a row Cebab could not evaluate.
+   */
+  unevaluatedRules?: Array<{ rule: string; scope: 'user' | 'project' | 'local' }>;
 };
 
 /**

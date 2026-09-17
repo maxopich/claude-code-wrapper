@@ -592,6 +592,47 @@ function ruleTargetTool(rule: string): string {
 }
 
 /**
+ * `Cebab-0viu`: does exact equality FAIL to settle whether a rule targeting
+ * `target` covers `toolName`, in a way the CLI's own matcher might still
+ * resolve either direction?
+ *
+ * DETECTION, NOT EVALUATION. This says only "exact equality cannot answer this
+ * and a glob matcher might" — it never decides which tools the rule covers.
+ * Reimplementing the CLI's glob semantics is out of scope (a guessed glob would
+ * agree with itself and could be wrong), so the two cases here are exactly the
+ * ones the CLI documents that carry no exact-match answer:
+ *
+ *   - a wildcard target (`mcp__github__*`, `mcp__*`, `Bash*`), and
+ *   - the bare-server form `mcp__<server>` — an `mcp__`-prefixed proper prefix
+ *     of the tool name, which carries no `*` but which the CLI's help text lists
+ *     alongside `mcp__*`. The `__` boundary is what distinguishes the real
+ *     server prefix `mcp__github` (of `mcp__github__create_issue`) from a
+ *     coincidental string prefix like `mcp__git`.
+ *
+ * A target equal to the tool name is settled by exact equality and is NOT
+ * unevaluated. `Bash(*)` / `Bash(echo:*)` reduce to the target `Bash` (the
+ * paren argument is stripped by `ruleTargetTool`), so against tool `Bash` they
+ * are exact matches and correctly excluded — the wildcard lives in the argument
+ * the CLI matches separately, not in the tool identity.
+ */
+function ruleIsUnevaluatable(target: string, toolName: string): boolean {
+  if (target === toolName) return false;
+  const star = target.indexOf('*');
+  if (star !== -1) {
+    // RELEVANCE, still not evaluation. Everything before the first `*` must be
+    // a literal prefix of the tool name — a necessary condition under ANY
+    // semantics where `*` stands for a run of characters, so applying it
+    // decides nothing the CLI might decide differently. Without it, one
+    // wildcard rule anywhere made EVERY tool report "cannot decide":
+    // `mcp__slack__*` flagged `Read` and `Bash`, `mcp__*` flagged `Read`. That
+    // trades a wrong answer on a few rows for a non-answer on all of them,
+    // which is not what "silence beats a confident wrong answer" licenses.
+    return toolName.startsWith(target.slice(0, star));
+  }
+  return target.startsWith('mcp__') && toolName.startsWith(`${target}__`);
+}
+
+/**
  * Walk a single tool through every settings layer and return the merged
  * allow/deny decision per spec BE-B7. Convention (matches SDK):
  *
@@ -613,6 +654,12 @@ export function resolveToolAuthority(
 ): ToolView {
   let allowScope: 'user' | 'project' | 'local' | null = null;
   let denyScope: 'user' | 'project' | 'local' | null = null;
+  // `Cebab-0viu`: rules that mention this tool but that exact equality cannot
+  // settle. Collected from both the allow and the deny list — a glob in either
+  // is a rule Cebab does not evaluate — so the panel can say "cannot decide"
+  // instead of asserting "not allowed". Stays empty (→ field absent) whenever
+  // every rule matched, or missed, by exact equality.
+  const unevaluatedRules: NonNullable<ToolView['unevaluatedRules']> = [];
   for (const layer of layers) {
     if (!layer.data?.permissions) continue;
     const allowList = layer.data.permissions.allow ?? [];
@@ -622,6 +669,11 @@ export function resolveToolAuthority(
     }
     if (denyList.some((r) => ruleTargetTool(r) === toolName)) {
       denyScope = layer.scope;
+    }
+    for (const rule of [...allowList, ...denyList]) {
+      if (ruleIsUnevaluatable(ruleTargetTool(rule), toolName)) {
+        unevaluatedRules.push({ rule, scope: layer.scope });
+      }
     }
   }
   // mcp__<server>__<tool> conventions: if the named MCP server is
@@ -679,6 +731,8 @@ export function resolveToolAuthority(
     rulingScope,
   };
   if (mcpServer) view.mcpServer = mcpServer;
+  // Absent, not `[]`, when nothing was skipped — the wire contract.
+  if (unevaluatedRules.length > 0) view.unevaluatedRules = unevaluatedRules;
   return view;
 }
 
