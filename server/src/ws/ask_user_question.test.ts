@@ -45,6 +45,7 @@ vi.mock('../runner/index.js', () => ({
 
 const { config } = await import('../config.js');
 const { closeDb, getDb } = await import('../db.js');
+const { closeLogger } = await import('../runner/logger.js');
 const { upsertProject, setProjectTrusted } = await import('../repo/projects.js');
 const { handleClientMsg, drainParkedQuestionsForSessions } = await import('./server.js');
 const {
@@ -129,9 +130,24 @@ beforeEach(() => {
   projectId = upsertProject('proj', projectDir).id;
 });
 
-afterEach(() => {
+afterEach(async () => {
   __clearAllParkedQuestions();
   closeDb();
+  // `Cebab-kji`, re-learned the hard way: BEFORE the rmSync, and awaited.
+  // A turn here persists through the transcript logger, which keeps a
+  // module-level map of write streams pointing into this directory and opens
+  // each fd on a later tick. Removing the directory first races that open, and
+  // the stream's `'error'` handler then logs AFTER the test has finished —
+  // which vitest reports as `EnvironmentTeardownError: Closing rpc while
+  // "onUserConsoleLog" was pending` and which fails the WHOLE run with every
+  // test green. Observed exactly that way on CI (ubuntu, `test:security`:
+  // 136 files passed, run exit 1, blamed on this file).
+  //
+  // This hand-rolled preamble is why: `withTempDataDir` in `test_support/`
+  // already does this, and copying the twelve lines instead of calling it
+  // copied everything except the one line that matters. Cheap when nothing
+  // logged — with no streams open it resolves without waiting.
+  await closeLogger();
   config.dataDir = originalDataDir;
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
