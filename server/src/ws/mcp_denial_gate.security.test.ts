@@ -8,7 +8,7 @@ import { upsertProject, setProjectTrusted } from '../repo/projects.js';
 import { recordTrustDecision } from '../repo/mcp_trust.js';
 import { makeTrustGateState, denyOnceKey } from '../repo/mcp_trust_gate.js';
 import { makeStartGateState } from '../repo/session_start_gate.js';
-import { gateProjectsForSpawn } from './server.js';
+import { gateProjectsForSpawn, refuseUnapprovedForResume } from './server.js';
 
 // [security] Register H04 + Cebab-x1n.6.22 — the seam where a Deny becomes
 // binding.
@@ -174,6 +174,54 @@ describe('[security] gateProjectsForSpawn returns denials the spawn can act on',
     writeMcpJson({ evil: { command: '/bin/echo' } });
 
     const denials = await gateProjectsForSpawn(fakeConn(), [projectId]);
+
+    expect(denials.size).toBe(0);
+  });
+
+  // `Cebab-faoa`: the AUTOMATIC resume sweep gates the SAME way the authority
+  // probe does — refuse anything not already trusted, WITHOUT prompting — so a
+  // server restart can never park a reconstructed run on a TOFU modal that
+  // nobody is watching. (The operator-initiated resume uses the prompting
+  // `gateProjectsForSpawn` instead; that half is covered above.)
+  test('the auto-resume sweep refuses an unapproved server without emitting a prompt', () => {
+    writeMcpJson({ evil: { command: '/bin/echo' } });
+    // No recordTrustDecision → `evil` is pending (the operator was never asked).
+    // A prompting gate would emit a permission_request and park; the sweep must
+    // instead refuse synchronously and send nothing.
+    const sent: unknown[] = [];
+    const conn = {
+      ws: {
+        readyState: 1, // OPEN — so `send` would actually push if it were called
+        send: (s: string) => sent.push(JSON.parse(s)),
+      } as unknown as never,
+      authorityCache: new Map(),
+      trustGate: makeTrustGateState(),
+      startGate: makeStartGateState(),
+    } as unknown as Parameters<typeof refuseUnapprovedForResume>[0];
+
+    const denials = refuseUnapprovedForResume(conn, [projectId]);
+
+    expect(denials.get(projectId)).toEqual(['evil']);
+    // The whole point of the sweep variant: nothing reaches the wire.
+    expect(sent).toEqual([]);
+  });
+
+  test('the auto-resume sweep leaves a trusted server alone (control)', () => {
+    // Bare `echo` (no path) so `computeBinarySha` is null on both sides and the
+    // stored trust row matches — otherwise the trust check misses and even a
+    // "trusted" server would be refused.
+    writeMcpJson({ fine: { command: 'echo' } });
+    recordTrustDecision({
+      serverName: 'fine',
+      command: 'echo',
+      args: [],
+      originPath: path.join(projectDir, '.mcp.json'),
+      binarySha: null,
+      scriptShas: null,
+      decision: 'trusted',
+    });
+
+    const denials = refuseUnapprovedForResume(fakeConn(), [projectId]);
 
     expect(denials.size).toBe(0);
   });

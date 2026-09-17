@@ -26,6 +26,7 @@ import {
   listMultiAgentEvents,
   listResolvedParticipants,
   recordSessionHops,
+  setPendingRetry,
   upsertAgentSession,
   setProjectBusInstalled,
 } from '../repo/multi_agent.js';
@@ -39,6 +40,8 @@ import { appendSafetyAudit } from '../notifications/safety_audit.js';
 import { findProjectByPath, upsertProject } from '../repo/projects.js';
 import { __resetRegistryForTesting, getPauseExpiryRegistry } from '../ws/pause_expiry.js';
 import { auditKindsInWriteOrder } from '../test_support/audit_order.js';
+import type { Runner, RunOptions } from '../runner/index.js';
+import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 
 let tmpRoot: string;
 let originalDataDir: string;
@@ -417,6 +420,112 @@ describe('restart simulation via attemptResumeMultiAgent', () => {
     // Conservative: paused for the operator, with the banner in scrollback.
     expect(getMultiAgentSession(SID)!.awaiting_continue).toBe(1);
     expect(resumed!.replayEvents.map((e) => e.text)).toContain(RECOVERY_BANNER);
+  });
+});
+
+// ===== `Cebab-faoa` [security]: a resumed run re-gates its MCP servers =====
+//
+// THE BYPASS. Reconstruct rebuilds each worker's spec with the WIDENED bus
+// `settingSources` but used to pass NO `mcpDenials` — so a server the operator
+// had denied (or, on the auto-resume sweep, never approved) loaded on the
+// resumed hop. `continue_multi_agent` re-gated after the fact, but every OTHER
+// delivery path did not: `retry_worker` re-delivers a reconstructed worker's
+// captured turn straight through `handle.retry()`, with no gate in its path.
+//
+// The fix threads the resume gate's refusals into the rebuilt specs at
+// reconstruct time, so the denial binds on the FIRST resumed turn of whichever
+// path fires. These cases drive the real `retry_worker` path (a persisted
+// pending-retry + `handle.retry()`) and observe the worker's actual spawn
+// options.
+describe('reconstruct re-gates a resumed hop against a standing MCP denial [security]', () => {
+  const flush = () => new Promise((r) => setImmediate(r));
+
+  function captureFactory(captured: RunOptions[]) {
+    return (opts: RunOptions): Runner => {
+      captured.push(opts);
+      async function* gen(): AsyncGenerator<SDKMessage> {
+        yield { type: 'result', subtype: 'success', session_id: 's-cap' } as unknown as SDKMessage;
+      }
+      const it = gen();
+      return { [Symbol.asyncIterator]: () => it, close: () => {} };
+    };
+  }
+
+  function coderId(): number {
+    return getDb()
+      .prepare<[], { id: number }>("SELECT id FROM projects WHERE name = 'Coder'")
+      .get()!.id;
+  }
+
+  /** Persist a pending-retry slot for `coder` so `handle.retry()` re-delivers
+   *  its captured turn — the exact `retry_worker` bypass, on a reconstructed
+   *  session. */
+  function seedPendingRetryForCoder(): void {
+    setPendingRetry(SID, {
+      agentName: 'coder',
+      prompt: 'go',
+      reason: 'boom',
+      ts: Date.now(),
+      errorEventId: 0,
+    });
+  }
+
+  async function retriedTurnOptions(opts: {
+    mode: 'orchestrator' | 'chain';
+    denyCoder?: boolean;
+  }): Promise<RunOptions | undefined> {
+    seedReconstructable({ mode: opts.mode });
+    seedPendingRetryForCoder();
+    const captured: RunOptions[] = [];
+    // Built AFTER seeding so `coderId()` resolves the just-created project.
+    const mcpDenials = opts.denyCoder
+      ? new Map<number, readonly string[]>([[coderId(), ['evil']]])
+      : undefined;
+    const cb = {
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      hopBudget: 1000,
+      maxTurns: 50,
+      runnerFactory: captureFactory(captured),
+      ...(mcpDenials ? { mcpDenials } : {}),
+    };
+    const ok =
+      opts.mode === 'chain'
+        ? reconstructChainSession(getMultiAgentSession(SID)!, cb)
+        : reconstructOrchestratorSession(getMultiAgentSession(SID)!, cb);
+    expect(ok).toBe(true);
+
+    const handle = getLiveSession(SID)!.handle as unknown as { retry: () => Promise<void> };
+    await handle.retry();
+    await flush();
+    await flush();
+    return captured.find((c) => /coder$/.test(c.cwd));
+  }
+
+  test('orchestrator: a denied server is in the resumed worker turn deniedMcpServers', async () => {
+    const turn = await retriedTurnOptions({ mode: 'orchestrator', denyCoder: true });
+    // Reddens before the fix: reconstruct passed nothing, so the retried turn
+    // spawned with no denials and `evil` loaded.
+    expect(turn?.deniedMcpServers).toEqual(['evil']);
+  });
+
+  test('orchestrator: an approved server still starts (control)', async () => {
+    // Nothing denied → the worker still runs, just with no denial list. Proves
+    // the fix does not strip a legitimate server from every resumed run.
+    const turn = await retriedTurnOptions({ mode: 'orchestrator' });
+    expect(turn).toBeDefined();
+    expect(turn?.deniedMcpServers).toBeUndefined();
+  });
+
+  test('chain: a denied server is in the resumed participant turn deniedMcpServers', async () => {
+    const turn = await retriedTurnOptions({ mode: 'chain', denyCoder: true });
+    expect(turn?.deniedMcpServers).toEqual(['evil']);
+  });
+
+  test('chain: an approved server still starts (control)', async () => {
+    const turn = await retriedTurnOptions({ mode: 'chain' });
+    expect(turn).toBeDefined();
+    expect(turn?.deniedMcpServers).toBeUndefined();
   });
 });
 
