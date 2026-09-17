@@ -557,9 +557,34 @@ export function drainParkedQuestionsForSessions(
 // the SDK returns a response object here, and we use the promise only as a
 // completion signal — `emitAck` takes no arguments).
 type InterruptInFlight = {
-  runner: { interrupt?: () => Promise<unknown> };
+  runner: { interrupt?: () => Promise<unknown>; close?: () => void };
   ac: AbortController;
 };
+
+/**
+ * `Cebab-vie.24`: how long the single-agent Stop waits for the CLI to answer
+ * the SDK's interrupt control-request before reaping the subprocess outright.
+ *
+ * Why a watchdog is needed at all. `Query.interrupt()` is
+ * `await this.request({ subtype: 'interrupt' })` — a promise parked in the
+ * SDK's `pendingControlResponses` that settles ONLY on a `control_response`
+ * from the CLI or on the SDK's own `cleanup()`. If the CLI's control loop is
+ * wedged (a hung stdio MCP call, a runaway loop that never yields), it settles
+ * neither way, and Cebab used to arm nothing: no ack ever shipped, the
+ * rejection-only `ac.abort()` never ran, the `for await` never ended, and the
+ * turn's `finally` never reached `runner.close()`. The operator was then stuck
+ * twice over — `describeTurnInFlight` refuses every later `send_message` for a
+ * session that still has an in-flight turn, so Stop was dead AND the session
+ * was unusable until the socket dropped.
+ *
+ * Why 10s. The control request is a local pipe round-trip a healthy CLI
+ * answers in milliseconds; the margin is for a CLI that is busy inside a tool
+ * call and reads its control channel late. Erring short is cheap in a way that
+ * erring long is not: the operator has already asked for the turn to end, so
+ * the only thing a premature hard close costs is the CLI's graceful teardown
+ * of a turn that was being discarded anyway.
+ */
+export const INTERRUPT_WATCHDOG_MS = 10_000;
 
 export function executeInterrupt(args: {
   inFlight: InterruptInFlight | undefined;
@@ -595,6 +620,13 @@ export function executeInterrupt(args: {
    * handling).
    */
   onStop?: (sessionId: string, interruptAckId: string) => void;
+  /**
+   * `Cebab-vie.24`: watchdog ceiling for `runner.interrupt()`, defaulting to
+   * `INTERRUPT_WATCHDOG_MS`. `0` (or any non-positive value) arms no timer at
+   * all — the pre-watchdog behaviour, kept addressable so a test can prove the
+   * envelope in the wedged case comes from the timer and nothing else.
+   */
+  interruptTimeoutMs?: number;
   /** Test seam: clock override for deterministic ackLatencyMs assertions. */
   now?: () => number;
   /** Test seam: ackId override for deterministic assertions. */
@@ -634,10 +666,51 @@ export function executeInterrupt(args: {
     });
   };
   if (inFlight.runner.interrupt) {
-    inFlight.runner.interrupt().then(emitAck, (err) => {
+    // `Cebab-vie.24`: exactly one of the three outcomes below may ship the
+    // envelope. `settled` is what makes that true, and it is load-bearing in
+    // both directions: the watchdog's `close()` REJECTS the parked control
+    // promise inside the SDK ("Query closed before response received"), so the
+    // rejection handler always runs after a timeout and would otherwise abort
+    // and ack a second time.
+    let settled = false;
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      if (watchdog !== undefined) clearTimeout(watchdog);
+      emitAck();
+    };
+    const timeoutMs = args.interruptTimeoutMs ?? INTERRUPT_WATCHDOG_MS;
+    if (timeoutMs > 0) {
+      watchdog = setTimeout(() => {
+        if (settled) return;
+        console.warn(
+          `[ws] runner.interrupt did not answer within ${timeoutMs}ms for ${sessionId}; ` +
+            `hard-closing the runner`,
+        );
+        // `close()` first, then `abort()`. The abort alone would get there —
+        // the SDK transport registers `abortHandler = () => this.close()` —
+        // but the close is the primitive the bus watchdog already relies on
+        // (bus/runner.ts), and calling it directly does not depend on that
+        // wiring staying in place. The abort still runs afterwards so every
+        // other consumer of the signal sees the cancellation.
+        try {
+          inFlight.runner.close?.();
+        } catch {
+          /* best effort — a close that throws must not strand the operator */
+        }
+        inFlight.ac.abort();
+        finish();
+      }, timeoutMs);
+      // Never hold the process open for a Stop that is already being reaped.
+      watchdog.unref?.();
+    }
+    inFlight.runner.interrupt().then(finish, (err) => {
+      // Already reaped by the watchdog: this rejection IS the close() above.
+      if (settled) return;
       console.warn('[ws] runner.interrupt failed; falling back to abort', err);
       inFlight.ac.abort();
-      emitAck();
+      finish();
     });
   } else {
     inFlight.ac.abort();
