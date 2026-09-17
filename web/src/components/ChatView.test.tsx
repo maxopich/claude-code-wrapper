@@ -80,7 +80,14 @@ function mkSession(overrides: Partial<SessionView> = {}): SessionView {
 
 function render(session: SessionView) {
   act(() => {
-    root.render(<ChatView session={session} isLive onPermissionDecide={() => {}} />);
+    root.render(
+      <ChatView
+        session={session}
+        isLive
+        onPermissionDecide={() => {}}
+        onAskUserAnswer={() => {}}
+      />,
+    );
   });
 }
 
@@ -120,7 +127,14 @@ describe('ChatView — the sessionless empty state (Cebab-ws0.5)', () => {
     // sentence actually describes, and deleting it rather than narrowing it
     // would leave nothing at all on a fresh launch.
     act(() => {
-      root.render(<ChatView session={null} isLive={false} onPermissionDecide={() => {}} />);
+      root.render(
+        <ChatView
+          session={null}
+          isLive={false}
+          onPermissionDecide={() => {}}
+          onAskUserAnswer={() => {}}
+        />,
+      );
     });
     expect(container.textContent).toContain('Select a project to start a conversation');
   });

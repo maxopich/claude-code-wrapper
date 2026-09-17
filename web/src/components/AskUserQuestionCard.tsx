@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import type { PendingAskUserQuestionView } from '@cebab/shared/protocol';
+import type { AskUserQuestionView, PendingAskUserQuestionView } from '@cebab/shared/protocol';
 
 /**
  * Interactive AskUserQuestion card for the multi-agent scrollback. A bus agent
@@ -144,6 +144,49 @@ export function AskUserQuestionCard(props: {
           Send answer
         </button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * `Cebab-uhn2`: the spent form of the card above.
+ *
+ * A single-agent question lives in the transcript rather than in a floating
+ * slot, so it is still on screen after it is answered — and a card that keeps
+ * rendering live buttons after the turn has moved on invites a second click
+ * that can do nothing. This renders the same questions read-only with the
+ * operator's choice beside each.
+ *
+ * `answers` is ABSENT when Cebab drained the question instead (interrupt, turn
+ * death, disconnect). That is a different thing from an empty answer and reads
+ * as one: the card says the question went unanswered rather than showing a
+ * blank where a choice would be.
+ */
+export function AskUserQuestionAnswered(props: {
+  questions: AskUserQuestionView[];
+  answers?: Record<string, string>;
+}) {
+  const { questions, answers } = props;
+  return (
+    <div className="ask-user-card ask-user-card-done" role="group" aria-label="Answered question">
+      {questions.map((q, qi) => {
+        const given = answers?.[q.question];
+        return (
+          <div key={qi} className="ask-user-q ask-user-q-done">
+            <div className="ask-user-q-head">
+              {q.header && <span className="ask-user-q-chip">{q.header}</span>}
+              <span className="ask-user-q-text">{q.question}</span>
+            </div>
+            {given ? (
+              <div className="ask-user-answer">{given}</div>
+            ) : (
+              <div className="ask-user-answer ask-user-answer-none">
+                went unanswered — the turn ended before you replied
+              </div>
+            )}
+          </div>
+        );
+      })}
     </div>
   );
 }

@@ -8,6 +8,7 @@ import type {
   MultiAgentLifecycle,
   MultiAgentMutationView,
   ParticipantControlSnapshot,
+  AskUserQuestionView,
   PendingAskUserQuestionView,
   MultiAgentTemplate,
   PauseExpiryAction,
@@ -120,6 +121,32 @@ export type MessageView =
       cwd?: string;
       /** Item #5: human-readable project name. */
       projectName?: string;
+    }
+  | {
+      /**
+       * `Cebab-uhn2`: the agent called `AskUserQuestion` and its turn is parked
+       * until this is answered.
+       *
+       * A scrollback CARD rather than a floating slot (which is the shape the
+       * multi-agent tab uses), because single-agent chat already answers tool
+       * calls this way: the permission card sits in the transcript, in sequence,
+       * and is marked decided in place. A question is the same interaction with
+       * a richer answer, and putting it anywhere else would give this chat two
+       * different places to look for "the agent needs you".
+       */
+      kind: 'ask_user_question';
+      id: string;
+      /** SDK `tool_use.id` — the park key, and what the answer is matched on. */
+      toolUseId: string;
+      /** Project name, rendered as "<agent> asks" (mirrors the bus card). */
+      agent: string;
+      questions: AskUserQuestionView[];
+      /** Set once the card can no longer be answered. Present with `answers`
+       *  when the operator answered; present alone when Cebab drained it
+       *  (interrupt, turn death, disconnect) — the same distinction
+       *  `permission_request.decidedReason` draws one arm up. */
+      resolved?: true;
+      answers?: Record<string, string>;
     };
 
 /**
@@ -1567,6 +1594,18 @@ export type Action =
   | { type: 'select_session'; projectId: number; sessionId: string }
   | { type: 'new_session'; projectId: number }
   | { type: 'user_send'; text: string }
+  /**
+   * `Cebab-uhn2`: the operator answered a single-agent question. Applied
+   * optimistically, before the server's `ask_user_resolved` echo, so the
+   * buttons stop accepting a second click on a turn that has already been
+   * unblocked.
+   */
+  | {
+      type: 'ask_user_answered';
+      sessionId: string;
+      toolUseId: string;
+      answers: Record<string, string>;
+    }
   | { type: 'ma_set_view'; view: 'chat' | 'multi-agent' | 'chained-chat' }
   | { type: 'ma_set_lifecycle'; lifecycle: MultiAgentLifecycle }
   | { type: 'ma_add_participant'; projectId: number }
@@ -2211,6 +2250,23 @@ export function reduce(state: AppState, action: Action): AppState {
           active: { ...active, pendingQuestion: null },
         },
       };
+    }
+
+    case 'ask_user_answered': {
+      // `Cebab-uhn2`: records WHAT was answered as well as marking the card
+      // spent, so the transcript keeps the operator's choice beside the
+      // question. The server echo (`ask_user_resolved`) sets `resolved` again
+      // and deliberately leaves `answers` alone.
+      const projectId = projectFor(state, action.sessionId);
+      if (projectId === null) return state;
+      const session = state.sessionsByProject[projectId]?.[action.sessionId];
+      if (!session) return state;
+      const messages = session.messages.map((mm) =>
+        mm.kind === 'ask_user_question' && mm.toolUseId === action.toolUseId
+          ? { ...mm, resolved: true as const, answers: action.answers }
+          : mm,
+      );
+      return putSession(state, projectId, action.sessionId, { ...session, messages });
     }
 
     case 'auth_expired_dismissed': {
@@ -3465,6 +3521,44 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
               // field simply stays absent for the common case.
               ...(msg.reason ? { decidedReason: msg.reason } : {}),
             }
+          : mm,
+      );
+      return putSession(state, projectId, msg.sessionId, { ...session, messages });
+    }
+
+    case 'ask_user_question': {
+      const projectId = projectFor(state, msg.sessionId);
+      if (projectId === null) return state;
+      const session = state.sessionsByProject[projectId]?.[msg.sessionId];
+      // Idempotent on `toolUseId`: the server emits once today, but the id is
+      // the SDK's and a re-emit must not stack a second identical card.
+      if (
+        session?.messages.some(
+          (mm) => mm.kind === 'ask_user_question' && mm.toolUseId === msg.toolUseId,
+        )
+      )
+        return state;
+      return appendMessage(state, projectId, msg.sessionId, {
+        kind: 'ask_user_question',
+        id: nextId(),
+        toolUseId: msg.toolUseId,
+        agent: msg.agent,
+        questions: msg.questions,
+      });
+    }
+
+    case 'ask_user_resolved': {
+      const projectId = projectFor(state, msg.sessionId);
+      if (projectId === null) return state;
+      const session = state.sessionsByProject[projectId]?.[msg.sessionId];
+      if (!session) return state;
+      // Marks the card un-answerable. Deliberately does NOT clobber `answers`:
+      // the operator's own submit sets them optimistically and the server's
+      // echo arrives right after, so a blind overwrite would erase what they
+      // just chose from the transcript they are looking at.
+      const messages = session.messages.map((mm) =>
+        mm.kind === 'ask_user_question' && mm.toolUseId === msg.toolUseId
+          ? { ...mm, resolved: true as const }
           : mm,
       );
       return putSession(state, projectId, msg.sessionId, { ...session, messages });

@@ -787,6 +787,25 @@ export type ClientMsg =
       updatedInput?: Record<string, unknown>;
       message?: string;
     }
+  | {
+      /**
+       * `Cebab-uhn2`: the operator's answer to a parked single-agent
+       * `AskUserQuestion` (see the `ask_user_question` ServerMsg). `answers`
+       * maps each question's TEXT to the chosen value — multi-select picks
+       * comma-joined by the client, the free-text "Other" as the raw string.
+       *
+       * The server resolves the parked `canUseTool` promise with the formatted
+       * string, and returns it to the SDK as a DENY. That is not a refusal: a
+       * deny message is the only channel by which `canUseTool` can put text in
+       * front of the model, and it is measured to work — the model reads the
+       * answer and the same turn resumes, with no `--resume` and no orphaned
+       * `tool_use`. The bus answers its own questions exactly this way.
+       */
+      type: 'ask_user_answer';
+      sessionId: string;
+      toolUseId: string;
+      answers: Record<string, string>;
+    }
   | { type: 'set_trusted'; projectId: number; trusted: boolean }
   | {
       /**
@@ -2394,6 +2413,49 @@ export type ServerMsg =
        * the same reason `permission_request` carries `category?` / `summary?`.
        */
       reason?: PermissionDecisionReason;
+    }
+  | {
+      /**
+       * `Cebab-uhn2`: a SINGLE-AGENT turn is parked at the permission gate on
+       * an `AskUserQuestion` call, awaiting the operator's pick.
+       *
+       * The bus has carried its own copy of this since the interactive-question
+       * work (`multi_agent_ask_user_question`); single-agent chat had NONE of
+       * it, and the gap was not "the card is missing" — it is that the model
+       * could CALL the tool and the operator was never asked. Measured against
+       * the bundled CLI: the tool is on every ordinary turn's tool list, and a
+       * plain `allow` hands the model back the literal string "The user did not
+       * answer the questions." On a trusted project `shouldAutoAllow` returned
+       * true for it, so the question was swallowed with no card at all.
+       *
+       * The two message families are deliberately NOT merged. A bus question is
+       * addressed by `(sessionId, agent, toolUseId)` and hydrates on re-attach
+       * from `multi_agent_started.pendingQuestion`; this one is addressed by
+       * `(sessionId, toolUseId)` and does not survive a socket close, because a
+       * single-agent turn does not either — the close handler aborts it. One
+       * message with an optional `agent` would have to explain that difference
+       * in prose instead of in the type.
+       *
+       * `toolUseId` is the SDK `tool_use.id`, which is both the park key and
+       * the idempotency key. `agent` is the PROJECT name, so the card reads
+       * "<project> asks" the same way the bus card reads "<worker> asks".
+       */
+      type: 'ask_user_question';
+      sessionId: string;
+      agent: string;
+      toolUseId: string;
+      questions: AskUserQuestionView[];
+    }
+  | {
+      /**
+       * `Cebab-uhn2`: the parked single-agent question is gone — answered, or
+       * drained on interrupt / turn-death / disconnect. The reducer clears its
+       * slot iff `toolUseId` matches the one on screen, so a late drain for an
+       * already-replaced question cannot blank a live card.
+       */
+      type: 'ask_user_resolved';
+      sessionId: string;
+      toolUseId: string;
     }
   | {
       type: 'permission_mode_changed';

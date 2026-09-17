@@ -60,6 +60,7 @@ const SAMPLES: ClientMsg[] = [
   { type: 'continue_through_mutation', sessionId: 's', mutationId: 7 },
   { type: 'multi_agent_user_prompt', sessionId: 's', text: 'hi' },
   { type: 'multi_agent_ask_user_answer', sessionId: 's', agent: 'a', toolUseId: 't', answers: {} },
+  { type: 'ask_user_answer', sessionId: 's', toolUseId: 't', answers: {} },
   { type: 'list_iterations' },
   { type: 'clear_iterations' },
   { type: 'archive_session', sessionId: 's' },

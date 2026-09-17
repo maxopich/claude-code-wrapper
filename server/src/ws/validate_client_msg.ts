@@ -179,6 +179,7 @@ const SHAPES: Table = {
   abandon_session: { sessionId: 'string' },
   continue_through_mutation: { sessionId: 'string', mutationId: 'number' },
   multi_agent_user_prompt: { sessionId: 'string', text: 'string' },
+  ask_user_answer: { sessionId: 'string', toolUseId: 'string', answers: 'object' },
   multi_agent_ask_user_answer: {
     sessionId: 'string',
     agent: 'string',

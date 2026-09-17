@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { parseAskUserQuestions } from './runner.js';
+import { parseAskUserQuestions } from './pending_questions.js';
 
 describe('parseAskUserQuestions', () => {
   test('coerces the SDK question shape to the wire view', () => {

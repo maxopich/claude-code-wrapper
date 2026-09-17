@@ -21,6 +21,7 @@ const CLIENT_MSG_VERBS = [
   'acknowledge_and_start',
   'add_multi_agent_participant',
   'archive_session',
+  'ask_user_answer',
   'bulk_session_op',
   'bus_trust_decision',
   'cancel_auth_refresh',

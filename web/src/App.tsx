@@ -1835,6 +1835,46 @@ function AppShell({
     });
   }
 
+  /**
+   * `Cebab-uhn2`: answer a parked `AskUserQuestion`.
+   *
+   * Same `sendThenApply` ordering as `decidePermission` above, and for a
+   * sharper version of the same reason (W29): the agent's turn is BLOCKED on
+   * this answer. If the send vanished on a reconnecting socket while the card
+   * optimistically flipped to answered, the operator would be looking at their
+   * own choice with no way to re-submit it, and the turn would sit in
+   * `canUseTool` until it was interrupted.
+   */
+  function answerAskUserQuestion(toolUseId: string, answers: Record<string, string>) {
+    if (!session) return;
+    const sessionId = session.id;
+    sendThenApply({
+      send: () =>
+        wsRef.current?.send({
+          type: 'ask_user_answer',
+          sessionId,
+          toolUseId,
+          answers,
+        }) === true,
+      // The server echoes `ask_user_resolved`; that reducer sets `resolved`
+      // and leaves `answers` alone, so the second arrival is a no-op.
+      apply: () => dispatch({ type: 'ask_user_answered', sessionId, toolUseId, answers }),
+      onUndeliverable: () =>
+        notifPushRef.current?.({
+          id: mintNotificationId(),
+          ts: Date.now(),
+          severity: 'error',
+          class: 'operational',
+          dedupeKey: `ask_user_answer_undeliverable:${toolUseId}`,
+          title: 'Answer not sent',
+          message:
+            'Cebab is not connected, so your answer did not reach the agent. It is still ' +
+            'waiting on the question — answer again once the connection is back.',
+          sticky: false,
+        }),
+    });
+  }
+
   function setPermissionMode(mode: SessionPermissionMode) {
     if (!session || isSessionPending(session.id)) return;
     wsRef.current?.send({
@@ -2328,7 +2368,7 @@ function AppShell({
           ts: Date.now(),
           severity: 'error',
           class: 'operational',
-          dedupeKey: `ask_user_answer_undeliverable:${toolUseId}`,
+          dedupeKey: `ma_ask_user_answer_undeliverable:${toolUseId}`,
           title: 'Answer not sent',
           message:
             'Cebab is not connected, so the agent never received your answer and is ' +
@@ -2981,6 +3021,7 @@ function AppShell({
                     session={session}
                     isLive={sessionIsLive}
                     onPermissionDecide={decidePermission}
+                    onAskUserAnswer={answerAskUserQuestion}
                     onSubmitStopReason={submitStopReason}
                     onSkipStopReason={skipStopReason}
                     /* Cluster F Phase A1b (UI-A1): max-turns result card
