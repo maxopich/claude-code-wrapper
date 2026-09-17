@@ -33,7 +33,11 @@ import {
 } from '../repo/multi_agent.js';
 import { getDb } from '../db.js';
 import { getLiveSession, unregisterLiveSession, type BusSink } from './session_registry.js';
-import { reconstructChainSession, reconstructOrchestratorSession } from './reconstruct.js';
+import {
+  reconstructChainSession,
+  reconstructOrchestratorSession,
+  resumeParticipantProjectIds,
+} from './reconstruct.js';
 import type { ChainSessionHandle, ResumeChainOpts } from './chain.js';
 import type { OrchestratorSessionHandle } from './orchestrator.js';
 import { emit as emitNotification } from '../notifications/dispatcher.js';
@@ -72,6 +76,22 @@ export type ResumeCallbacks = {
   /** `Cebab-vie.17`: re-resolved per-hop turn cap, for the same reason and on
    *  the same schedule as `hopBudget` above. */
   maxTurns: number;
+  /**
+   * [security] `Cebab-faoa`: run the MCP TOFU gate over the resumed run's
+   * participant projects and return the per-project server names to deny,
+   * applied to the rebuilt specs BEFORE the first resumed hop. The two entry
+   * points supply different variants, and which is which is the whole point:
+   *
+   *   - the AUTOMATIC sweep (`attemptResumeMultiAgent`, on WS connect) supplies
+   *     a refuse-unapproved-WITHOUT-prompting variant, so a server restart can
+   *     never park a reconstructed run on a TOFU prompt nobody is watching;
+   *   - an OPERATOR-initiated resume (`resumeMultiAgentTarget` — the Iterations
+   *     "Resume" button, Reopen) supplies the prompting `gateProjectsForSpawn`,
+   *     exactly as a fresh start would.
+   *
+   * Omit → no gating (legacy callers / unit tests) → byte-identical to before.
+   */
+  gateParticipants?: (projectIds: number[]) => Promise<ReadonlyMap<number, readonly string[]>>;
   /** Item #4: pending-retry set/clear callback for a reconstructed router.
    *  Forwarded into `wireOrchestratorSession`; the initial banner restore
    *  travels on `multi_agent_started.pendingRetry` (hydrated from the
@@ -141,7 +161,7 @@ function replayFor(sessionId: string): PersistedEvent[] {
  * function asserts its own mode, so a mis-dispatch would no-op rather than wire
  * the wrong topology.
  */
-function reconstructForMode(
+async function reconstructForMode(
   row: MultiAgentSessionRow,
   callbacks: Pick<
     ResumeCallbacks,
@@ -149,6 +169,7 @@ function reconstructForMode(
     | 'onEnded'
     | 'hopBudget'
     | 'maxTurns'
+    | 'gateParticipants'
     | 'onPendingRetry'
     | 'onMutation'
     | 'onPendingMutation'
@@ -156,12 +177,23 @@ function reconstructForMode(
     | 'sendRouterDrop'
     | 'sendServerMsg'
   >,
-): boolean {
+): Promise<boolean> {
+  // [security] `Cebab-faoa`: gate the resumed run's participant MCP servers and
+  // apply the refusals to the rebuilt specs. `gateParticipants` decides prompt
+  // (operator resume) vs refuse-unapproved (auto sweep); a caller that omits it
+  // (unit tests) gets the pre-`Cebab-faoa` ungated rebuild. The gate runs BEFORE
+  // the reconstruct so the denials are on the specs the moment they exist — and
+  // an operator-resume gate that the operator declines throws here, before any
+  // read-only re-attach, leaving the row untouched.
+  const mcpDenials = callbacks.gateParticipants
+    ? await callbacks.gateParticipants(resumeParticipantProjectIds(row.id))
+    : undefined;
   const args = {
     onEvent: callbacks.onEvent,
     onEnded: callbacks.onEnded,
     hopBudget: callbacks.hopBudget,
     maxTurns: callbacks.maxTurns,
+    mcpDenials,
     onPendingRetry: callbacks.onPendingRetry,
     onMutation: callbacks.onMutation,
     onPendingMutation: callbacks.onPendingMutation,
@@ -209,7 +241,7 @@ export async function attemptResumeMultiAgent(
     // runs until the operator continues. `Cebab-2t9.1`: chain mode reconstructs
     // now too, via its own path; guard failures (either mode) fall through to
     // the crashed path below (behavior never worse than R-A).
-    if (reconstructForMode(candidate, callbacks)) {
+    if (await reconstructForMode(candidate, callbacks)) {
       live = getLiveSession(candidate.id);
     }
   }
@@ -269,6 +301,7 @@ export async function resumeMultiAgentTarget(
     | 'onEnded'
     | 'hopBudget'
     | 'maxTurns'
+    | 'gateParticipants'
     | 'onPendingRetry'
     | 'onMutation'
     | 'onPendingMutation'
@@ -290,7 +323,7 @@ export async function resumeMultiAgentTarget(
     // gone (Cebab restarted). Rebuild it read-only — same conservative
     // contract as the auto-resume path. `Cebab-2t9.1`: chain rebuilds too;
     // guard failures (either mode) keep the old "reattach-failed" behavior.
-    if (reconstructForMode(row, callbacks)) {
+    if (await reconstructForMode(row, callbacks)) {
       live = getLiveSession(sessionId);
     }
   }

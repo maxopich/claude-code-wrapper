@@ -96,6 +96,7 @@ import {
   abandonPendingMcpGates,
   awaitMcpTrustDecisions,
   makeTrustGateState,
+  refuseUnapprovedForProbe,
   type TrustGateOutcome,
   type TrustGateState,
 } from '../repo/mcp_trust_gate.js';
@@ -2921,6 +2922,53 @@ export async function gateProjectsForSpawn(
 }
 
 /**
+ * [security] `Cebab-faoa`: the refuse-unapproved half of the resume gate, for
+ * the AUTOMATIC resume sweep (`resumeOnConnect` → `attemptResumeMultiAgent`).
+ *
+ * A server restart reconstructs every running bus row read-only, and the sweep
+ * that does it fires on WS connect with no operator watching a specific
+ * session. So the gate here must NOT prompt — a TOFU modal on a session nobody
+ * is looking at would park the reconstruct on an answer that never comes. It
+ * takes the same strict posture the authority probe does
+ * (`refuseUnapprovedForProbe`): start only what is already `trusted`, refuse
+ * everything else (`denied` / `denied_remember` / `pending_tofu` /
+ * `hash_changed` / `script_changed` / `pin_oversized` / …). The refusals are
+ * applied to the rebuilt worker specs so the standing decision survives the
+ * restart. An OPERATOR-initiated resume takes `gateProjectsForSpawn` above
+ * instead and may prompt exactly as a fresh start does.
+ *
+ * Resolves each project against the SAME trust-derived scopes the spawn will
+ * use (`busSettingScopesFor`), so an untrusted participant — whose `.mcp.json`
+ * will not load — has nothing to refuse. Sends nothing over the wire; the
+ * denied-server audit rows are `refuseUnapprovedForProbe`'s own obligation
+ * (`mcp.trust_silent_refusal`), so a standing denial enforced across a restart
+ * is still recorded.
+ */
+export function refuseUnapprovedForResume(conn: Conn, projectIds: number[]): McpDenials {
+  const denials: McpDenials = new Map();
+  const seen = new Set<number>();
+  for (const projectId of projectIds) {
+    if (seen.has(projectId)) continue;
+    seen.add(projectId);
+    const cached = conn.authorityCache.get(projectId);
+    const scopes = busSettingScopesFor(projectId);
+    const authority = resolveProjectAuthority({
+      projectId,
+      mode: 'cache',
+      settingSources: scopes,
+      toolUsage: 'skip',
+      ...(cached !== undefined && { latestSessionStarted: cached }),
+    });
+    if (!authority) continue;
+    const refused = refuseUnapprovedForProbe(projectId, authority.mcpServers);
+    if (refused.length > 0) {
+      denials.set(projectId, [...new Set(refused)]);
+    }
+  }
+  return denials;
+}
+
+/**
  * F6: observe a project's hooks on the way to a spawn, and tell the operator
  * about anything they have not already seen.
  *
@@ -3857,6 +3905,11 @@ async function resumeOnConnect(conn: Conn): Promise<void> {
       ...resumeCallbacks(conn),
       hopBudget: resolveHopBudget(),
       maxTurns: resolveMaxTurns(),
+      // [security] `Cebab-faoa`: this is the AUTOMATIC sweep — refuse
+      // unapproved MCP servers WITHOUT prompting, so a restart can never park a
+      // reconstructed run on a TOFU modal nobody is watching.
+      gateParticipants: (projectIds) =>
+        Promise.resolve(refuseUnapprovedForResume(conn, projectIds)),
       onResumeFailed: (sessionId) => {
         // Surface auto-resume failures as a wrapper_error toast so the
         // operator notices instead of "Cebab silently lost my session".
@@ -6193,6 +6246,11 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
           ...resumeCallbacks(conn),
           hopBudget: resolveHopBudget(),
           maxTurns: resolveMaxTurns(),
+          // [security] `Cebab-faoa`: operator-initiated resume — gate the
+          // participants exactly as a fresh start does, prompting for any
+          // untrusted MCP server. The operator is present (they clicked
+          // Resume), so a prompt has someone to answer it.
+          gateParticipants: (projectIds) => gateProjectsForSpawn(conn, projectIds),
         });
         if (!result.ok) {
           const message =
@@ -6713,6 +6771,9 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
           ...resumeCallbacks(conn),
           hopBudget: resolveHopBudget(),
           maxTurns: resolveMaxTurns(),
+          // [security] `Cebab-faoa`: Reopen is operator-initiated (they cleared
+          // the confirmation modal), so gate + prompt exactly like a start.
+          gateParticipants: (projectIds) => gateProjectsForSpawn(conn, projectIds),
         },
         send: (m) => send(conn.ws, m),
       });

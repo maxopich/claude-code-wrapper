@@ -276,6 +276,26 @@ export function canReconstruct(row: MultiAgentSessionRow): boolean {
 }
 
 /**
+ * [security] `Cebab-faoa`: the participant projects a resume must run the MCP
+ * TOFU gate over before rebuilding a run. Worker/participant rows only — the
+ * orchestrator has no project (it runs from an empty cwd under
+ * `settingSources: ['user']`, so it declares no project MCP servers). The
+ * `bus_agent_name` filter matches both wire paths' worker filter, and the set
+ * dedupes a chain that repeats a participant (e.g. `[A, B, A]`). The scopes
+ * those participants spawn with are resolved by the gate itself
+ * (`busSettingScopesFor`), so this only has to name the projects.
+ */
+export function resumeParticipantProjectIds(sessionId: string): number[] {
+  return [
+    ...new Set(
+      listResolvedParticipants(sessionId)
+        .filter((r) => r.role === 'worker' && r.bus_agent_name)
+        .map((r) => r.project_id),
+    ),
+  ];
+}
+
+/**
  * Rebuild an orchestrated session in-process and register it live, READ-ONLY
  * (sets `awaiting_continue`, delivers nothing). Returns true iff the session
  * is now in the registry (caller re-fetches via `getLiveSession` and
@@ -297,6 +317,22 @@ export function reconstructOrchestratorSession(
      *  Continue. Required here (unlike on the routers' start opts) so the
      *  compiler is the gate on every resume seam. */
     maxTurns: number;
+    /**
+     * [security] `Cebab-faoa`: MCP servers the resume gate refused for each
+     * participant project, applied to the rebuilt worker specs at register time
+     * (exactly as the start path applies its H04 denials). Threaded into
+     * `wireOrchestratorSession`'s existing `mcpDenials` param so the denial
+     * binds on the FIRST resumed turn of whichever delivery path fires —
+     * Continue, `retry_worker`, or a reseeded pause-expiry resume. Before this,
+     * reconstruct passed nothing, so a server the operator had denied (or, on
+     * the auto-resume sweep, never approved) started on the resumed hop; only
+     * `continue_multi_agent` re-gated, and `retry_worker` bypassed it. Omit when
+     * the gate refused nothing (the common case). */
+    mcpDenials?: ReadonlyMap<number, readonly string[]>;
+    /** Injectable for tests, threaded straight into `wireOrchestratorSession`
+     *  (which already accepts it for the same reason). Omit in production so the
+     *  default mock-aware `pickRunner` is used. */
+    runnerFactory?: Parameters<typeof wireOrchestratorSession>[0]['runnerFactory'];
     /** Item #4: forwarded into the rebuilt router so a failure that
      *  happens AFTER the reconstruct (e.g. on the operator's Continue or
      *  on a subsequent retry) emits the pending-retry ServerMsg to the
@@ -420,6 +456,10 @@ export function reconstructOrchestratorSession(
       lifecycle: row.lifecycle as MultiAgentLifecycle,
       paths,
       workers,
+      // [security] `Cebab-faoa`: the resume gate's refusals reach the rebuilt
+      // worker specs here (undefined when nothing was refused).
+      mcpDenials: callbacks.mcpDenials,
+      runnerFactory: callbacks.runnerFactory,
       onEvent: callbacks.onEvent,
       onEnded: callbacks.onEnded,
       onPendingRetry: callbacks.onPendingRetry,
@@ -635,6 +675,12 @@ export function reconstructChainSession(
     /** `Cebab-vie.17`: re-resolved per-hop turn cap, read fresh for the same
      *  reason `hopBudget` is. */
     maxTurns: number;
+    /** [security] `Cebab-faoa`: the resume gate's per-project MCP refusals,
+     *  applied to the rebuilt participant specs via `wireChainSession`'s
+     *  `mcpDenials` param — the chain twin of the orchestrator field above. */
+    mcpDenials?: ReadonlyMap<number, readonly string[]>;
+    /** Injectable for tests, threaded into `wireChainSession`. */
+    runnerFactory?: Parameters<typeof wireChainSession>[0]['runnerFactory'];
     onPendingRetry?: BusSink['onPendingRetry'];
     onMutation?: BusSink['onMutation'];
     onPendingMutation?: BusSink['onPendingMutation'];
@@ -707,6 +753,10 @@ export function reconstructChainSession(
       participants,
       // NO initialPrompt → READ-ONLY: nothing is delivered until the operator
       // continues (the conservative R-B contract).
+      // [security] `Cebab-faoa`: the resume gate's refusals reach the rebuilt
+      // participant specs here (undefined when nothing was refused).
+      mcpDenials: callbacks.mcpDenials,
+      runnerFactory: callbacks.runnerFactory,
       onEvent: callbacks.onEvent,
       onEnded: callbacks.onEnded,
       onPendingRetry: callbacks.onPendingRetry,
