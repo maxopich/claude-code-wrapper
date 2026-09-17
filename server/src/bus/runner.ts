@@ -21,11 +21,7 @@
 import { createSdkMcpServer, tool, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { z } from 'zod';
 import { BUS_SEND_TOOL, classifyToolCall } from '@cebab/shared';
-import type {
-  AskUserQuestionOption,
-  AskUserQuestionView,
-  RouterDropReasonCode,
-} from '@cebab/shared/protocol';
+import type { AskUserQuestionView, RouterDropReasonCode } from '@cebab/shared/protocol';
 import { config } from '../config.js';
 import { pickRunner, type MockOptions, type RunOptions, type Runner } from '../runner/index.js';
 import type { SettingSource } from '../runner/claude.js';
@@ -39,6 +35,7 @@ import {
   TurnRefusedError,
   TurnStalledError,
 } from './errors.js';
+import { parseAskUserQuestions } from './pending_questions.js';
 
 /**
  * Stalled-turn watchdog thresholds (ms). A turn that yields no SDKMessage for
@@ -2149,37 +2146,4 @@ export function isTransientOverload(err: unknown): boolean {
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/**
- * Tolerant coercion of an `AskUserQuestion` tool input into the wire
- * `AskUserQuestionView[]`. The SDK input is a union of fixed-length option
- * tuples; we flatten to plain arrays and drop anything malformed so the card
- * always renders *something* rather than throwing inside the permission gate.
- * Exported for unit testing.
- */
-export function parseAskUserQuestions(input: Record<string, unknown>): AskUserQuestionView[] {
-  const rawQuestions = (input as { questions?: unknown }).questions;
-  if (!Array.isArray(rawQuestions)) return [];
-  const out: AskUserQuestionView[] = [];
-  for (const q of rawQuestions) {
-    if (!q || typeof q !== 'object') continue;
-    const o = q as Record<string, unknown>;
-    const question = typeof o.question === 'string' ? o.question : '';
-    const header = typeof o.header === 'string' ? o.header : '';
-    const multiSelect = o.multiSelect === true;
-    const options: AskUserQuestionOption[] = [];
-    if (Array.isArray(o.options)) {
-      for (const op of o.options) {
-        if (!op || typeof op !== 'object') continue;
-        const oo = op as Record<string, unknown>;
-        const label = typeof oo.label === 'string' ? oo.label : '';
-        if (!label) continue;
-        const description = typeof oo.description === 'string' ? oo.description : undefined;
-        options.push(description !== undefined ? { label, description } : { label });
-      }
-    }
-    out.push({ question, header, options, multiSelect });
-  }
-  return out;
 }

@@ -167,7 +167,7 @@ describe('App.tsx optimistic sends go through sendThenApply (W29, Cebab-u0s)', (
 
 describe('undeliverable notifications are distinguishable (Cebab-u0s)', () => {
   /**
-   * Eleven near-identical `onUndeliverable` blocks is exactly the shape that
+   * Sixteen near-identical `onUndeliverable` blocks is exactly the shape that
    * produces a copy-pasted `dedupeKey`, and a duplicate is not cosmetic:
    * operational notifications coalesce by key, so two different failures would
    * collapse into one toast and the operator would be told about one of them.
@@ -175,15 +175,22 @@ describe('undeliverable notifications are distinguishable (Cebab-u0s)', () => {
   test('every undeliverable dedupeKey is unique', () => {
     const code = codeOf(APP);
     // Matches the key wherever it is written, because it is written two ways:
-    // as a `dedupeKey:` property at the ten direct sites, and as a positional
+    // as a `dedupeKey:` property at the eleven direct sites, and as a positional
     // argument to `sendControlVerb` at the five control verbs. Keying on
     // `dedupeKey:` alone silently skipped the second group — five of the
-    // fifteen — which is the half most at risk of a copy-paste. (The prose
+    // sixteen — which is the half most at risk of a copy-paste. (The prose
     // said nine and fourteen while the assertion below said 15: three numbers
-    // for one list, and only the assertion was checked.)
+    // for one list, and only the assertion was checked. `Cebab-uhn2` moved all
+    // three together, which is the only way this stays true.)
+    //
+    // `Cebab-uhn2` is also what this test was FOR: the single-agent answer verb
+    // was written with `ask_user_answer_undeliverable`, which the bus's own
+    // answer helper already held. Two unrelated failures would have coalesced
+    // into one toast. The bus site now carries the `ma_` prefix its sibling
+    // `ma_user_prompt_undeliverable` uses, and each key names its own verb.
     const keys = [...code.matchAll(/`([a-z_]+_undeliverable):/g)].map((m) => m[1]);
     // Positive control: an assertion over an empty list passes for free.
-    expect(keys.length).toBe(15);
+    expect(keys.length).toBe(16);
     expect(new Set(keys).size).toBe(keys.length);
   });
 
@@ -196,7 +203,8 @@ describe('undeliverable notifications are distinguishable (Cebab-u0s)', () => {
       ['retryWorker', 'retry_worker_undeliverable'],
       ['abandonSession', 'abandon_session_undeliverable'],
       ['continueThroughMutation', 'continue_through_mutation_undeliverable'],
-      ['answerQuestion', 'ask_user_answer_undeliverable'],
+      ['answerQuestion', 'ma_ask_user_answer_undeliverable'],
+      ['answerAskUserQuestion', 'ask_user_answer_undeliverable'],
       ['stopMultiAgent', 'stop_multi_agent_undeliverable'],
     ]) {
       expect(bodyOf(code, name), `${name} not found`).toContain(key);

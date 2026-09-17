@@ -10,6 +10,8 @@ export function ChatView(props: {
   session: SessionView | null;
   isLive: boolean;
   onPermissionDecide: (requestId: string, decision: 'allow' | 'deny') => void;
+  /** `Cebab-uhn2`: answer a parked AskUserQuestion card in the transcript. */
+  onAskUserAnswer: (toolUseId: string, answers: Record<string, string>) => void;
   /**
    * Cluster C Phase 2: callbacks for the inline reason-for-stop prompt.
    * Optional — when absent the StoppedMarker still renders the marker
@@ -111,6 +113,7 @@ export function ChatView(props: {
           key={m.id}
           message={m}
           onPermissionDecide={props.onPermissionDecide}
+          onAskUserAnswer={props.onAskUserAnswer}
           extensionsUsed={props.extensionsUsed}
           onExtendMaxTurns={
             props.onExtendMaxTurns

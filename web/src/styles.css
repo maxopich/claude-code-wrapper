@@ -12071,6 +12071,35 @@ pre {
   justify-content: flex-end;
 }
 
+/* `Cebab-uhn2`: the spent card. A single-agent question stays in the transcript
+ * after it is answered, so the answered state has to read as finished rather
+ * than as an identical card that stopped working — the accent border comes off
+ * and the whole block drops to a quieter surface. */
+.ask-user-card-done {
+  border-color: var(--line-3);
+  background: var(--bg-2);
+  box-shadow: none;
+}
+.ask-user-q-done {
+  gap: var(--s-1);
+}
+.ask-user-answer {
+  font-size: var(--t-sm);
+  color: var(--accent-ink);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  border-left: 2px solid var(--accent);
+  border-radius: var(--r-sm);
+  padding: var(--s-1) var(--s-2);
+}
+/* Drained, not answered. `--warn-ink` because this is a `color:` — the fill
+ * token `--warn` is for backgrounds (see the semantic ink/fill split). */
+.ask-user-answer-none {
+  color: var(--warn-ink);
+  background: none;
+  border-left-color: var(--warn-ink);
+  font-style: italic;
+}
+
 /* ---- Cebab-ws0.3: model picker ----
  *
  * Geometry and tokens borrowed wholesale from `.theme-card` — the other

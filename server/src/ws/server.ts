@@ -234,6 +234,12 @@ import {
   resolveQuestion,
   listParkedQuestions,
   formatAskUserAnswer,
+  parkQuestion,
+  parseAskUserQuestions,
+  rejectQuestionsForSession,
+  ASK_USER_QUESTION_TOOL,
+  ASK_USER_DISMISSED_TEXT,
+  ASK_USER_MALFORMED_TEXT,
 } from '../bus/pending_questions.js';
 import {
   buildParticipantKickedMsg,
@@ -473,6 +479,45 @@ export function drainAllPendingPermissions(
   }
   pending.clear();
   return writes;
+}
+
+/**
+ * `Cebab-uhn2`: the question-shaped sibling of the three permission drains
+ * above. A parked `AskUserQuestion` blocks its turn on a Promise that nothing
+ * else settles, so every path that ends a single-agent turn has to come through
+ * here or the SDK subprocess waits forever on an operator who has gone.
+ *
+ * Snapshot BEFORE rejecting, for the reason `Cebab-ygu.7` records one line up:
+ * `rejectQuestionsForSession` empties the registry synchronously, so the ids
+ * needed to clear the cards have to be read first.
+ *
+ * SCOPED TO THE SESSIONS PASSED IN, never "everything parked". The registry is
+ * shared with the bus, whose questions deliberately OUTLIVE a browser
+ * disconnect (R-A) — a blanket drain on socket close would cancel a live bus
+ * run's question because an unrelated chat tab went away.
+ *
+ * `send` is optional and omitted on the socket-close path, matching
+ * `drainAllPendingPermissions`: that socket cannot deliver anything, and the
+ * client clears its own cards in `ws_close`.
+ */
+export function drainParkedQuestionsForSessions(
+  sessionIds: Iterable<string>,
+  reason: string,
+  send?: (msg: ServerMsg) => void,
+): number {
+  let drained = 0;
+  for (const sessionId of sessionIds) {
+    const parked = listParkedQuestions(sessionId);
+    if (parked.length === 0) continue;
+    rejectQuestionsForSession(sessionId, reason);
+    drained += parked.length;
+    if (send) {
+      for (const q of parked) {
+        send({ type: 'ask_user_resolved', sessionId, toolUseId: q.toolUseId });
+      }
+    }
+  }
+  return drained;
 }
 
 /**
@@ -3303,6 +3348,12 @@ function onConnection(ws: WebSocket): void {
     // reopens the session to buttons that do nothing. `reason` says Cebab
     // decided this, not them.
     drainAllPendingPermissions(conn.pendingPermissions);
+    // `Cebab-uhn2`: before `conn.inFlight` is cleared, because the session ids
+    // in it are the only handle on which parked questions belong to THIS
+    // connection's single-agent turns. No `send` — the socket is going away.
+    // Bus questions are untouched by construction: a bus run is not in
+    // `conn.inFlight`, and it is meant to survive this (R-A).
+    drainParkedQuestionsForSessions(conn.inFlight.keys(), 'client disconnected');
     for (const f of conn.inFlight.values()) f.ac.abort();
     conn.inFlight.clear();
     // Register B20: the three spawn gates park a promise per pending decision
@@ -4329,6 +4380,44 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       sendProjects(conn, rows);
       return;
     }
+    case 'ask_user_answer': {
+      // `Cebab-uhn2`: the operator answered a parked single-agent question.
+      // Resolve the parked `canUseTool` promise with the formatted answer — the
+      // gate returns it to the SDK as a deny message, the model reads it as the
+      // tool result, and the same turn resumes.
+      //
+      // [security] THE `inFlight` CHECK IS NOT A FORMALITY. `pending_questions`
+      // is one process-wide registry shared with the bus, and `resolveQuestion`
+      // is keyed by `(sessionId, toolUseId)` alone — it cannot tell which path
+      // parked the entry. Without this guard a client could answer a BUS
+      // question through the single-agent verb, skipping the bus handler's
+      // `appendMultiAgentEvent`, and the run's own scrollback would be missing
+      // the answer that steered it. Restricting to this connection's live
+      // single-agent turns is also the same lie-detection `permission_decision`
+      // does one case below, for the same reason.
+      if (!conn.inFlight.has(msg.sessionId)) return;
+      const answerText = formatAskUserAnswer(msg.answers);
+      // Idempotent: a double-click, or an answer racing a drain, finds nothing
+      // parked and stops here rather than persisting an answer nothing consumed.
+      if (!resolveQuestion(msg.sessionId, msg.toolUseId, answerText)) return;
+      send(conn.ws, {
+        type: 'ask_user_resolved',
+        sessionId: msg.sessionId,
+        toolUseId: msg.toolUseId,
+      });
+      // Persist so a replay shows the answer beside the question, the same way
+      // `permission_decided` sits beside its request card.
+      await persistMessage(msg.sessionId, {
+        type: 'wrapper',
+        subtype: 'ask_user_answered',
+        session_id: msg.sessionId,
+        uuid: randomUUID(),
+        toolUseId: msg.toolUseId,
+        answers: msg.answers,
+        text: answerText,
+      } as never);
+      return;
+    }
     case 'permission_decision': {
       const pending = conn.pendingPermissions.get(msg.requestId);
       if (!pending) return;
@@ -5080,6 +5169,9 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       cleanupPendingPermissionsForSession(conn.pendingPermissions, msg.sessionId, (m) =>
         send(conn.ws, m),
       );
+      // `Cebab-uhn2`: a parked question is the other way this turn can be
+      // blocked on the operator, and Stop has to release it too.
+      drainParkedQuestionsForSessions([msg.sessionId], 'interrupted', (m) => send(conn.ws, m));
       executeInterrupt({
         inFlight: conn.inFlight.get(msg.sessionId),
         sessionId: msg.sessionId,
@@ -7037,10 +7129,78 @@ async function runOneTurn(
   const canUseTool = async (
     toolName: string,
     input: Record<string, unknown>,
+    toolOpts?: { toolUseID?: string },
   ): Promise<
     | { behavior: 'allow'; updatedInput: Record<string, unknown> }
     | { behavior: 'deny'; message: string }
   > => {
+    // `Cebab-uhn2`: AskUserQuestion is ANSWERED, never approved — and this
+    // branch sits ABOVE `shouldAutoAllow` because that is exactly where the bug
+    // was. On a trusted project `shouldAutoAllow` returns true for every tool,
+    // so an `allow` was the routine outcome, and an `allow` is the one answer
+    // this tool cannot use: measured against the bundled CLI, the model gets
+    // back the literal string "The user did not answer the questions." The
+    // operator was never shown anything. Putting the branch below the
+    // auto-allow check would reproduce the defect on precisely the projects the
+    // operator trusts most.
+    //
+    // A deny carrying the answer is the mechanism, not a workaround: a deny
+    // message is the only channel by which `canUseTool` can put text in front
+    // of the model, it is measured to work (the model reads the answer and the
+    // same turn continues), and the bus has answered its questions this way
+    // since interactive questions shipped.
+    if (toolName === ASK_USER_QUESTION_TOOL) {
+      const questions = parseAskUserQuestions(input);
+      // An empty parse is refused rather than parked. Every field of `input` is
+      // model-authored, so a malformed shape is reachable without anything
+      // being wrong with Cebab — and parking on it would put an unanswerable
+      // card on screen and block the turn behind it until the operator
+      // interrupts.
+      if (questions.length === 0) {
+        return { behavior: 'deny', message: ASK_USER_MALFORMED_TEXT };
+      }
+      // The SDK's own tool_use id, so a re-emit and the answer agree on which
+      // question is being talked about. `randomUUID` only for a runner that
+      // does not supply one (the mock's older path); a question keyed by an id
+      // the client never sees again is still better than a dropped question.
+      const toolUseId = toolOpts?.toolUseID ?? randomUUID();
+      // PARK BEFORE THE CARD GOES OUT, and note that `parkQuestion` registers
+      // synchronously inside its executor — the await comes later. Emitting
+      // first would open a window in which the operator is looking at an
+      // answerable card while `resolveQuestion` has nothing to resolve, and an
+      // answer arriving in it is dropped on the floor: the handler finds no
+      // entry, returns early, and never echoes `ask_user_resolved`, so the card
+      // stays up with the turn still blocked behind it.
+      const answer = parkQuestion(sessionId, {
+        agent: project.name,
+        toolUseId,
+        questions,
+      });
+      send(conn.ws, {
+        type: 'ask_user_question',
+        sessionId,
+        agent: project.name,
+        toolUseId,
+        questions,
+      });
+      await persistMessage(sessionId, {
+        type: 'wrapper',
+        subtype: 'ask_user_question',
+        session_id: sessionId,
+        uuid: toolUseId,
+        toolUseId,
+        agent: project.name,
+        questions,
+      } as never);
+      try {
+        return { behavior: 'deny', message: await answer };
+      } catch {
+        // `rejectQuestionsForSession` drained us — interrupt, turn death or a
+        // closed socket. The drain site has already told the client to clear
+        // the card; all that is left is to unblock the SDK.
+        return { behavior: 'deny', message: ASK_USER_DISMISSED_TEXT };
+      }
+    }
     // Read the live mode from `inFlight` (mutated by `set_permission_mode`).
     // The closure-captured `permissionMode` is the bootstrap fallback for the
     // narrow window before `inFlight.set(...)` runs below — in practice the SDK
@@ -7490,6 +7650,10 @@ async function runOneTurn(
     drainPendingPermissionsForEndedTurn(conn.pendingPermissions, sessionId, (m) =>
       send(conn.ws, m),
     );
+    // `Cebab-uhn2`: same obligation for a parked question. Reached when the
+    // turn dies while the card is up (crash, auth lapse, max-turns) — the
+    // paths that see neither the interrupt handler nor the socket close.
+    drainParkedQuestionsForSessions([sessionId], 'turn ended', (m) => send(conn.ws, m));
     closeLogger(sessionId);
     // Cluster D Phase 4b: clear the captured prompt UNLESS the turn
     // ended held by a rate-limit. This is the only path that wants the

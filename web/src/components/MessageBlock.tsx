@@ -7,6 +7,7 @@ import { ClaudeMark } from './ClaudeMark';
 import { CopyButton } from './CopyButton';
 import { badgeTooltip, PermissionActions, renderPermissionBody } from './PermissionCards';
 import { MaxTurnsResultCard } from './MaxTurnsResultCard';
+import { AskUserQuestionAnswered, AskUserQuestionCard } from './AskUserQuestionCard';
 
 export function MessageBlock(props: {
   message: MessageView;
@@ -34,6 +35,12 @@ export function MessageBlock(props: {
    * scrolling away, etc.).
    */
   onEndMaxTurnsSession?: () => void;
+  /**
+   * `Cebab-uhn2`: the operator answered a parked `AskUserQuestion`. Optional
+   * for the same reason the two above are — the multi-agent transcript renders
+   * MessageBlocks too and answers its questions through its own path.
+   */
+  onAskUserAnswer?: (toolUseId: string, answers: Record<string, string>) => void;
 }) {
   const { message: m, onPermissionDecide } = props;
   // Hover-revealed per-message copy (single-chat parity with the multi-agent
@@ -157,6 +164,37 @@ export function MessageBlock(props: {
           <pre>{m.message}</pre>
         </div>
         {copyText && <CopyButton text={copyText} className="msg-copy" label="Copy error" />}
+      </div>
+    );
+  }
+
+  if (m.kind === 'ask_user_question') {
+    // `Cebab-uhn2`. Styled as a permission card, because that is what it is
+    // from the operator's side: the turn is parked at the same gate and will
+    // not move until they act. The difference is that a question is answered
+    // rather than allowed — hence the shared card instead of Allow/Deny.
+    const handler = props.onAskUserAnswer;
+    return (
+      <div className="msg permission msg-group">
+        <div className="avatar tool" aria-hidden="true">
+          ?
+        </div>
+        <div className="msg-body">
+          <div className="role">
+            <span>question · {m.agent}</span>
+          </div>
+          {m.resolved || !handler ? (
+            <AskUserQuestionAnswered
+              questions={m.questions}
+              {...(m.answers !== undefined ? { answers: m.answers } : {})}
+            />
+          ) : (
+            <AskUserQuestionCard
+              pending={{ agent: m.agent, toolUseId: m.toolUseId, questions: m.questions }}
+              onSubmit={(_agent, toolUseId, answers) => handler(toolUseId, answers)}
+            />
+          )}
+        </div>
       </div>
     );
   }
