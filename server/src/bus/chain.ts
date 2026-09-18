@@ -1242,6 +1242,32 @@ export function createChainRouter(params: {
     // drop earlier in the same turn from re-parking over the failure reason on
     // some later agent's success.
     stallPending = null;
+    // `Cebab-a6wm`: keep the STACK of an unexpected turn failure where it can
+    // be read after the fact. Only `err.message` survives into the operator's
+    // `cebab → user kind=error` row below, and for a control signal Cebab
+    // raised (a cap hit, a stall) that message is the whole actionable story.
+    // For a SURPRISE — a V8 RangeError, a bad-shape TypeError, an ENOENT — the
+    // message alone names no file and no frame, and the console.error in the
+    // `deliver().catch` that DID print the whole object goes to a pipe nobody
+    // retains once the server is backgrounded. Written into the session folder,
+    // which already exists per session, is already 0700, and is already where
+    // this session's artifacts live — so a stack containing prompt fragments is
+    // no more exposed than the transcript beside it. Mirrors the orchestrator's
+    // own `onWorkerFailed`.
+    //
+    // Best-effort by construction: a failed diagnostic write must never be what
+    // stops the operator being told the turn failed.
+    try {
+      fs.appendFileSync(
+        path.join(computeSessionPaths(sessionId).folder, 'turn-errors.log'),
+        `${new Date().toISOString()} agent=${agentName}\n${
+          err instanceof Error ? (err.stack ?? err.message) : String(err)
+        }\n\n`,
+        'utf8',
+      );
+    } catch {
+      /* diagnostic only — never let this mask the failure it describes */
+    }
     const errMessage =
       err instanceof Error ? err.message : typeof err === 'string' ? err : String(err);
     const reasonText = `\`${agentName}\`'s last turn failed: ${errMessage}`;
