@@ -99,6 +99,7 @@ import {
   isPausedForMutation,
   isTurnStalled,
   MutationNotRecordedError,
+  isBusControlSignal,
 } from './errors.js';
 import { pendingRetryToDescriptor } from './pending_retry.js';
 import { hopBudgetExhaustedText, turnRefusalText, type TurnRefusalReason } from './turn_guard.js';
@@ -1258,16 +1259,26 @@ export function createChainRouter(params: {
     //
     // Best-effort by construction: a failed diagnostic write must never be what
     // stops the operator being told the turn failed.
-    try {
-      fs.appendFileSync(
-        path.join(computeSessionPaths(sessionId).folder, 'turn-errors.log'),
-        `${new Date().toISOString()} agent=${agentName}\n${
-          err instanceof Error ? (err.stack ?? err.message) : String(err)
-        }\n\n`,
-        'utf8',
-      );
-    } catch {
-      /* diagnostic only — never let this mask the failure it describes */
+    // `Cebab-vie.29` follow-up / `Cebab-a6wm` criterion 2: a control signal
+    // Cebab RAISED is not a surprise, and its message is already the whole
+    // actionable story — a cap hit, a stall, a refused turn, a pause. Dumping
+    // frames for those buries the unexpected stacks this file exists to keep,
+    // in a log whose only reader is someone hunting one. `isBusControlSignal`
+    // is the same predicate `isTransientOverload` consults before it looks at
+    // any string, and its membership is derived from `errors.ts` by
+    // `errors.control_signal_registry.test.ts` rather than restated here.
+    if (!isBusControlSignal(err)) {
+      try {
+        fs.appendFileSync(
+          path.join(computeSessionPaths(sessionId).folder, 'turn-errors.log'),
+          `${new Date().toISOString()} agent=${agentName}\n${
+            err instanceof Error ? (err.stack ?? err.message) : String(err)
+          }\n\n`,
+          'utf8',
+        );
+      } catch {
+        /* diagnostic only — never let this mask the failure it describes */
+      }
     }
     const errMessage =
       err instanceof Error ? err.message : typeof err === 'string' ? err : String(err);

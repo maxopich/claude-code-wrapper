@@ -19,6 +19,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { createChainRouter } from './chain.js';
+import { TurnStalledError } from './errors.js';
 import { computeSessionPaths } from './paths.js';
 import { createMultiAgentSession } from '../repo/multi_agent.js';
 import { _resetCoalesceState } from '../notifications/dispatcher.js';
@@ -102,5 +103,28 @@ describe('an unexpected chain-hop failure keeps its stack (Cebab-a6wm)', () => {
     const { router } = makeRouter();
     router.onWorkerFailed('coder', 'do the thing', 'bare string blew up');
     expect(readTurnErrors()).toContain('bare string blew up');
+  });
+
+  test('[security-adjacent] a control signal Cebab RAISED writes no stack', () => {
+    // `Cebab-a6wm` criterion 2, which the first cut of this feature did not
+    // meet in either router: a cap hit, a stall, a refused turn and a pause are
+    // Cebab stopping the turn, and their message is already the whole
+    // actionable story. Dumping frames for those buries the unexpected stacks
+    // this log exists to keep, in a file whose only reader is hunting one.
+    const { router } = makeRouter();
+    router.onWorkerFailed('coder', 'do the thing', new TurnStalledError('coder', 90_000));
+    expect(readTurnErrors()).toBeNull();
+  });
+
+  test('ANTI-VACUITY: the same router DOES write for an ordinary error', () => {
+    // Pairing the case above. "Writes nothing, ever" — a broken path, a wrong
+    // folder, a guard that swallowed everything — passes a one-directional
+    // assertion just as well as the intended behaviour does.
+    const { router } = makeRouter();
+    router.onWorkerFailed('coder', 'do the thing', new TurnStalledError('coder', 90_000));
+    expect(readTurnErrors()).toBeNull();
+
+    router.onWorkerFailed('coder', 'do the thing', new Error('a genuine surprise'));
+    expect(readTurnErrors()).toContain('a genuine surprise');
   });
 });
