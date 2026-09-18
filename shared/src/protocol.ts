@@ -2358,7 +2358,32 @@ export type ServerMsg =
       mock?: boolean;
     }
   | { type: 'assistant_message'; sessionId: string; uuid: string; blocks: ContentBlock[] }
-  | { type: 'user_message'; sessionId: string; uuid: string; blocks: ContentBlock[] }
+  | {
+      type: 'user_message';
+      sessionId: string;
+      uuid: string;
+      blocks: ContentBlock[];
+      /**
+       * `Cebab-ibb4`: this row is the OPERATOR'S OWN PROMPT, replayed.
+       *
+       * The SDK puts tool_result blocks in `user` messages, so the client's
+       * reducer folds every `user_message` into a tool-output card — a fold its
+       * own comment calls correct because it was, measured across nine session
+       * logs. Then `persistOperatorPrompt` started writing the prompt as a
+       * `type: 'user'` row so replay would stop dropping it, on the premise
+       * that "the web store already renders it". It does not: it renders it as
+       * something the TOOL said. On replay the operator's question and a grep's
+       * output are the same card with the same label, and there is no field
+       * that tells them apart.
+       *
+       * So the marker the persist side already writes (`cebabOrigin`) is
+       * forwarded instead of being dropped at the translate boundary. Absent on
+       * every live message and on every row written before the marker existed,
+       * which is why it is optional and why its absence has to keep meaning
+       * "fold this as tool output".
+       */
+      origin?: 'operator_prompt';
+    }
   | { type: 'stream_delta'; sessionId: string; uuid: string; delta: StreamDelta }
   | {
       /**

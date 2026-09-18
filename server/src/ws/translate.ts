@@ -228,11 +228,26 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
     }
 
     case 'user': {
-      const u = m as AnyMsg & { uuid?: string; message: { content: string | ContentBlock[] } };
+      const u = m as AnyMsg & {
+        uuid?: string;
+        message: { content: string | ContentBlock[] };
+        cebabOrigin?: string;
+      };
       return {
         type: 'user_message',
         sessionId,
         uuid: u.uuid ?? '',
+        // `Cebab-ibb4`: forward the marker `persistOperatorPrompt` writes, so
+        // the client can tell the operator's own replayed question from a tool
+        // result. It was being dropped here, which is the whole reason a
+        // replayed prompt renders as something the tool said — see the field's
+        // header in `shared/src/protocol.ts`.
+        //
+        // Compared against the literal rather than passed through, so a future
+        // `cebabOrigin` value cannot reach the client as an unmodelled string:
+        // the wire field is a closed set of one, and a row carrying anything
+        // else keeps today's behaviour.
+        ...(u.cebabOrigin === 'operator_prompt' ? { origin: 'operator_prompt' as const } : {}),
         // Register S07: the SDK declares `SDKUserMessage.message` as
         // `MessageParam`, whose `content` is `string | ContentBlockParam[]`.
         // This cast used to claim the array arm unconditionally and forward
