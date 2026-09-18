@@ -1433,6 +1433,30 @@ export function createOrchestratorRouter(params: {
   // called), fall back to crashed teardown — there's nothing to retry.
   const onWorkerFailed = (agentName: string, prompt: string, err: unknown) => {
     if (ended) return;
+    // `Cebab-a6wm`: keep the STACK of an unexpected turn failure where it can
+    // be read after the fact. Cebab already prints the whole error object
+    // here, but a server started in the background writes stdout to a pipe
+    // nobody retains — which is how `Cebab-gejh` stayed undiagnosable through
+    // several live reproductions: the operator got
+    // "Maximum call stack size exceeded" and the four frames that named the
+    // cycle went nowhere. Written into the session folder, which already
+    // exists per session, is already 0700, and is already where this session's
+    // artifacts live — so a stack containing prompt fragments is no more
+    // exposed than the transcript beside it.
+    //
+    // Best-effort by construction: a failed diagnostic write must never be
+    // what stops the operator being told the turn failed.
+    try {
+      fs.appendFileSync(
+        path.join(computeSessionPaths(sessionId).folder, 'turn-errors.log'),
+        `${new Date().toISOString()} agent=${agentName}\n${
+          err instanceof Error ? (err.stack ?? err.message) : String(err)
+        }\n\n`,
+        'utf8',
+      );
+    } catch {
+      /* diagnostic only — never let this mask the failure it describes */
+    }
     const errMessage =
       err instanceof Error ? err.message : typeof err === 'string' ? err : String(err);
     const reasonText = `\`${agentName}\`'s last turn failed: ${errMessage}`;
