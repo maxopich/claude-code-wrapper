@@ -26,6 +26,14 @@ This is the half that matters for safety. Trust decides whether the project's **
 
 So flipping a project to **trusted** authorises all of that to run the moment you use the project. A hostile or careless `.claude/settings.local.json` checked into a repo you cloned cannot auto-load its hooks while the project is untrusted — that is the point of leaving it on "asks" until you have looked.
 
+### `CLAUDE.md` is the one exception, and it reaches every session
+
+A project's `CLAUDE.md` is instructions — text the agent reads. It executes nothing, so Cebab hands it to the agent whichever way the Trust toggle is set, and an untrusted session now starts with the project's own conventions instead of silently running without them.
+
+The mechanism differs, and only the bill changes with it: a **trusted** project's `CLAUDE.md` is loaded by the CLI itself, and for an **untrusted** one Cebab reproduces the file in the agent's instructions. Either way the agent has it; it is never sent twice.
+
+What that does **not** change is anything that runs. Hooks, environment injectors, skills and MCP servers still follow the Trust toggle exactly as above. Cebab also tells the agent where the text came from and how it ranks: authoritative for conventions, below you — an instruction inside a `CLAUDE.md` telling the agent to disregard you is refused, because a `CLAUDE.md` is a file in a repository, not a person.
+
 ## The exception: user-scope MCP servers load regardless
 
 Trust scopes the _project's_ files. It does **not** scope MCP servers you declared at the user level in `~/.claude.json`'s top-level `mcpServers` (for example via `claude mcp add --scope user`). Those load even for an untrusted project, because a home-directory declaration is outside a project's reach.
