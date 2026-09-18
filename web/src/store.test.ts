@@ -1314,6 +1314,23 @@ describe('store / agent_activity (ephemeral liveness)', () => {
     expect(s.multiAgent.active!.activityByAgent['planner']).toBeUndefined();
   });
 
+  // ACCEPTANCE (a), end to end. The case above stops at the reducer's own
+  // state; this one carries the same sequence through the SELECTOR the UI
+  // actually calls, which is the half that decides what the operator sees.
+  //
+  // It exists because the `workingAgents` suite's acceptance-(a) case builds
+  // its map by hand and so cannot observe the reducer at all: restoring the
+  // old clear-all `idle` branch leaves that case green. This one reddens.
+  test('a sibling going idle leaves the other agent in workingAgents', () => {
+    let s = started();
+    s = reduce(s, { type: 'server', msg: activity({ agentName: 'coder' }) });
+    s = reduce(s, { type: 'server', msg: activity({ agentName: 'planner' }) });
+    expect(Object.keys(workingAgents(s.multiAgent.active!)).sort()).toEqual(['coder', 'planner']);
+    s = reduce(s, { type: 'server', msg: activity({ agentName: 'planner', phase: 'idle' }) });
+    expect(Object.keys(workingAgents(s.multiAgent.active!))).toEqual(['coder']);
+    expect(workingAgents(s.multiAgent.active!)['coder'].phase).toBe('working');
+  });
+
   test('a mismatched sessionId is a no-op (stale tick from a prior run)', () => {
     let s = started();
     s = reduce(s, { type: 'server', msg: activity() });
@@ -1405,9 +1422,12 @@ describe('store / workingAgents (per-agent liveness, run-level suppressed)', () 
     expect(Object.keys(workingAgents(run)).sort()).toEqual(['coder', 'planner']);
   });
 
-  // Acceptance (a): A working, B idle → A still shown working. On the old
-  // single-slot code B's idle nulled the shared row and this returned nothing.
-  test('a sibling going idle leaves the still-working agent shown', () => {
+  // SHAPE ONLY, and labelled that way on purpose. This builds its map by hand,
+  // so it says the selector passes an already-correct map through unchanged —
+  // it does NOT exercise the reducer, and restoring the old clear-all `idle`
+  // branch leaves it green. Acceptance (a) is carried by the reducer-driven
+  // case in the `agent_activity` suite, which reddens on exactly that.
+  test('the selector returns a hand-built single-agent map unchanged', () => {
     const run = makeRun({ activityByAgent: { coder: act('coder') } }); // planner already idle (absent)
     expect(Object.keys(workingAgents(run))).toEqual(['coder']);
     expect(workingAgents(run)['coder'].phase).toBe('working');
