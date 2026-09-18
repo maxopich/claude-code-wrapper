@@ -41,6 +41,40 @@ export type PermissionModePickerProps = {
  * Exported for tests: the trust-dependence is the whole design, and asserting
  * it through a rendered DOM would test React rather than the decision.
  */
+/**
+ * What `acceptEdits` ACTUALLY does, in each Trust state — the one copy, for the
+ * two controls that describe it (`Cebab-5tjb`).
+ *
+ * `shouldAutoAllow` (`server/src/ws/permission.ts`) is:
+ *
+ *     if (mode === 'default') return false;
+ *     if (trusted) return true;                 // EVERY tool
+ *     return FILE_EDIT_TOOLS.has(toolName);     // Edit, Write, NotebookEdit
+ *
+ * so a single fixed sentence is wrong in both reachable configurations, in
+ * OPPOSITE directions: on a trusted project it understates (Bash, WebFetch and
+ * every MCP tool also run uncarded), and on an untrusted one it overstates —
+ * `Bash` is not in `FILE_EDIT_TOOLS`, so naming shell commands as auto-allowed
+ * names the one thing that still asks.
+ *
+ * Shared rather than duplicated because the in-chat toggle's fixed label is
+ * exactly what a second hand-maintained copy of a safety sentence decays into:
+ * the picker branched correctly, the toggle did not, and nothing made them
+ * disagree out loud. Two consumers, one string pair.
+ */
+export function acceptEditsCopy(trusted: boolean): { label: string; description: string } {
+  return trusted
+    ? {
+        label: 'Auto-allow every tool',
+        description: 'Bash, edits, network — all run without a card.',
+      }
+    : {
+        label: 'Auto-allow file edits',
+        description:
+          'Edit, Write and NotebookEdit run without a card. Bash and other tools still ask.',
+      };
+}
+
 export function permissionModeOptions(
   trusted: boolean,
 ): CardRadioOption<SessionPermissionMode | null>[] {
@@ -62,10 +96,7 @@ export function permissionModeOptions(
     {
       key: 'acceptEdits',
       value: 'acceptEdits',
-      label: trusted ? 'Auto-allow every tool' : 'Auto-allow file edits',
-      description: trusted
-        ? 'Bash, edits, network — all run without a card.'
-        : 'Edit, Write and NotebookEdit run without a card. Bash and other tools still ask.',
+      ...acceptEditsCopy(trusted),
     },
   ];
 }

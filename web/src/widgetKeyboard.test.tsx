@@ -275,9 +275,11 @@ describe('[a11y] the artifacts table behaves like a grid (U30)', () => {
 // ------------------------------------------------------------ U17: toggle
 
 describe('[a11y] the permission pills expose their state (U17)', () => {
-  function renderToggle(mode: 'default' | 'acceptEdits', disabled = false) {
+  function renderToggle(mode: 'default' | 'acceptEdits', disabled = false, trusted = false) {
     act(() => {
-      root.render(<ModeToggle mode={mode} disabled={disabled} onChange={() => {}} />);
+      root.render(
+        <ModeToggle mode={mode} trusted={trusted} disabled={disabled} onChange={() => {}} />,
+      );
     });
   }
   const pills = () => Array.from(container.querySelectorAll<HTMLButtonElement>('.pill'));

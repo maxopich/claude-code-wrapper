@@ -1,4 +1,5 @@
 import type { SessionPermissionMode } from '@cebab/shared/protocol';
+import { acceptEditsCopy } from './PermissionModePicker';
 
 /**
  * The per-session permission posture: ask for each tool use, or auto-allow
@@ -18,6 +19,14 @@ import type { SessionPermissionMode } from '@cebab/shared/protocol';
  */
 export function ModeToggle(props: {
   mode: SessionPermissionMode;
+  /**
+   * The project's Trust setting, because `acceptEdits` means two different
+   * things depending on it and this control used to assert one fixed sentence
+   * that was wrong in both (`Cebab-5tjb`). Required, not optional: an omitted
+   * flag would default to one branch and silently reinstate exactly the wrong
+   * answer this fixes, on whichever project forgot to pass it.
+   */
+  trusted: boolean;
   disabled?: boolean;
   onChange: (mode: SessionPermissionMode) => void;
 }) {
@@ -28,7 +37,11 @@ export function ModeToggle(props: {
   const tooltip = props.disabled
     ? 'Mode is read-only for past sessions. The next run will resume with this mode; toggle while a session is running to change it.'
     : props.mode === 'acceptEdits'
-      ? 'Auto-allowing file edits + common shell commands. Persists across turns until you toggle back.'
+      ? // The scope sentence comes from the SAME helper the pre-session picker
+        // uses, so the two controls cannot drift into describing the same
+        // posture differently; only the persistence clause is local to this one,
+        // because only this control is mid-session.
+        `${acceptEditsCopy(props.trusted).description} Persists across turns until you toggle back.`
       : 'Asking for each tool use. Persists across turns until you toggle to auto-edits.';
   const hintId = 'mode-toggle-hint';
   // `aria-disabled`, not the native attribute: a disabled button is removed

@@ -2949,6 +2949,14 @@ function AppShell({
                     )}
                     <ModeToggle
                       mode={permissionMode}
+                      // `Cebab-5tjb`: `acceptEdits` auto-allows EVERY tool on a
+                      // trusted project and only Edit/Write/NotebookEdit on an
+                      // untrusted one, so the control cannot describe itself
+                      // without this. With no active project there is no live
+                      // session either, and the toggle is disabled — so the
+                      // `false` default shows the disabled sentence, not a
+                      // wrong claim about a posture nothing is running under.
+                      trusted={activeProject?.trusted === true}
                       disabled={!sessionIsLive}
                       onChange={setPermissionMode}
                     />
