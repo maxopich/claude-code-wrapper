@@ -3,7 +3,12 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 import { SessionBanner } from './SessionBanner.js';
-import { buildMcpStatusBannerItem, mcpStatusBannerTitle } from './McpStatusBanner.js';
+import {
+  buildMcpStatusBannerItem,
+  mcpStatusBannerTitle,
+  mcpStillConnectingTitle,
+  partitionMcpStatus,
+} from './McpStatusBanner.js';
 
 // Cebab-ws0.2: the banner that names a session's MCP servers which loaded but
 // never reported as connected.
@@ -61,11 +66,13 @@ describe('McpStatusBanner', () => {
   });
 
   test('offers no actions, ever', () => {
-    // Every ACTION in this banner would be inert — the SDK connects servers at
-    // spawn and there is no mid-session retry. An affordance that does nothing
-    // is worse than none, which is the whole reason this bead exists. This is
-    // the half `Cebab-9fta` did NOT change: dismissal hides a reading, it does
-    // not claim to act on it.
+    // NOT because Cebab cannot reconnect a server — since `Cebab-ormv` it can,
+    // and the authority panel's live MCP section does. The reason survived its
+    // premise: this banner reports a FROZEN startup reading, so a button here
+    // would act on a possibly-stale fact and report into a banner that cannot
+    // refresh. The live section owns the actions because it owns a current
+    // read. This is the half `Cebab-9fta` did NOT change: dismissal hides a
+    // reading, it does not claim to act on it.
     mount([{ name: 'ledger-tools', status: 'failed' }]);
     const item = buildMcpStatusBannerItem({
       sessionId: 'sess-abcdef12',
@@ -134,5 +141,82 @@ describe('McpStatusBanner', () => {
   test('the title counts, and reads correctly for one server', () => {
     expect(mcpStatusBannerTitle(1)).toBe('One MCP server did not come up for this session');
     expect(mcpStatusBannerTitle(3)).toBe('3 MCP servers did not come up for this session');
+  });
+
+  // ---- Cebab-z9bh: `pending` is an unfinished handshake, not a verdict ----
+  //
+  // Measured on SDK 0.3.251: the same claude.ai server read `pending` at init
+  // in one probe and `connected` in the next. The banner used to announce that
+  // as "did not come up". Every case below that asserts the banner STOPS
+  // saying something is paired with a control proving it can still say it —
+  // otherwise a build that simply deleted the sentence would pass.
+
+  test('THE FIX: a pending-only reading is not announced as a failure', () => {
+    const item = buildMcpStatusBannerItem({
+      sessionId: 'sess-abcdef12',
+      servers: [{ name: 'remote-calendar', status: 'pending' }],
+    });
+    expect(item.title).toBe('One MCP server was still connecting when this session started');
+    expect(item.title).not.toContain('did not come up');
+    // Not a warning: an unfinished handshake usually resolves itself, and a
+    // warn tier for that is how an operator learns to ignore the tier.
+    expect(item.tier).toBe('info');
+  });
+
+  test('CONTROL: a definite bad status still warns and still says "did not come up"', () => {
+    // The anti-vacuity pair for the case above. If the fix were implemented by
+    // softening the copy for everything, this reddens.
+    const item = buildMcpStatusBannerItem({
+      sessionId: 'sess-abcdef12',
+      servers: [{ name: 'ledger-tools', status: 'failed' }],
+    });
+    expect(item.title).toBe('One MCP server did not come up for this session');
+    expect(item.tier).toBe('warn');
+  });
+
+  test('a mixed reading counts only the definite ones in the title, and forgets neither', () => {
+    // The count is the operator-visible claim, so a pending server inflating it
+    // is the same false statement in a smaller font.
+    const item = buildMcpStatusBannerItem({
+      sessionId: 'sess-abcdef12',
+      servers: [
+        { name: 'ledger-tools', status: 'failed' },
+        { name: 'remote-calendar', status: 'pending' },
+      ],
+    });
+    expect(item.title).toBe('One MCP server did not come up for this session');
+    expect(item.tier).toBe('warn');
+    act(() => {
+      root.render(<SessionBanner {...item} />);
+    });
+    const text = container.textContent ?? '';
+    // Nothing is dropped: both servers and both verbatim statuses survive.
+    expect(text).toContain('ledger-tools');
+    expect(text).toContain('failed');
+    expect(text).toContain('remote-calendar');
+    expect(text).toContain('pending');
+  });
+
+  test('pending is a LITERAL, not a category — an unknown status is still a failure', () => {
+    // The guard against this fix reopening the blind spot `notConnected` closes.
+    // If someone widens the pending check to "anything that looks transient",
+    // this reddens.
+    const { stillConnecting, didNotComeUp } = partitionMcpStatus([
+      { name: 'a', status: 'pending' },
+      { name: 'b', status: 'connecting' },
+      { name: 'c', status: 'some-future-status' },
+      { name: 'd', status: 'needs-auth' },
+    ]);
+    expect(stillConnecting.map((s) => s.name)).toEqual(['a']);
+    expect(didNotComeUp.map((s) => s.name)).toEqual(['b', 'c', 'd']);
+  });
+
+  test('the still-connecting title counts too', () => {
+    expect(mcpStillConnectingTitle(1)).toBe(
+      'One MCP server was still connecting when this session started',
+    );
+    expect(mcpStillConnectingTitle(2)).toBe(
+      '2 MCP servers were still connecting when this session started',
+    );
   });
 });

@@ -55,6 +55,27 @@
 // again (`store.ts`, `mcp_status_dismissed`). Hiding is the operator's call;
 // forgetting is not.
 //
+// `pending` IS NOT A VERDICT, AND SAYING IT WAS IS THIS BANNER'S ONE FALSE
+// CLAIM (`Cebab-z9bh`). `notConnected` is right to be "anything but
+// connected" — enumerating bad statuses would blind it to the first new
+// failure mode the SDK adds, which is the whole reason it reads that way. But
+// the banner INTERPRETS that set, and one member of it means something else.
+//
+// Measured on SDK 0.3.251: the same claude.ai server read `pending` at init in
+// one probe and `connected` in the next, and two prod sessions minutes apart
+// disagree about the same server on disk. `pending` at `system/init` is the
+// handshake still in flight at the earliest and least settled moment Cebab
+// could have looked — not a server that failed to come up.
+//
+// So the split lives HERE, at the interpreting site, and `notConnected` is
+// untouched: the slice still carries every non-connected server, nothing is
+// forgotten, and the status string is still printed verbatim. What changes is
+// the SENTENCE. A server that was mid-handshake is reported as mid-handshake,
+// at `info` rather than `warn`, because a warning that usually resolves itself
+// is how an operator learns to ignore warnings. `Cebab-cqd` fixed the
+// model-facing half of this (the system-prompt note defers to the tool list);
+// this is the operator-facing half its close reason left open.
+//
 // THE STATUS IS PRINTED, NEVER INTERPRETED. Whatever string the SDK sent is
 // what the row shows. That is what keeps the banner honest for a status this
 // code has never heard of, and it is why nothing here maps an unknown value
@@ -88,16 +109,64 @@ export function mcpStatusBannerTitle(count: number): string {
     : `${count} MCP servers did not come up for this session`;
 }
 
+/**
+ * The one status that means "not yet known" rather than "did not come up".
+ *
+ * A literal, not a list, and deliberately so: every OTHER unrecognised status
+ * must keep falling through to the did-not-come-up side, because that side
+ * prints the string verbatim and claims no cause. Widening this to a set is
+ * how the blind spot `notConnected` closes would be reopened one status at a
+ * time.
+ */
+const STILL_CONNECTING_STATUS = 'pending';
+
+export type McpStatusPartition = {
+  /** Reported `pending` at init — the handshake had not finished yet. */
+  stillConnecting: readonly McpServerStatus[];
+  /** Any other non-connected status. Printed verbatim, never translated. */
+  didNotComeUp: readonly McpServerStatus[];
+};
+
+export function partitionMcpStatus(servers: readonly McpServerStatus[]): McpStatusPartition {
+  const stillConnecting: McpServerStatus[] = [];
+  const didNotComeUp: McpServerStatus[] = [];
+  for (const server of servers) {
+    (server.status === STILL_CONNECTING_STATUS ? stillConnecting : didNotComeUp).push(server);
+  }
+  return { stillConnecting, didNotComeUp };
+}
+
+export function mcpStillConnectingTitle(count: number): string {
+  return count === 1
+    ? 'One MCP server was still connecting when this session started'
+    : `${count} MCP servers were still connecting when this session started`;
+}
+
 export function buildMcpStatusBannerItem(args: BuildMcpStatusBannerItemArgs): BannerStackItem {
   const { sessionId, servers, arrivedAt, dismiss } = args;
+  const { stillConnecting, didNotComeUp } = partitionMcpStatus(servers);
+  // Everything here keys off this. When nothing reported a definite
+  // non-connected status, the banner is a NOTE about an unfinished handshake,
+  // not a warning about a broken server — different sentence, different tier.
+  const onlyStillConnecting = didNotComeUp.length === 0;
 
   const body = (
     <>
-      <p>
-        Loaded when this session started, then never reported as connected. Tools from a server in
-        that state are not on this session&apos;s tool list, and the agent has no way to know they
-        were meant to be — so if it says a capability does not exist, this is why.
-      </p>
+      {didNotComeUp.length > 0 && (
+        <p>
+          Loaded when this session started, then never reported as connected. Tools from a server in
+          that state are not on this session&apos;s tool list, and the agent has no way to know they
+          were meant to be — so if it says a capability does not exist, this is why.
+        </p>
+      )}
+      {stillConnecting.length > 0 && (
+        <p>
+          {stillConnecting.length === 1 ? 'One server was' : 'Some servers were'} still completing
+          the handshake at that moment, which is not the same as failing to come up — a server in
+          that state usually finishes and works normally. Cebab read the status once, at the
+          earliest point it could, and has not looked again.
+        </p>
+      )}
       <p>
         That was the reading at startup, not a live one. <strong>Live MCP servers</strong> in the
         authority panel re-reads it and can reconnect a server, or start authentication for one that
@@ -108,21 +177,45 @@ export function buildMcpStatusBannerItem(args: BuildMcpStatusBannerItemArgs): Ba
     </>
   );
 
+  // Grouped, not merged. The two lists mean different things, and a single
+  // flat list would put a server that is probably fine beside one that is
+  // definitely not, under whichever heading happened to win.
   const detail = (
-    <ul>
-      {servers.map((s) => (
-        <li key={s.name}>
-          <code>{s.name}</code> — reported <code>{s.status}</code>
-        </li>
-      ))}
-    </ul>
+    <>
+      {didNotComeUp.length > 0 && (
+        <ul>
+          {didNotComeUp.map((s) => (
+            <li key={s.name}>
+              <code>{s.name}</code> — reported <code>{s.status}</code>
+            </li>
+          ))}
+        </ul>
+      )}
+      {stillConnecting.length > 0 && (
+        <>
+          {didNotComeUp.length > 0 && <p>Still connecting at startup:</p>}
+          <ul>
+            {stillConnecting.map((s) => (
+              <li key={s.name}>
+                <code>{s.name}</code> — reported <code>{s.status}</code>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </>
   );
 
   return {
     id: `mcp-status-${sessionId}`,
-    tier: 'warn',
-    title: mcpStatusBannerTitle(servers.length),
-    glyph: '⚠',
+    // `info` renders as a region with no aria-live, so an unfinished handshake
+    // does not interrupt a screen reader mid-sentence for something that
+    // usually resolves itself.
+    tier: onlyStillConnecting ? 'info' : 'warn',
+    title: onlyStillConnecting
+      ? mcpStillConnectingTitle(stillConnecting.length)
+      : mcpStatusBannerTitle(didNotComeUp.length),
+    glyph: onlyStillConnecting ? 'ⓘ' : '⚠',
     body,
     detail,
     detailLabel: servers.length === 1 ? 'Which server' : 'Which servers',
