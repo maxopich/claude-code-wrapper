@@ -7503,7 +7503,12 @@ pre {
 .notif-stack {
   position: fixed;
   right: var(--s-4);
-  bottom: var(--s-4);
+  /* Cebab-aids: clear the composer. `--composer-clearance` is published by
+   * `InputBox` from its own measured height (it grows with the draft); the
+   * `0px` fallback is the no-composer case, e.g. a tab with no chat mounted.
+   * Without this the dock and the Send button share the bottom-right corner
+   * and a toast card swallows the click — measured, three real Sends lost. */
+  bottom: calc(var(--composer-clearance, 0px) + var(--s-4));
   width: 320px;
   max-width: calc(100vw - var(--s-4) * 2);
   z-index: var(--notif-stack-z);
@@ -7521,7 +7526,7 @@ pre {
    * `pointer-events: none` so the gaps between cards still click through to the
    * content beneath; the cards (`> .notif`, auto) carry the wheel to this
    * scroller. */
-  max-height: min(50dvh, calc(100dvh - var(--s-4) * 2));
+  max-height: min(50dvh, calc(100dvh - var(--composer-clearance, 0px) - var(--s-4) * 2));
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -7537,7 +7542,7 @@ pre {
   .notif-stack {
     right: var(--s-2);
     left: var(--s-2);
-    bottom: var(--s-2);
+    bottom: calc(var(--composer-clearance, 0px) + var(--s-2));
     width: auto;
     max-width: none;
   }
