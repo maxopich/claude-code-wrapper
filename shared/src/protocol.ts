@@ -4276,6 +4276,24 @@ export type ToolView = {
 };
 
 /**
+ * Cebab-tzz7: a raw `permissions.allow` / `.deny` entry, carried verbatim.
+ *
+ * This is the DECLARED form, distinct from `ToolView`'s per-tool RESOLVED
+ * attribution. `ToolView` answers "is this tool allowed, and by which layer's
+ * rule" — a question that only exists for tools the current scope set actually
+ * loaded a rule for. A rule declared in a scope that will NOT load resolves
+ * against nothing, so it has no `ToolView` to ride and would be invisible; it
+ * rides `ProjectAuthority.unloadedPermissionRules` instead, as the string the
+ * operator typed plus the effect and the scope it sits in.
+ */
+export type PermissionRuleView = {
+  /** The rule string verbatim, e.g. `"Read"` or `"Bash(git:*)"`. */
+  rule: string;
+  effect: 'allow' | 'deny';
+  scope: 'user' | 'project' | 'local';
+};
+
+/**
  * Cluster B Phase 3 (BE-B5 / §4.2): MCP server view in the AuthorityPanel.
  *
  * `scope` attributes which file declared the server (Cebab applies
@@ -4561,6 +4579,20 @@ export type ProjectAuthority = {
    */
   unloadedHooks?: HookView[];
   unloadedMcpServers?: McpServerView[];
+  /**
+   * Cebab-tzz7: `permissions.allow` / `.deny` rules this project declares in a
+   * scope its next run will not load — the third declaration kind that Trust
+   * gates and that `unloadedHooks` / `unloadedMcpServers` already surface for
+   * the other two. On an untrusted project the project and local layers are
+   * absent from the resolve, so every one of these rules is inert: a tool it
+   * would allow still prompts, a tool it would deny is not denied, and nothing
+   * in the loaded `tools` attribution says a rule was ever declared. The panel
+   * names them as "declared but not loaded" rather than resolving every tool as
+   * if no rule mentioned it. Empty for a trusted single-agent project and for
+   * every bus participant (both read all three scopes); absent is treated as
+   * empty by every reader.
+   */
+  unloadedPermissionRules?: PermissionRuleView[];
 };
 
 /**

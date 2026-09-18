@@ -167,6 +167,33 @@ describe('AllowDenyView', () => {
     expect(note?.textContent).toContain('Cannot decide');
   });
 
+  test('Cebab-tzz7: inert declared rules are named, not silently absent', () => {
+    // On an untrusted project the operator's own allow/deny rules resolve
+    // against nothing, so no ToolView carries them — the panes would read
+    // "(none configured)" for rules that plainly exist. `unloaded` names them.
+    act(() => {
+      root.render(
+        <AllowDenyView
+          tools={[]}
+          unloaded={[
+            { rule: 'Read', effect: 'allow', scope: 'local' },
+            { rule: 'WebFetch', effect: 'deny', scope: 'project' },
+          ]}
+        />,
+      );
+    });
+    const section = container.querySelector('.allow-deny-unloaded')!;
+    expect(section).not.toBeNull();
+    expect(section.textContent).toContain('not load');
+    expect(section.textContent).toContain('Read');
+    expect(section.textContent).toContain('WebFetch');
+    // Effect is shown per row so an operator can tell an inert allow from a deny.
+    const effects = Array.from(section.querySelectorAll('.allow-deny-effect-chip')).map((c) =>
+      c.textContent?.trim(),
+    );
+    expect(effects).toEqual(['allow', 'deny']);
+  });
+
   test('rows sort alphabetically inside each pane', () => {
     act(() => {
       root.render(

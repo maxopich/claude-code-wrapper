@@ -6,6 +6,7 @@ import type {
   EnvInjection,
   HookView,
   McpServerView,
+  PermissionRuleView,
   ProjectAuthority,
   ToolView,
 } from '@cebab/shared/protocol';
@@ -850,6 +851,37 @@ export function detectHooks(layers: SettingsLayer[]): HookView[] {
 }
 
 /**
+ * Every `permissions.allow` / `.deny` entry across the given layers, verbatim
+ * (`Cebab-tzz7`).
+ *
+ * WHY THIS EXISTS. `resolveToolAuthority` above answers the allow/deny question
+ * per TOOL, by walking the loaded layers — so it can only ever describe rules
+ * in a scope the resolve actually read. On an untrusted project the project and
+ * local layers are absent, and there the operator's accumulated
+ * `settings.local.json` allow-rules live. Every one of them resolves against
+ * nothing: a tool a rule would pre-approve prompts anyway, and no `ToolView`
+ * carries any trace that a rule was declared — "we did not look" rendered as
+ * "there is no rule", the exact blind spot `detectHooks` /
+ * `readMcpJsonServers` closed for the other two declaration kinds.
+ *
+ * This is the DECLARED form: the raw rule string, its effect and its scope. It
+ * is deliberately NOT resolved per-tool the way `resolveToolAuthority` is — the
+ * point is to name what sits inert on disk, not to re-run the CLI's matcher
+ * against a surface that will not load anyway. The caller passes the UNLOADED
+ * scopes only; a rule the resolve already applied rides its tool's `ToolView`.
+ */
+export function detectPermissionRules(layers: SettingsLayer[]): PermissionRuleView[] {
+  const out: PermissionRuleView[] = [];
+  for (const layer of layers) {
+    const perms = layer.data?.permissions;
+    if (!perms) continue;
+    for (const rule of perms.allow ?? []) out.push({ rule, effect: 'allow', scope: layer.scope });
+    for (const rule of perms.deny ?? []) out.push({ rule, effect: 'deny', scope: layer.scope });
+  }
+  return out;
+}
+
+/**
  * Hooks that a plugin brings, which no settings layer declares (`Cebab-aklg`).
  *
  * WHAT WAS WRONG. `detectHooks` above iterates `SettingsLayer[]`, and a
@@ -1393,8 +1425,20 @@ export function resolveProjectAuthority(input: ResolverInput): ProjectAuthority 
   // Surfacing an inert declaration to a gate would make it prompt about a
   // server or hook the spawn never starts — the mirror of the bug this fixes.
   const unloadedScopes = trustDerivedScopes(true).filter((s) => !scopes.includes(s));
-  const unloadedHooks: HookView[] =
-    unloadedScopes.length > 0 ? detectHooks(loadSettingsLayers(project.path, unloadedScopes)) : [];
+  // Read the unloaded layers ONCE and derive every unloaded-declaration list
+  // from them — hooks, permission rules and (below) `.mcp.json` servers all
+  // describe the same files. `detectHooks([])` / `detectPermissionRules([])`
+  // return `[]`, so the empty-scope case needs no guard.
+  const unloadedLayers =
+    unloadedScopes.length > 0 ? loadSettingsLayers(project.path, unloadedScopes) : [];
+  const unloadedHooks: HookView[] = detectHooks(unloadedLayers);
+  // Cebab-tzz7: the third declaration kind Trust gates. `resolveToolAuthority`
+  // only ever describes rules in a LOADED scope (it walks `layers`), so an
+  // untrusted project's own allow/deny rules resolve against nothing and leave
+  // no trace on any `ToolView` — the panel would render every tool as if no
+  // rule mentioned it. Name the inert rules here, exactly as `unloadedHooks`
+  // does for the scope's hooks.
+  const unloadedPermissionRules: PermissionRuleView[] = detectPermissionRules(unloadedLayers);
 
   // Only the two files whose servers the CLI actually loads can be "declared
   // but not loaded": `.mcp.json` (loads iff 'project' is read) and
@@ -1530,6 +1574,7 @@ export function resolveProjectAuthority(input: ResolverInput): ProjectAuthority 
     detectedEnvInjections: detectEnvInjections(layers),
     unloadedHooks,
     unloadedMcpServers,
+    unloadedPermissionRules,
   };
   // Pick-through cached single-value fields.
   if (input.latestSessionStarted?.model !== undefined) {

@@ -9290,6 +9290,43 @@ pre {
   font-style: italic;
 }
 
+/* Cebab-tzz7: allow/deny rules declared in a scope Trust keeps out — inert
+   until Trust is on. Spans both panes: an untrusted project's rules are all
+   unloaded regardless of effect. Mirrors .mcp-servers-unloaded / .hooks-unloaded. */
+.allow-deny-unloaded {
+  flex-basis: 100%;
+  border-top: 1px dashed var(--line-3);
+  padding-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.allow-deny-unloaded-note {
+  padding: 0 10px;
+  font-size: var(--t-sm);
+  color: var(--warn-ink);
+}
+.allow-deny-unloaded-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  opacity: 0.85;
+}
+.allow-deny-effect-chip {
+  font-size: var(--t-xs);
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line-3);
+  background: var(--bg-3);
+}
+.allow-deny-effect-allow {
+  color: var(--ok-ink);
+}
+.allow-deny-effect-deny {
+  color: var(--err-ink);
+}
+
 /* ---- EnvScrubInspector ---- */
 .env-scrub-empty {
   padding: 12px;

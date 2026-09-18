@@ -279,6 +279,7 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode, projectId: nu
   // reflects that participant's own Trust.
   const unloadedHooks = authority.unloadedHooks ?? [];
   const unloadedMcpServers = authority.unloadedMcpServers ?? [];
+  const unloadedPermissionRules = authority.unloadedPermissionRules ?? [];
   const shownHooks = authority.hooks;
   const shownMcpServers = authority.mcpServers;
   const scopeRead = projectScopeRead;
@@ -337,11 +338,21 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode, projectId: nu
         // Count derived from the same per-tool attribution AllowDenyView
         // groups on — explicit allows + denied (any rulingScope). Default-
         // deny rows count too because the operator should see "20 tools
-        // denied" even if the rules are implicit.
-        count={countAllowDenyRules(authority.tools)}
-        defaultOpen={false}
+        // denied" even if the rules are implicit. Cebab-tzz7: the inert
+        // declared rules count too, so the header reflects what is on disk.
+        count={countAllowDenyRules(authority.tools) + unloadedPermissionRules.length}
+        sublabel={
+          unloadedPermissionRules.length > 0
+            ? `${unloadedPermissionRules.length} declared but not loaded — Trust is off`
+            : undefined
+        }
+        // Force-open when a declared rule sits inert behind Trust — an operator's
+        // accumulated allow-rules silently deciding nothing is the confusing
+        // failure this bead is about (Cebab-tzz7).
+        defaultOpen={unloadedPermissionRules.length > 0}
+        stripe={unloadedPermissionRules.length > 0 ? 'accent' : 'none'}
       >
-        <AllowDenyView tools={authority.tools} />
+        <AllowDenyView tools={authority.tools} unloaded={unloadedPermissionRules} />
       </AuthoritySection>
       <AuthoritySection
         title="Env injection scan"

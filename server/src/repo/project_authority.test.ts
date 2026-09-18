@@ -1077,6 +1077,60 @@ describe('resolveProjectAuthority (BE-B3) — merge cached init + file scans', (
     });
   });
 
+  // Cebab-tzz7: the third declaration kind Trust gates. `resolveToolAuthority`
+  // walks only the LOADED layers, so on an untrusted project the operator's
+  // accumulated `permissions.allow` / `.deny` rules resolve against nothing and
+  // leave no trace on any `ToolView` — the panel rendered every tool as if no
+  // rule existed while the operator kept re-answering prompts those rules were
+  // added to suppress. The inert remainder now rides `unloadedPermissionRules`.
+  describe('Cebab-tzz7 — declared-but-not-loaded permission rules', () => {
+    function writeRules(): void {
+      fs.writeFileSync(
+        path.join(projectPath, '.claude', 'settings.json'),
+        JSON.stringify({ permissions: { allow: ['Read', 'Bash(git:*)'], deny: ['WebFetch'] } }),
+      );
+      fs.writeFileSync(
+        path.join(projectPath, '.claude', 'settings.local.json'),
+        JSON.stringify({ permissions: { allow: ['Edit'] } }),
+      );
+    }
+
+    test('untrusted: project + local allow/deny rules are surfaced as inert, with effect and scope', () => {
+      setProjectTrusted(projectId, false);
+      writeRules();
+      const out = resolveProjectAuthority({ projectId, mode: 'cache' })!;
+      const rules = (out.unloadedPermissionRules ?? [])
+        .map((r) => `${r.effect}:${r.rule}@${r.scope}`)
+        .sort();
+      expect(rules).toEqual([
+        'allow:Bash(git:*)@project',
+        'allow:Edit@local',
+        'allow:Read@project',
+        'deny:WebFetch@project',
+      ]);
+    });
+
+    test('trusted: the same rules load, so the field is present and empty', () => {
+      setProjectTrusted(projectId, true);
+      writeRules();
+      const out = resolveProjectAuthority({ projectId, mode: 'cache' })!;
+      // No `?? []`: the resolve emits the field unconditionally (Cebab-tzz7), so
+      // trusted yields a present-but-empty list — distinct from the absent field
+      // this bead's revert produces. Asserting `[]` (not `undefined`) is what
+      // makes this case defend the change rather than pass vacuously.
+      expect(out.unloadedPermissionRules).toEqual([]);
+    });
+
+    test('untrusted with no rules declared: present and empty, never a phantom row', () => {
+      setProjectTrusted(projectId, false);
+      const out = resolveProjectAuthority({ projectId, mode: 'cache' })!;
+      // Same reason as above: the field is emitted (as `[]`) even when the
+      // untrusted project declares no rules, so an operator can tell "looked,
+      // found none" from "not looked". `undefined` here would be the revert.
+      expect(out.unloadedPermissionRules).toEqual([]);
+    });
+  });
+
   describe('[security] an http/sse declaration carries an identity (Cebab-6fax.25)', () => {
     function writeRemote(extra: Record<string, unknown>): void {
       fs.writeFileSync(
