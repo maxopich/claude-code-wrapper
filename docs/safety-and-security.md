@@ -213,8 +213,9 @@ must **not** modify, create or delete files in other directories, or produce
 deliverable changes, _unless the user's relayed request explicitly directs that
 specific change_.
 
-It reaches **all three** prompt renderers — `renderRosterPrompt`,
-`renderWorkerBriefing` and `renderChainBriefing` (`Cebab-6fax.4`). Chain
+It reaches **all four** prompt renderers — `renderRosterPrompt`,
+`renderWorkerBriefing`, `renderChainBriefing` and the mid-run
+`renderRosterUpdate` (`Cebab-6fax.4`). Chain
 participants used to receive **neither** the constraint nor its execute-mode
 counterpart, which made a chain hop the one production path with no prompt-level
 brake at all — an agent running with an auto-approving `canUseTool`, its
@@ -226,10 +227,28 @@ not-yet-spoken participant in the same mode it started in.
 One limit on the sentence, easy to over-read:
 
 - **It is per-session and the operator can turn it off.** `executeMode` — a
-  session-start opt-in, threaded through all three prompt renderers — **replaces**
+  session-start opt-in, threaded through all four prompt renderers — **replaces**
   the consultant text with explicit permission to create, modify and delete files
   _within the participant's own project folder_. Consultant is the default, not a
   guarantee.
+
+  **The GRANT is now tamper-evident (`Cebab-vie.21`), though execute mode is
+  still prompt-level only.** Turning it on for a session writes a hash-chained
+  `bus.execute_mode_decided` `safety_audit` row — carrying the mode, the
+  `false → true` transition and the participant projects whose files agents may
+  now write — BEFORE the `execute_mode` column flips, in the same
+  audit-before-write order the strictly narrower `project.start_mode_decided`
+  uses. It **fails closed**: if the row cannot be appended the session
+  downgrades to consultant (column 0, every renderer emitting the consultant
+  clause) rather than running the privilege live with no record — the fail-open
+  `try/catch` both start paths carried is gone, replaced by one shared
+  `applyExecuteModeGrant` module. One asymmetry is deliberate: the audit row is
+  appended before the notification is sent and persisted, and those steps sit
+  outside `emit`'s audit try, so a failure THERE still refuses the grant with a
+  row already written — the record may **over-state** the grant, never
+  under-state it. What did NOT change: nothing in the enforcement layer reads
+  `executeMode` — `makeCanUseTool` and `classifyMutationScope` are byte-identical
+  in both modes (`Cebab-ncmo`). Only the grant became recorded, not gated.
 
 ### Why it is advisory
 

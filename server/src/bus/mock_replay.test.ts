@@ -13,6 +13,7 @@ import {
   listMultiAgentEvents,
 } from '../repo/multi_agent.js';
 import { upsertProject } from '../repo/projects.js';
+import * as safetyAudit from '../notifications/safety_audit.js';
 import { computeSessionPaths } from './paths.js';
 import { CEBAB_SOURCE, SINK_RECIPIENT, USER_RECIPIENT, type ResolvedAgent } from './runtime.js';
 
@@ -182,5 +183,65 @@ describe('MOCK=1 orchestrator replay', () => {
     // The orchestrator ran twice and the worker once, each resuming its own
     // checkpoint rather than a shared literal.
     expect(new Set(rows.map((r) => r.cli_session_id)).size).toBe(2);
+  }, 20_000);
+
+  // Cebab-vie.21: the execute-mode grant fails CLOSED on the OPERATOR-REACHABLE
+  // path (the execute-mode checkbox is orchestrator-only). This drives the real
+  // `startOrchestratorSession`, which has no `runnerFactory` seam and calls
+  // `deliver` un-awaited — so `config.mock = true` (set in beforeEach) is what
+  // stops it spawning a real claude subprocess. When the audit append fails the
+  // roster prompt the orchestrator is handed carries the CONSULTANT clause, not
+  // the execute clause — asserting on the column alone would miss that the
+  // orchestrator is still told to relay "Execute mode" to every worker.
+  test('[security] a failing audit append briefs the orchestrator in consultant mode', async () => {
+    const ws = workspace('orch-broken-ws');
+    const spy = vi.spyOn(safetyAudit, 'appendSafetyAudit').mockImplementation(() => {
+      throw new Error('audit chain broken');
+    });
+    let handle;
+    try {
+      handle = await startOrchestratorSession({
+        workers: [participant('worker-broken')],
+        initialPrompt: 'look into this',
+        workspaceRoot: ws,
+        onEvent: vi.fn(),
+        onEnded: vi.fn(),
+        executeMode: true, // EXPLICIT — the grant is behind `if (opts.executeMode)`.
+      });
+      started.push(handle.sessionId);
+    } finally {
+      // The grant is decided synchronously inside start (before the un-awaited
+      // deliver matters), and the roster prompt is persisted before start
+      // returns — so restoring here keeps the background mock replay's later
+      // emits working while the assertions below read already-written rows.
+      spy.mockRestore();
+    }
+
+    // Drain the un-awaited replay before asserting: startOrchestratorSession
+    // calls deliver fire-and-forget, so without this the mock run is still
+    // mid-flight at teardown and the worker RPC closes on a pending console log.
+    await waitUntil(
+      () => agentHops(handle.sessionId).some((h) => h.endsWith(`->${USER_RECIPIENT}:final`)),
+      'the final answer to reach the operator',
+    );
+
+    // The persisted cebab → orchestrator roster prompt is where the clause
+    // lives; assert on that, never on a renderer called with the value we just
+    // handed it.
+    const rosterPrompts = listMultiAgentEvents(handle.sessionId)
+      .filter(
+        (e) =>
+          e.source === CEBAB_SOURCE &&
+          e.destination === ORCHESTRATOR_AGENT_NAME &&
+          e.kind === 'prompt',
+      )
+      .map((e) => e.text)
+      .join('\n');
+    expect(rosterPrompts).toContain('Consultant mode');
+    expect(rosterPrompts).not.toContain('Execute mode');
+
+    // Record and privilege agree on the safe side.
+    expect(handle.executeMode).toBe(false);
+    expect(getMultiAgentSession(handle.sessionId)!.execute_mode).toBe(0);
   }, 20_000);
 });

@@ -69,7 +69,6 @@ import {
   listPendingMutations,
   recordSessionHops,
   recordSessionTeardown,
-  setExecuteMode,
   setMutationPromoted,
   setPauseOnDangerous,
   setPendingRetry,
@@ -88,6 +87,7 @@ import type {
   ServerMsg,
 } from '@cebab/shared/protocol';
 import { emit as emitNotification } from '../notifications/dispatcher.js';
+import { applyExecuteModeGrant } from './execute_mode_grant.js';
 import {
   dispatchBusMaxTurnsReached,
   dispatchHopBudgetExhausted,
@@ -1448,16 +1448,32 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     }
   }
 
-  // `Cebab-6fax.4`: persist execute mode at start so R-B reconstruct re-briefs
-  // a first-time-after-restart participant in the same mode (reconstruct reads
-  // execute_mode back off the row). Mirrors the orchestrator path.
-  if (opts.executeMode) {
-    try {
-      setExecuteMode(sessionId, true);
-    } catch (err) {
-      console.error('[chain] persist execute_mode failed', err);
-    }
-  }
+  // `Cebab-vie.21`: the execute-mode GRANT is hash-chained (audit-before-write,
+  // BE-1 order) and FAILS CLOSED — a grant that cannot be recorded downgrades
+  // the session to consultant rather than running with the privilege live and
+  // the row denying it. This mirrors the orchestrator path exactly; the chain
+  // copy used to be a byte-equivalent fail-open `try/catch`. The resolved local
+  // is the ONLY thing forwarded to `wireChainSession` (which feeds
+  // `renderChainBriefing` + `handle.executeMode`), so an ungranted flag can
+  // never reach the briefing. Persisting it also lets R-B reconstruct re-brief
+  // a not-yet-spoken participant in the same mode.
+  const executeModeGranted =
+    opts.executeMode === true &&
+    applyExecuteModeGrant(
+      {
+        sessionId,
+        mode: 'chain',
+        projects: opts.participants.map((part) => ({
+          projectId: part.projectId,
+          agentName: part.agentName,
+        })),
+      },
+      (msg) => {
+        if (msg.type === 'notification') {
+          opts.sendNotification?.(msg as NotificationEnvelope & { type: 'notification' });
+        }
+      },
+    ).granted;
 
   return wireChainSession({
     sessionId,
@@ -1480,7 +1496,7 @@ export async function startChainSession(opts: StartChainOpts): Promise<ChainSess
     hopBudget,
     maxTurns: opts.maxTurns,
     pauseOnDangerous: opts.pauseOnDangerous,
-    executeMode: opts.executeMode,
+    executeMode: executeModeGranted,
   }).handle;
 }
 

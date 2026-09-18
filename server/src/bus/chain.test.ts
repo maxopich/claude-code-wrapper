@@ -23,6 +23,7 @@ import {
   setPendingRetry,
 } from '../repo/multi_agent.js';
 import { setProjectModel, upsertProject } from '../repo/projects.js';
+import * as safetyAudit from '../notifications/safety_audit.js';
 import type { BusEvent } from './runner.js';
 import type { Runner } from '../runner/index.js';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
@@ -839,6 +840,48 @@ describe('startChainSession — project CLAUDE.md injection', () => {
     expect(getMultiAgentSession(handle.sessionId)!.execute_mode).toBe(1);
 
     unregisterLiveSession(handle.sessionId);
+  });
+
+  // Cebab-vie.21: the execute-mode grant FAILS CLOSED. When the hash-chained
+  // audit row cannot be appended, the session downgrades to consultant rather
+  // than running the privilege live with the row denying it. Reverting the
+  // change (a fail-open persist) reddens this: the head would be briefed in
+  // Execute mode and the column would read 1. The beforeEach builds a fresh
+  // temp dataDir + DB per test, so breaking the append inside the case is safe.
+  test('[security] a failing audit append downgrades the chain to consultant', async () => {
+    const workspace = path.join(tmpRoot, 'ws-exec-broken');
+    fs.mkdirSync(workspace, { recursive: true });
+    const captured: string[] = [];
+    const spy = vi.spyOn(safetyAudit, 'appendSafetyAudit').mockImplementation(() => {
+      throw new Error('audit chain broken');
+    });
+    try {
+      const handle = await startChainSession({
+        participants: [participant('c-broken-a', null), participant('c-broken-b', null)],
+        initialPrompt: 'implement the fix',
+        workspaceRoot: workspace,
+        onEvent: vi.fn(),
+        onEnded: vi.fn(),
+        // Passed EXPLICITLY: the grant is behind `if (opts.executeMode)`, so a
+        // case that forgets this never enters the changed code.
+        executeMode: true,
+        runnerFactory: fakeRunnerFactory(captured),
+      });
+      await new Promise((r) => setImmediate(r));
+
+      // The head's first turn carries the consultant clause, NOT the execute
+      // clause — the downgrade reached the renderer, not just the column.
+      expect(captured).toHaveLength(1);
+      expect(captured[0]).toContain('Consultant mode');
+      expect(captured[0]).not.toContain('Execute mode');
+      // The record and the privilege agree on the safe side.
+      expect(handle.executeMode).toBe(false);
+      expect(getMultiAgentSession(handle.sessionId)!.execute_mode).toBe(0);
+
+      unregisterLiveSession(handle.sessionId);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   // Symmetric to orchestrator.wiring's onActivity test: chain uses the same
