@@ -91,6 +91,8 @@ import type { ActiveRunView } from './store';
 import { downloadSessionLog, isDownloadError } from './exports';
 import { readStored, writeStored } from './prefs';
 import { applyTheme, readStoredTheme, type Theme } from './theme';
+import { readStoredQuiet, writeStoredQuiet } from './quietChat';
+import { TranscriptToggle } from './components/TranscriptToggle';
 import { resolveServerUrls, SERVER_PORT } from './serverUrls';
 
 // Derived rather than written out here: the same-origin case (`npm start`)
@@ -635,6 +637,16 @@ function AppShell({
   useEffect(() => {
     applyTheme(theme);
   }, [theme]);
+
+  // `Cebab-ibb4`: collapse each finished turn to its answer. The same class of
+  // preference as the gamma above — client-only, display-only, never on the
+  // wire — and persisted for the same reason: it is a standing choice about how
+  // this operator reads a transcript, not a per-session one. Default ON; the
+  // header toggle beside the permission pills is the way back.
+  const [quietChat, setQuietChat] = useState<boolean>(() => readStoredQuiet());
+  useEffect(() => {
+    writeStoredQuiet(quietChat);
+  }, [quietChat]);
 
   // Redesign Phase 2: responsive tier from a ResizeObserver on `.app`
   // (replaces the matchMedia sidebar logic). Below `medium` both rails become
@@ -2912,6 +2924,12 @@ function AppShell({
                       disabled={!sessionIsLive}
                       onChange={setPermissionMode}
                     />
+                    {/* `Cebab-ibb4`: how much of a turn the scrollback shows.
+                     *  Next to the permission pills because it is the other
+                     *  standing posture of this pane — and unlike that one it
+                     *  is never disabled: a past session is exactly when an
+                     *  operator wants the steps back. */}
+                    <TranscriptToggle quiet={quietChat} onChange={setQuietChat} />
                     {/* Cluster F Phase A1b (UI-A1): per-turn max-turns
                      *  override. Empty = use default (settings.defaultMaxTurns
                      *  > MAX_TURNS env > 50). Cleared after each send. */}
@@ -3044,6 +3062,7 @@ function AppShell({
                     extensionsUsed={session ? (extensionsUsedBySession[session.id] ?? 0) : 0}
                     onExtendMaxTurns={extendMaxTurns}
                     onEndMaxTurnsSession={endMaxTurnsSession}
+                    quiet={quietChat}
                   />
                 )}
                 <InputBox

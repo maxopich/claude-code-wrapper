@@ -2224,6 +2224,44 @@ pre {
   font-size: 12px;
   font-weight: 500;
 }
+/* Cebab-ibb4 — the quiet chat.
+ *
+ * One turn, collapsed to its answer, with a count of what is not shown. The
+ * inner gap matches `.chat`'s own so a collapsed turn is spaced exactly like
+ * the flat list it replaces; the extra margin between turns is the only new
+ * rhythm, and it is what gives a conversation of answers a readable boundary
+ * where the tool cards used to provide one. */
+.quiet-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.quiet-turn + .quiet-turn {
+  margin-top: 10px;
+}
+/* Deliberately quieter than `.ghost-btn`: this sits on EVERY turn, and a
+ * bordered button per turn would rebuild the visual noise the collapse exists
+ * to remove. The border arrives on hover, so the affordance is there when
+ * reached for. `tabular-nums` because the number changes while a turn runs. */
+.quiet-steps-toggle {
+  align-self: flex-start;
+  padding: 2px 8px;
+  font-size: var(--t-xs);
+  color: var(--fg-3);
+  border-color: transparent;
+  font-variant-numeric: tabular-nums;
+}
+.quiet-steps-toggle:hover {
+  background: transparent;
+  color: var(--fg-2);
+  border-color: var(--line-2);
+}
+/* The permission `.mode-toggle` ahead of it owns the header's `margin-left:
+ * auto`; this one only has to sit next to it. */
+.chat-header .transcript-toggle {
+  margin-left: 0;
+}
+
 .block-thinking {
   color: var(--fg-3);
   font-size: 12px;

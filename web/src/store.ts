@@ -3573,7 +3573,25 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // Measured across 9 real session logs: 118 user messages, 118
       // tool_result blocks, one per message, no prompt echo — so this fold is
       // always "the tool spoke", and MessageBlock renders it as such.
+      //
+      // `Cebab-ibb4`: it is no longer ALWAYS that. Since `persistOperatorPrompt`
+      // started writing the operator's own prompt as a `type: 'user'` row, one
+      // class of replayed `user_message` is the question rather than an answer
+      // to it — and with nothing here to tell them apart, an old session showed
+      // the operator their own words labelled as tool output. The marker is
+      // carried on the wire precisely so this fold can stay the default: absent
+      // means what it has always meant.
       const text = msg.blocks.map(toolResultText).join('\n');
+      if (msg.origin === 'operator_prompt') {
+        return appendMessage(state, projectId, msg.sessionId, {
+          kind: 'user',
+          // The persisted row's own uuid, not `nextId()` — a replay can be
+          // re-run over an existing bucket, and a stable id is what lets React
+          // keep the row it already has instead of remounting every prompt.
+          id: msg.uuid,
+          text,
+        });
+      }
       const isError = msg.blocks.some((b) => b.type === 'tool_result' && b.is_error === true);
       const session = state.sessionsByProject[projectId]?.[msg.sessionId];
       const toolName = session ? resolveToolName(session.messages, msg.blocks) : undefined;
@@ -4761,11 +4779,17 @@ export function sessionPhase(s: SessionView, isLive: boolean): SessionPhase {
 }
 
 /**
- * Name of the tool currently executing (the trailing `tool_use` of the last
- * assistant message), for the indicator's "running <tool>…" label. Returns
- * undefined unless the session is in the `tool-running` shape.
+ * The tool call currently executing — the trailing `tool_use` of the last
+ * assistant message, when nothing has answered it yet. Returns undefined
+ * unless the session is in the `tool-running` shape.
+ *
+ * `Cebab-ibb4`: this returns the INPUT as well as the name, because the name
+ * alone is the half that carries no information. "Running Bash" is true of
+ * nearly every moment of nearly every turn; "Running npm test" is the status
+ * line the operator is actually reading, and it is what makes collapsing the
+ * finished steps survivable. `toolActivity` turns the pair into the label.
  */
-export function pendingToolName(s: SessionView): string | undefined {
+export function pendingToolCall(s: SessionView): { name: string; input: unknown } | undefined {
   for (let i = s.messages.length - 1; i >= 0; i--) {
     const m = s.messages[i];
     if (m.kind !== 'assistant') continue;
@@ -4774,11 +4798,18 @@ export function pendingToolName(s: SessionView): string | undefined {
       const resolved = s.messages
         .slice(i + 1)
         .some((x) => x.kind === 'system' && x.subtype === 'tool_result');
-      return resolved ? undefined : last.name;
+      return resolved ? undefined : { name: last.name, input: last.input };
     }
     break;
   }
   return undefined;
+}
+
+/** The name alone. Kept as its own export because callers that only label a
+ *  roster row want a word, not a phrase — and kept DERIVED so there is one
+ *  back-scan deciding what "currently executing" means. */
+export function pendingToolName(s: SessionView): string | undefined {
+  return pendingToolCall(s)?.name;
 }
 
 /**

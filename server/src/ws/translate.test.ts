@@ -319,6 +319,48 @@ describe('user messages always arrive as blocks', () => {
     });
   });
 
+  /**
+   * `Cebab-ibb4`. `persistOperatorPrompt` writes the operator's prompt as a
+   * `type: 'user'` row carrying `cebabOrigin`, so replay stops dropping it. The
+   * marker was then dropped HERE, which is why a replayed prompt reached the
+   * client as something the tool said — the reducer folds every `user_message`
+   * into a tool-output card and had nothing to tell them apart with.
+   */
+  test('the operator-prompt marker is forwarded', () => {
+    const out = translate(
+      fake({
+        type: 'user',
+        uuid: 'row-9',
+        message: { content: 'why did the build fail?' },
+        cebabOrigin: 'operator_prompt',
+      }),
+      PID,
+    );
+    expect(out).toMatchObject({
+      type: 'user_message',
+      origin: 'operator_prompt',
+      blocks: [{ type: 'text', text: 'why did the build fail?' }],
+    });
+  });
+
+  test('an ordinary tool result carries no origin at all', () => {
+    // The anti-vacuity half: an unconditional `origin` would relabel every tool
+    // result in every replayed session as the operator's own words, and the
+    // case above would still pass.
+    const out = translate(userMsg([{ type: 'tool_result', tool_use_id: 't', content: 'ok' }]), PID);
+    expect(out).not.toHaveProperty('origin');
+  });
+
+  test('an unrecognised cebabOrigin does NOT become an origin on the wire', () => {
+    // The wire field is a closed set of one. A future marker must not reach the
+    // client as an unmodelled string that some branch then treats as a prompt.
+    const out = translate(
+      fake({ type: 'user', uuid: 'u', message: { content: 'x' }, cebabOrigin: 'something_else' }),
+      PID,
+    );
+    expect(out).not.toHaveProperty('origin');
+  });
+
   test('every shape yields something the client reducer can map over', () => {
     // The property that actually matters — `store.ts` calls `.map` on this.
     for (const content of ['s', [], [{ type: 'text', text: 'x' }], null, 7]) {

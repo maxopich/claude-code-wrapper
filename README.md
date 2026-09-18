@@ -193,9 +193,14 @@ halves are security-relevant:
   session's stored mode outranks both (`seedPermissionMode`). See
   [`server/src/ws/permission.ts`](server/src/ws/permission.ts).
 - **`settingSources`** — `['user']` when untrusted, and all three scopes when
-  trusted. Only a trusted project loads its own `CLAUDE.md`, `.claude/skills/`,
+  trusted. Only a trusted project loads its own `.claude/skills/`,
   `.claude/settings*.json` (hooks and env injectors) and project-root
   `.mcp.json`. Flipping a project to trusted authorises all of that to run.
+  **`CLAUDE.md` is the exception, and since `Cebab-0fgx` it is not gated on
+  Trust at all**: an untrusted project's rules are read and injected as prompt
+  text instead, so every agent starts with its project's instructions. Trust
+  decides what a project's files may _do_ — run hooks, inject env, start MCP
+  servers — not whether the agent is told the house rules.
   **Not** a settings-layer `mcpServers` key — that one never loads at any
   scope, so Trust has nothing to turn on; `.mcp.json` is the project-scoped MCP
   mechanism Trust actually controls. Measured; the table is in
@@ -209,6 +214,25 @@ which reads exactly what the spawn will load and records what was measured.
 
 For a single-session override there's also an inline pill above the chat. It
 flips `permissionMode` only — `settingSources` is fixed when the run starts.
+
+## Reading a session
+
+A turn's tool calls and their output are the agent's working-out, and by default
+the chat does not show them. Each finished turn renders as the prompt and the
+answer, with a `▸ N steps` toggle that puts the whole turn back exactly as it
+ran. While a turn is live, one row says what is happening right now — `reading
+web/src/store.ts`, `running npm test`, `calling search_issues linear` — and that
+row is replaced by the answer when it lands.
+
+Four things are never collapsed, because hiding them would strand the run rather
+than tidy it: a **permission card**, a **parked question**, an **error**, and any
+**non-success result** (the max-turns card carries the Extend buttons that resume
+the work).
+
+The `transcript: answers | everything` toggle in the chat header switches the
+whole pane, and the choice sticks. Nothing is discarded either way — the full
+trace is in the `events` table and the per-session JSONL, both reachable from the
+Logs button in the same header.
 
 ## Built-in help
 

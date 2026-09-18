@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ClaudeMark } from './ClaudeMark';
 import { formatElapsed } from '../format';
+import { toolActivity, toolActivityText } from '../toolActivity';
 
 /**
  * Animated "the agent is computing" indicator. One component, two shapes:
@@ -50,6 +51,13 @@ export function ThinkingIndicator(props: {
   startedAt: number | null;
   /** Tool name for the `tool-running` label (block variant). */
   toolName?: string;
+  /**
+   * `Cebab-ibb4`: the tool's INPUT, which is where the label's information is.
+   * Optional and additive on purpose — the inline variant renders no label at
+   * all, so the roster and activity-bar call sites pass a name with no input
+   * and are unaffected.
+   */
+  toolInput?: unknown;
   /** Participant slug — used only for the inline screen-reader label. */
   label?: string;
 }) {
@@ -71,8 +79,13 @@ export function ThinkingIndicator(props: {
     );
   }
 
+  // `Cebab-ibb4`: "running Bash…" was true of nearly every moment of nearly
+  // every turn. The subject is the part worth reading, and it is the whole
+  // reason the quiet view can put the finished steps away.
   const labelText =
-    props.phase === 'tool-running' ? `running ${props.toolName ?? 'tool'}…` : 'thinking…';
+    props.phase === 'tool-running'
+      ? `${toolActivityText(toolActivity(props.toolName ?? '', props.toolInput))}…`
+      : 'thinking…';
 
   // Reuse the StreamingPlaceholder chrome (avatar + msg-body + "claude…")
   // verbatim so the swap to streaming text is a seamless body change. The

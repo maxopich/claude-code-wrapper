@@ -1,8 +1,10 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { StopReasonCode } from '@cebab/shared/protocol';
 import { isPinnedToBottom } from '../scrollAnchor';
-import { pendingToolName, sessionPhase, type SessionView } from '../store';
+import { groupTurns } from '../quietChat';
+import { pendingToolCall, sessionPhase, type MessageView, type SessionView } from '../store';
 import { MessageBlock, StreamingPlaceholder } from './MessageBlock';
+import { QuietTurn } from './QuietTurn';
 import { StoppedMarker } from './StoppedMarker';
 import { ThinkingIndicator } from './ThinkingIndicator';
 
@@ -44,9 +46,27 @@ export function ChatView(props: {
    * extensions counter or scroll away.
    */
   onEndMaxTurnsSession?: (sessionId: string) => void;
+  /**
+   * `Cebab-ibb4`: collapse each finished turn to its answer. Defaulted here
+   * rather than required, so the two test mounts and any future read-only
+   * embedding keep today's full transcript without being asked.
+   */
+  quiet?: boolean;
 }) {
   const phase = props.session ? sessionPhase(props.session, props.isLive) : 'idle';
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  /**
+   * `Cebab-ibb4`: which collapsed turns the operator has opened. Per turn
+   * rather than one global flag, because opening a turn is a question about
+   * that turn ("what did it actually run?"), and a global flag would answer it
+   * by re-expanding the whole conversation.
+   *
+   * Kept in the component, not the store: it is view state with no consequence
+   * off-screen, and it is deliberately forgotten when the session changes —
+   * `expandedTurns` is reset by the same effect that re-pins the scroll.
+   */
+  const [expandedTurns, setExpandedTurns] = useState<ReadonlySet<string>>(() => new Set());
 
   /**
    * Register W14: whether the operator is still following the tail. This used
@@ -81,6 +101,7 @@ export function ChatView(props: {
   const sessionId = props.session?.id;
   useEffect(() => {
     pinnedRef.current = true;
+    setExpandedTurns(new Set());
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [sessionId]);
 
@@ -99,6 +120,48 @@ export function ChatView(props: {
 
   const session = props.session;
   const lastInterrupt = session.lastInterrupt;
+  const pending = pendingToolCall(session);
+
+  const renderMessage = (m: MessageView) => (
+    <MessageBlock
+      key={m.id}
+      message={m}
+      onPermissionDecide={props.onPermissionDecide}
+      onAskUserAnswer={props.onAskUserAnswer}
+      extensionsUsed={props.extensionsUsed}
+      onExtendMaxTurns={
+        props.onExtendMaxTurns
+          ? (bumpBy) => props.onExtendMaxTurns?.(session.id, bumpBy)
+          : undefined
+      }
+      onEndMaxTurnsSession={
+        props.onEndMaxTurnsSession ? () => props.onEndMaxTurnsSession?.(session.id) : undefined
+      }
+    />
+  );
+
+  // `Cebab-ibb4`: the quiet view is a REGROUPING of the same rows through the
+  // same renderer, never a different reducer state. Six things read
+  // `session.messages` — the tool-running phase, the live label, tool-name
+  // resolution, the permission drain, the turn counter, Extend — so dropping a
+  // message anywhere upstream of here would take the live window with it.
+  const rows = props.quiet
+    ? groupTurns(session.messages).map((turn) => (
+        <QuietTurn
+          key={turn.id}
+          turn={turn}
+          expanded={expandedTurns.has(turn.id)}
+          onToggle={() =>
+            setExpandedTurns((prev) => {
+              const next = new Set(prev);
+              if (!next.delete(turn.id)) next.add(turn.id);
+              return next;
+            })
+          }
+          render={renderMessage}
+        />
+      ))
+    : session.messages.map(renderMessage);
 
   return (
     <div
@@ -108,23 +171,7 @@ export function ChatView(props: {
         pinnedRef.current = isPinnedToBottom(e.currentTarget);
       }}
     >
-      {session.messages.map((m) => (
-        <MessageBlock
-          key={m.id}
-          message={m}
-          onPermissionDecide={props.onPermissionDecide}
-          onAskUserAnswer={props.onAskUserAnswer}
-          extensionsUsed={props.extensionsUsed}
-          onExtendMaxTurns={
-            props.onExtendMaxTurns
-              ? (bumpBy) => props.onExtendMaxTurns?.(session.id, bumpBy)
-              : undefined
-          }
-          onEndMaxTurnsSession={
-            props.onEndMaxTurnsSession ? () => props.onEndMaxTurnsSession?.(session.id) : undefined
-          }
-        />
-      ))}
+      {rows}
       {phase === 'streaming' ? (
         <StreamingPlaceholder text={session.streamingText} />
       ) : phase === 'thinking' || phase === 'tool-running' ? (
@@ -132,7 +179,8 @@ export function ChatView(props: {
           variant="block"
           phase={phase}
           startedAt={session.runStartedAt}
-          toolName={pendingToolName(session)}
+          toolName={pending?.name}
+          toolInput={pending?.input}
         />
       ) : null}
       {/*

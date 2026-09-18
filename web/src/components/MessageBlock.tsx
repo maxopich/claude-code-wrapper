@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ContentBlock } from '@cebab/shared/protocol';
 import type { MessageView } from '../store';
+import { rendersAnything } from '../quietChat';
 import { formatResultDuration, messageCopyText } from '../format';
 import { Markdown } from './Markdown';
 import { ClaudeMark } from './ClaudeMark';
@@ -16,8 +17,10 @@ export function MessageBlock(props: {
    * Cluster F Phase A1b (UI-A1): how many times the operator has clicked
    * Extend in this session. Threaded through so MaxTurnsResultCard can
    * render the soft-cap warning at >= EXTENSION_SOFT_CAP. Optional —
-   * MessageBlock callers that don't render result cards (e.g. multi-
-   * agent transcripts) can omit it.
+   * MessageBlock callers that don't render result cards can omit it.
+   * `Cebab-ibb4`: that caller is `AssistantTranscript` (the built-in help
+   * popover), NOT the multi-agent transcript as this said — MultiAgentTab
+   * imports no MessageBlock and renders its own `EventRow`.
    */
   extensionsUsed?: number;
   /**
@@ -37,8 +40,10 @@ export function MessageBlock(props: {
   onEndMaxTurnsSession?: () => void;
   /**
    * `Cebab-uhn2`: the operator answered a parked `AskUserQuestion`. Optional
-   * for the same reason the two above are — the multi-agent transcript renders
-   * MessageBlocks too and answers its questions through its own path.
+   * for the same reason the two above are — the help-assistant popover renders
+   * MessageBlocks with no callbacks at all, and the multi-agent tab (which the
+   * comment here used to name) answers its questions through its own path
+   * without going near this component.
    */
   onAskUserAnswer?: (toolUseId: string, answers: Record<string, string>) => void;
 }) {
@@ -84,8 +89,13 @@ export function MessageBlock(props: {
   // Cebab-003: tool output is the one system message with something to say.
   // Everything else that lands as `kind: 'system'` — the `init` banner, the
   // `system_event` summaries — still renders nothing, exactly as before.
+  //
+  // `Cebab-ibb4`: the "renders nothing" half is now a shared predicate, because
+  // the quiet view counts the messages it hides and puts the number on a
+  // toggle. A second copy of this rule would be wrong in a way nothing could
+  // see: the toggle would offer to reveal rows that expand into blank space.
   if (m.kind === 'system') {
-    if (m.subtype !== 'tool_result') return null;
+    if (!rendersAnything(m)) return null;
     return <ToolResultCard message={m} />;
   }
 
