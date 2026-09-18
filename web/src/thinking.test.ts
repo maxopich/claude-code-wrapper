@@ -142,7 +142,7 @@ function run(over: Partial<MultiAgentRun> = {}): MultiAgentRun {
     lifecycle: 'persistent',
     sessionFolder: '/tmp/m1',
     awaitingContinue: false,
-    activity: null,
+    activityByAgent: {},
     hopBudget: 30,
     hopsUsed: 0,
     pendingRetry: null,

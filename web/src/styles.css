@@ -3108,6 +3108,18 @@ pre {
   align-self: flex-start;
   flex-shrink: 0;
 }
+/* One agent's live indicator inside the bar. Several can sit side by side
+ * when workers run in parallel; a thin divider separates them so the bar
+ * reads as N distinct "agent X working" units rather than one run-on line. */
+.ma-activity-agent {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ma-activity-agent + .ma-activity-agent {
+  border-left: 1px solid var(--border);
+  padding-left: 8px;
+}
 .ma-activity-text {
   font-size: var(--t-sm);
   color: var(--fg-2);

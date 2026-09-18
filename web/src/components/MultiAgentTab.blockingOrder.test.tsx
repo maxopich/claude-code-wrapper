@@ -99,7 +99,7 @@ function buildRun(overrides: Partial<MultiAgentRun> = {}): MultiAgentRun {
     lifecycle: 'persistent',
     sessionFolder: '/ws/.cebab/bus-test',
     awaitingContinue: false,
-    activity: null,
+    activityByAgent: {},
     hopBudget: 30,
     pendingRetry: null,
     pauseOnDangerous: true,

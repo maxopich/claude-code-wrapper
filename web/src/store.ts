@@ -337,7 +337,8 @@ export type MultiAgentRunStatus = 'running' | 'completed' | 'stopped' | 'crashed
  */
 export type MultiAgentActivity = {
   agentName: string;
-  /** 'working' | 'stalled' — `idle` is represented as `activity: null`. */
+  /** 'working' | 'stalled' — `idle` is represented as the agent's key being
+   *  absent from `activityByAgent`. */
   phase: Exclude<AgentActivityPhase, 'idle'>;
   currentTool?: string;
   lastActivityTs: number;
@@ -370,10 +371,19 @@ export type MultiAgentRun = {
    *  instead of the prompt input until the operator continues; cleared
    *  optimistically on click (`ma_clear_awaiting`). */
   awaitingContinue: boolean;
-  /** Ephemeral liveness of the in-flight turn (current tool, working vs.
-   *  stalled). null = no turn computing / turn just ended. Drives the
-   *  activity bar only; never persisted, reset on reload. */
-  activity: MultiAgentActivity | null;
+  /** Ephemeral liveness of the in-flight turn(s), keyed by agent slug.
+   *  Agents genuinely run in parallel (the orchestrator dispatches workers
+   *  without awaiting), so activity is held PER AGENT: one worker going
+   *  `idle` deletes only its own entry and cannot blank another worker that
+   *  is still `working`. An absent key = that agent has no live turn. The
+   *  whole map is ephemeral: never persisted, reset to `{}` on reload and on
+   *  every start/reconstruct (the durable hop timeline re-syncs the spine).
+   *
+   *  Do NOT read this map directly to decide who renders as working — route
+   *  through `workingAgents(run)`, which applies the run-level suppression
+   *  (`activitySuppressed`) so a worker halted at an operator banner never
+   *  shows green. */
+  activityByAgent: Readonly<Record<string, MultiAgentActivity>>;
   /** Hard cap on persisted hops for this session (resolved server-side at
    *  start/reconstruct). Drives the activity-bar chip `events.length /
    *  hopBudget` and the "Hop budget" row in Session info; the actual
@@ -2629,7 +2639,10 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             lifecycle: msg.lifecycle,
             sessionFolder: msg.sessionFolder,
             awaitingContinue: msg.awaitingContinue ?? false,
-            activity: null,
+            // Per-agent liveness starts empty on every start/reconstruct —
+            // `agent_activity` is ephemeral and not replayed, so the map
+            // re-fills from the next hop's tick.
+            activityByAgent: {},
             hopBudget: msg.hopBudget,
             hopsUsed: msg.hopsUsed,
             pendingRetry: msg.pendingRetry ?? null,
@@ -2723,19 +2736,30 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
     case 'agent_activity': {
       const active = state.multiAgent.active;
       if (!active || active.sessionId !== msg.sessionId) return state;
-      // Ephemeral: 'idle' (turn ended) clears the live row; 'working' /
-      // 'stalled' replace it wholesale. Never appended to `events` — the
+      // Ephemeral, and keyed PER AGENT: a tick moves only its own agent's
+      // slot. 'idle' (that agent's turn ended) deletes just its key — it must
+      // NOT touch a sibling worker still `working`; 'working' / 'stalled'
+      // replace that one agent's entry. Never appended to `events` — the
       // durable timeline is the persisted hops, this is just the pulse.
-      const activity: MultiAgentActivity | null =
-        msg.phase === 'idle'
-          ? null
-          : {
-              agentName: msg.agentName,
-              phase: msg.phase,
-              currentTool: msg.currentTool,
-              lastActivityTs: msg.lastActivityTs,
-              turnStartedAt: msg.turnStartedAt,
-            };
+      let activityByAgent = active.activityByAgent;
+      if (msg.phase === 'idle') {
+        if (msg.agentName in activityByAgent) {
+          const { [msg.agentName]: _gone, ...rest } = activityByAgent;
+          void _gone;
+          activityByAgent = rest;
+        }
+      } else {
+        activityByAgent = {
+          ...activityByAgent,
+          [msg.agentName]: {
+            agentName: msg.agentName,
+            phase: msg.phase,
+            currentTool: msg.currentTool,
+            lastActivityTs: msg.lastActivityTs,
+            turnStartedAt: msg.turnStartedAt,
+          },
+        };
+      }
       // `Cebab-ut7`: harvest the participant's model into the persistent
       // per-agent map. Unlike `activity` (cleared on idle), this survives
       // the turn — the ModelChip must keep answering "what ran on" between
@@ -2750,7 +2774,7 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         ...state,
         multiAgent: {
           ...state.multiAgent,
-          active: { ...active, activity, modelsByAgent },
+          active: { ...active, activityByAgent, modelsByAgent },
         },
       };
     }
@@ -2773,7 +2797,9 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             ...withoutAutoRetry,
             status: msg.reason,
             iterationId: msg.iterationId,
-            activity: null,
+            // No agent is live once the session ends — clear every per-agent
+            // liveness slot, not just one.
+            activityByAgent: {},
             // Once the session ends, the pending-retry slot is moot — the
             // server clears its DB column as part of teardown, but the
             // client also drops the descriptor so the banner doesn't
@@ -4712,13 +4738,63 @@ export const MA_SENTINELS = BUS_SENTINEL_RECIPIENTS;
  * that has no server-side counterpart in the same shape.
  */
 export function activeAgent(run: MultiAgentRun): string | null {
-  if (run.status !== 'running') return null;
-  if (run.awaitingContinue || run.pendingRetry || run.pendingMutations.length > 0) return null;
+  if (activitySuppressed(run)) return null;
   const evs = run.events;
   if (evs.length === 0) return null;
   const last = evs[evs.length - 1];
   if (!tailAwaitsAgent(last)) return null;
   return last.destination;
+}
+
+/**
+ * THE run-level gate on rendering any agent as working. It is `true` when the
+ * run is not executing at all, or when an operator banner is waiting on a
+ * decision the whole run is blocked behind: an R-B read-only recovered run
+ * (`awaitingContinue`), a worker-failure `pendingRetry`, or a
+ * pause-on-dangerous gate holding one or more workers (`pendingMutations`).
+ *
+ * Both `activeAgent` (the single-slot fallback) and `workingAgents` (the
+ * per-agent map) route through this one predicate — it is NOT duplicated at
+ * the call sites. The pause case is why: a worker halted at an unapproved
+ * command is waiting on the operator, and per-agent activity ticks know
+ * nothing of that gate. Feeding them in unguarded would render that worker as
+ * working — a silent safety loss strictly worse than a blank indicator.
+ */
+export function activitySuppressed(run: MultiAgentRun): boolean {
+  if (run.status !== 'running') return true;
+  return run.awaitingContinue || run.pendingRetry !== null || run.pendingMutations.length > 0;
+}
+
+/**
+ * Every agent the client should render as currently working, keyed by slug.
+ * This is the per-agent replacement for reading a single `activity` slot:
+ * with parallel workers, two agents can be `working` at once and both appear
+ * here.
+ *
+ * Suppression is applied ONCE, here, via `activitySuppressed` — when any
+ * run-level banner is pending this returns `{}` no matter what the live ticks
+ * say, so a paused worker never renders green.
+ *
+ * When no per-agent ticks have reached this socket yet (a live re-attach —
+ * `agent_activity` is not replayed), it falls back to the single agent
+ * inferred from the hop tail (`activeAgent`), synthesizing a `working` entry
+ * so the indicator is not blank while the run is genuinely computing.
+ */
+export function workingAgents(run: MultiAgentRun): Readonly<Record<string, MultiAgentActivity>> {
+  if (activitySuppressed(run)) return {};
+  const map = run.activityByAgent;
+  if (Object.keys(map).length > 0) return map;
+  const inferred = activeAgent(run);
+  if (!inferred) return {};
+  const ts = run.events.length ? run.events[run.events.length - 1].ts : 0;
+  return {
+    [inferred]: {
+      agentName: inferred,
+      phase: 'working',
+      lastActivityTs: ts,
+      turnStartedAt: ts,
+    },
+  };
 }
 
 /**

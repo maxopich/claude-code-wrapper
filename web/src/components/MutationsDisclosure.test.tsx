@@ -50,11 +50,13 @@ function makeRun(mutations: MultiAgentMutationView[]): MultiAgentRun {
     lifecycle: 'persistent',
     sessionFolder: '/ws/.cebab/s1',
     awaitingContinue: false,
-    activity: {
-      agentName: 'reviewer-perf',
-      phase: 'working',
-      lastActivityTs: 1000,
-      turnStartedAt: 1000,
+    activityByAgent: {
+      'reviewer-perf': {
+        agentName: 'reviewer-perf',
+        phase: 'working',
+        lastActivityTs: 1000,
+        turnStartedAt: 1000,
+      },
     },
     hopBudget: 30,
     hopsUsed: 0,
