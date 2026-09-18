@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'vitest';
 import {
   activeSession,
+  activitySuppressed,
   countControlledParticipants,
   eventDefaultCollapsed,
   initialState,
@@ -9,8 +10,9 @@ import {
   routesToAssistant,
   sessionPhase,
   trustChipState,
+  workingAgents,
 } from './store';
-import type { MultiAgentEventView, MultiAgentRun } from './store';
+import type { MultiAgentActivity, MultiAgentEventView, MultiAgentRun } from './store';
 import type { ServerMsg } from '@cebab/shared';
 
 const PID = 1;
@@ -1096,7 +1098,7 @@ describe('store / agent_activity records the model into modelsByAgent (ut7)', ()
     s = reduce(s, activity('worker-a', 'working', 'claude-sonnet-4-5-20250929'));
     s = reduce(s, activity('worker-a', 'idle', 'claude-sonnet-4-5-20250929'));
     // The ephemeral activity row is cleared on idle...
-    expect(s.multiAgent.active!.activity).toBeNull();
+    expect(s.multiAgent.active!.activityByAgent['worker-a']).toBeUndefined();
     // ...but the model map — the ModelChip's source — survives the turn.
     expect(s.multiAgent.active!.modelsByAgent).toEqual({
       'worker-a': 'claude-sonnet-4-5-20250929',
@@ -1133,7 +1135,7 @@ describe('store / eventDefaultCollapsed', () => {
       lifecycle: 'persistent',
       sessionFolder: '/ws/.cebab/s1',
       awaitingContinue: false,
-      activity: null,
+      activityByAgent: {},
       hopBudget: 30,
       hopsUsed: 0,
       pendingRetry: null,
@@ -1269,29 +1271,47 @@ describe('store / agent_activity (ephemeral liveness)', () => {
     };
   }
 
-  test('working sets active.activity; stalled replaces it', () => {
+  test("working sets that agent's slot; stalled replaces it", () => {
     let s = started();
     s = reduce(s, { type: 'server', msg: activity() });
-    expect(s.multiAgent.active!.activity).toEqual({
-      agentName: 'coder',
-      phase: 'working',
-      currentTool: 'Bash',
-      lastActivityTs: 1000,
-      turnStartedAt: 900,
+    expect(s.multiAgent.active!.activityByAgent).toEqual({
+      coder: {
+        agentName: 'coder',
+        phase: 'working',
+        currentTool: 'Bash',
+        lastActivityTs: 1000,
+        turnStartedAt: 900,
+      },
     });
     s = reduce(s, {
       type: 'server',
       msg: activity({ phase: 'stalled', currentTool: 'Bash', lastActivityTs: 1000 }),
     });
-    expect(s.multiAgent.active!.activity!.phase).toBe('stalled');
+    expect(s.multiAgent.active!.activityByAgent['coder'].phase).toBe('stalled');
   });
 
-  test('idle clears the activity to null', () => {
+  test("idle deletes that agent's slot", () => {
     let s = started();
     s = reduce(s, { type: 'server', msg: activity() });
-    expect(s.multiAgent.active!.activity).not.toBeNull();
+    expect(s.multiAgent.active!.activityByAgent['coder']).toBeDefined();
     s = reduce(s, { type: 'server', msg: activity({ phase: 'idle' }) });
-    expect(s.multiAgent.active!.activity).toBeNull();
+    expect(s.multiAgent.active!.activityByAgent['coder']).toBeUndefined();
+    expect(s.multiAgent.active!.activityByAgent).toEqual({});
+  });
+
+  // The core defect (Cebab-ygu.49): with parallel workers, one agent going
+  // idle must not blank another that is still working. Reddens on the old
+  // single-slot reducer, where any 'idle' cleared the shared row wholesale.
+  test('one agent going idle leaves a sibling still working', () => {
+    let s = started();
+    s = reduce(s, { type: 'server', msg: activity({ agentName: 'coder' }) });
+    s = reduce(s, { type: 'server', msg: activity({ agentName: 'planner' }) });
+    expect(Object.keys(s.multiAgent.active!.activityByAgent).sort()).toEqual(['coder', 'planner']);
+    // The fast worker finishes...
+    s = reduce(s, { type: 'server', msg: activity({ agentName: 'planner', phase: 'idle' }) });
+    // ...and the slow one is STILL shown working.
+    expect(s.multiAgent.active!.activityByAgent['coder']?.phase).toBe('working');
+    expect(s.multiAgent.active!.activityByAgent['planner']).toBeUndefined();
   });
 
   test('a mismatched sessionId is a no-op (stale tick from a prior run)', () => {
@@ -1300,12 +1320,13 @@ describe('store / agent_activity (ephemeral liveness)', () => {
     const before = s;
     s = reduce(s, { type: 'server', msg: activity({ sessionId: 'sess-OTHER', phase: 'idle' }) });
     expect(s).toBe(before); // same reference — short-circuited
-    expect(s.multiAgent.active!.activity!.phase).toBe('working');
+    expect(s.multiAgent.active!.activityByAgent['coder'].phase).toBe('working');
   });
 
-  test('multi_agent_ended clears activity along with setting status', () => {
+  test('multi_agent_ended clears all activity along with setting status', () => {
     let s = started();
-    s = reduce(s, { type: 'server', msg: activity({ phase: 'stalled' }) });
+    s = reduce(s, { type: 'server', msg: activity({ agentName: 'coder', phase: 'stalled' }) });
+    s = reduce(s, { type: 'server', msg: activity({ agentName: 'planner' }) });
     s = reduce(s, {
       type: 'server',
       msg: {
@@ -1316,12 +1337,140 @@ describe('store / agent_activity (ephemeral liveness)', () => {
       },
     });
     expect(s.multiAgent.active!.status).toBe('completed');
-    expect(s.multiAgent.active!.activity).toBeNull();
+    expect(s.multiAgent.active!.activityByAgent).toEqual({});
   });
 
   test('agent_activity with no active run is a no-op', () => {
     const s = reduce(initialState, { type: 'server', msg: activity() });
     expect(s.multiAgent.active).toBeNull();
+  });
+});
+
+// `Cebab-ygu.49`: the per-agent read that both the participants panel and the
+// activity bar consume. It applies the ONE run-level suppression predicate
+// (`activitySuppressed`), so a paused worker never renders as working.
+describe('store / workingAgents (per-agent liveness, run-level suppressed)', () => {
+  function makeRun(over: Partial<MultiAgentRun> = {}): MultiAgentRun {
+    return {
+      sessionId: 's1',
+      mode: 'orchestrator',
+      participantAgentNames: ['orchestrator', 'coder', 'planner'],
+      status: 'running',
+      events: [],
+      iterationId: null,
+      lifecycle: 'persistent',
+      sessionFolder: '/ws/.cebab/s1',
+      awaitingContinue: false,
+      activityByAgent: {},
+      hopBudget: 30,
+      hopsUsed: 0,
+      pendingRetry: null,
+      pauseOnDangerous: false,
+      executeMode: false,
+      mutations: [],
+      pendingMutations: [],
+      pendingQuestion: null,
+      recoveryContext: null,
+      routerDrops: [],
+      participantControls: {},
+      modelsByAgent: {},
+      ...over,
+    };
+  }
+  const act = (
+    agentName: string,
+    phase: 'working' | 'stalled' = 'working',
+  ): MultiAgentActivity => ({
+    agentName,
+    phase,
+    lastActivityTs: 1000,
+    turnStartedAt: 900,
+  });
+  const mutation = () => ({
+    id: 1,
+    sessionId: 's1',
+    ts: 1,
+    agentName: 'coder',
+    toolName: 'Bash',
+    category: 'dangerous' as const,
+    summary: 'rm -rf',
+    filePath: null,
+    cwd: '/ws/coder',
+    confirmedAt: null,
+    promoted: false,
+  });
+
+  test('both concurrent workers are represented at once', () => {
+    const run = makeRun({ activityByAgent: { coder: act('coder'), planner: act('planner') } });
+    expect(Object.keys(workingAgents(run)).sort()).toEqual(['coder', 'planner']);
+  });
+
+  // Acceptance (a): A working, B idle → A still shown working. On the old
+  // single-slot code B's idle nulled the shared row and this returned nothing.
+  test('a sibling going idle leaves the still-working agent shown', () => {
+    const run = makeRun({ activityByAgent: { coder: act('coder') } }); // planner already idle (absent)
+    expect(Object.keys(workingAgents(run))).toEqual(['coder']);
+    expect(workingAgents(run)['coder'].phase).toBe('working');
+  });
+
+  // Acceptance (b), the SAFETY case: a pending mutation suppresses ALL
+  // per-agent activity, even though the ticks say two agents are working. This
+  // is the trap-guard — feeding per-agent ticks in unguarded would render a
+  // worker halted at an unapproved command as working.
+  test('a pending mutation shows NO agent working despite live ticks', () => {
+    const run = makeRun({
+      activityByAgent: { coder: act('coder'), planner: act('planner') },
+      pendingMutations: [mutation()],
+    });
+    expect(activitySuppressed(run)).toBe(true);
+    expect(workingAgents(run)).toEqual({});
+  });
+
+  test('awaitingContinue and pendingRetry each suppress all activity', () => {
+    const ticks = { coder: act('coder') };
+    expect(workingAgents(makeRun({ activityByAgent: ticks, awaitingContinue: true }))).toEqual({});
+    expect(
+      workingAgents(
+        makeRun({
+          activityByAgent: ticks,
+          pendingRetry: {
+            agentName: 'coder',
+            reason: 'boom',
+            lastPrompt: 'do the thing',
+            ts: 1,
+            errorEventId: 2,
+          },
+        }),
+      ),
+    ).toEqual({});
+  });
+
+  test('a non-running run suppresses all activity', () => {
+    const run = makeRun({ status: 'completed', activityByAgent: { coder: act('coder') } });
+    expect(workingAgents(run)).toEqual({});
+  });
+
+  // Fact 3: when no per-agent ticks reached this socket (a live re-attach),
+  // fall back to the single tail-inferred agent so the bar is not blank while
+  // the run genuinely computes.
+  test('falls back to the tail-inferred agent when no ticks are present', () => {
+    const run = makeRun({
+      activityByAgent: {},
+      events: [
+        {
+          eventId: 1,
+          ts: 500,
+          source: 'orchestrator',
+          destination: 'coder',
+          kind: 'prompt',
+          text: 'go',
+        },
+      ],
+    });
+    const w = workingAgents(run);
+    expect(Object.keys(w)).toEqual(['coder']);
+    expect(w['coder'].phase).toBe('working');
+    expect(w['coder'].turnStartedAt).toBe(500);
   });
 });
 

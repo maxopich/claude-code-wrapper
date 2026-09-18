@@ -14,8 +14,13 @@ import type {
   ServerMsg,
   TemplateLastRun,
 } from '@cebab/shared/protocol';
-import type { MultiAgentEventView, MultiAgentRun, MultiAgentState } from '../store';
-import { activeAgent, eventDefaultCollapsed, summarizeMutationCounts } from '../store';
+import type {
+  MultiAgentActivity,
+  MultiAgentEventView,
+  MultiAgentRun,
+  MultiAgentState,
+} from '../store';
+import { eventDefaultCollapsed, summarizeMutationCounts, workingAgents } from '../store';
 import { agentIdentity } from '../agentIdentity';
 import { formatElapsed, timeAgo } from '../format';
 import { ThinkingIndicator, useElapsed } from './ThinkingIndicator';
@@ -1803,15 +1808,13 @@ export function ActiveRunView(props: {
             run={run}
             projects={props.projects}
             canEdit={isRunning && isOrchestrator}
-            // A paused run (R-B awaiting Continue, a worker-failure pending
-            // retry, or a pause-on-dangerous gate holding a worker) isn't
-            // actually executing — show no fake activity until the operator
-            // resolves the banner.
-            activeAgent={
-              run.awaitingContinue || run.pendingRetry || run.pendingMutations.length > 0
-                ? null
-                : activeAgent(run)
-            }
+            // Per-agent liveness. `workingAgents` applies the run-level
+            // suppression (`activitySuppressed`) in ONE place: a paused run
+            // (R-B awaiting Continue, a worker-failure pending retry, or a
+            // pause-on-dangerous gate holding a worker) shows no agent as
+            // working — no fake activity until the operator resolves the
+            // banner. With parallel workers several agents can appear at once.
+            workingAgents={workingAgents(run)}
             onSetLifecycle={(lifecycle) => props.onSetLifecycle(run.sessionId, lifecycle)}
             onAddParticipant={(projectId) => props.onAddParticipant(run.sessionId, projectId)}
             onMuteParticipant={(projectId, reasonCode, reasonText) =>
@@ -2197,8 +2200,11 @@ function SessionSettingsPanel(props: {
   run: MultiAgentRun;
   projects: Project[];
   canEdit: boolean;
-  /** Slug of the participant currently computing, or null if none. */
-  activeAgent: string | null;
+  /** Every participant currently computing, keyed by slug. A participant's
+   *  row renders a working indicator iff its slug is a key here. Per-agent so
+   *  parallel workers each show as working; already run-level suppressed by
+   *  the caller via `workingAgents`. */
+  workingAgents: Readonly<Record<string, MultiAgentActivity>>;
   onSetLifecycle: (lifecycle: MultiAgentLifecycle) => void;
   onAddParticipant: (projectId: number) => void;
   /**
@@ -2249,9 +2255,6 @@ function SessionSettingsPanel(props: {
 }) {
   const { run } = props;
   const isOrchestrator = run.mode === 'orchestrator';
-  // The active agent was delivered its turn at the last event's timestamp —
-  // the closest proxy for "how long has it been working" (sub-second slack).
-  const turnStartedAt = run.events.length ? run.events[run.events.length - 1].ts : null;
   const orchestratorSlug = isOrchestrator ? (run.participantAgentNames[0] ?? 'orchestrator') : null;
   const workerSlugs = isOrchestrator
     ? run.participantAgentNames.slice(1)
@@ -2332,11 +2335,11 @@ function SessionSettingsPanel(props: {
             {isOrchestrator && orchestratorSlug && (
               <li className="settings-participant settings-participant-hub">
                 <code>{orchestratorSlug}</code> <span className="hint">(hub)</span>
-                {props.activeAgent === orchestratorSlug && (
+                {orchestratorSlug in props.workingAgents && (
                   <ThinkingIndicator
                     variant="inline"
                     phase="thinking"
-                    startedAt={turnStartedAt}
+                    startedAt={props.workingAgents[orchestratorSlug].turnStartedAt}
                     label={orchestratorSlug}
                   />
                 )}
@@ -2354,11 +2357,11 @@ function SessionSettingsPanel(props: {
                 <li key={slug} className="settings-participant">
                   <code>{slug}</code>
                   <ParticipantTrustChip slug={slug} projects={props.projects} />
-                  {props.activeAgent === slug && (
+                  {slug in props.workingAgents && (
                     <ThinkingIndicator
                       variant="inline"
                       phase="thinking"
-                      startedAt={turnStartedAt}
+                      startedAt={props.workingAgents[slug].turnStartedAt}
                       label={slug}
                     />
                   )}
@@ -2836,74 +2839,33 @@ export function TopRunBar(props: {
 }
 
 /**
- * Slim "what's running right now" strip, anchored under the main tab nav so
- * the operator can see the active agent without scrolling the scrollback.
- * Renders nothing unless a run is genuinely computing — hidden for the draft
- * view, finished runs, and R-B read-only recovered runs (awaitingContinue).
+ * One agent's live indicator inside the activity bar. Rendered once per agent
+ * currently working (parallel workers each get their own), so a finishing
+ * worker cannot blank a sibling still running. Holds its own `useElapsed`
+ * hook, keyed by React position via the `key` at the call site.
  */
-export function MultiAgentActivityBar(props: {
-  run: MultiAgentRun | null;
-  /**
-   * Cluster C Phase 4g1: projects list, used to map the active agent's
-   * bus slug back to its `projectId` so we can render its
-   * ParticipantStatePills (control envelopes are keyed by projectId).
-   * Optional — when omitted (e.g. legacy call sites or tests), the pills
-   * are simply not rendered; the chip + rest of the bar still work.
-   */
+function AgentActivityStrip(props: {
+  activity: MultiAgentActivity;
+  run: MultiAgentRun;
   projects?: readonly Project[];
 }) {
-  const run = props.run;
-  // Prefer the ephemeral heartbeat; fall back to the inferred active agent
-  // (e.g. a live re-attach where `agent_activity` didn't reach this socket —
-  // see the protocol JSDoc). One of the two is set by the time we render.
-  const act = run?.activity ?? null;
-  const fallbackAgent = run ? activeAgent(run) : null;
-  const startedAt =
-    act?.turnStartedAt ??
-    (run && fallbackAgent && run.events.length ? run.events[run.events.length - 1].ts : null);
-  // Hook called unconditionally (before any early return) to keep hook order
-  // stable across renders.
-  const elapsedMs = useElapsed(startedAt);
-
-  if (!run || run.status !== 'running' || run.awaitingContinue || run.pendingRetry) return null;
-  if (!act && !fallbackAgent) return null;
-
-  const agentName = act?.agentName ?? fallbackAgent ?? '';
-  const stalled = act?.phase === 'stalled';
-  const tool = act?.currentTool;
-  // Hop-budget chip: shows cumulative `hopsUsed / hopBudget` with a warn tint
-  // at ≥80% so the operator sees the cap approaching well before the synthetic
-  // `cebab → _sink error` event lands.
-  //
-  // `Cebab-v85`: `hopsUsed` is the router's own counter, carried on the wire.
-  // It was `run.events.length`, which counts five row classes the router
-  // deliberately does not — so the chip read high by a GROWING amount and
-  // could not be reconciled with anything on the server. The chip reading high
-  // is the safe direction, but this number is an input to the operator's
-  // decision about raising the budget, and a wrong input is a wrong decision.
-  const hops = run.hopsUsed;
-  const budget = run.hopBudget;
-  const budgetWarn = budget > 0 && hops / budget >= 0.8;
-
-  // Cluster C Phase 4g1: resolve the active agent's per-participant control
-  // state for the inline ParticipantStatePills mount. Wire-side envelopes
-  // key by projectId, but the activity bar identifies the active agent by
-  // bus slug — projects.busAgentName is the join key. Returns undefined
-  // when no project matches (orchestrator, off-roster agent, or
-  // `projects` not provided), in which case the pills component renders
-  // null anyway.
-  const activeAgentControl = (() => {
-    if (!props.projects || agentName === '') return undefined;
+  const { activity: act, run } = props;
+  const elapsedMs = useElapsed(act.turnStartedAt);
+  const agentName = act.agentName;
+  const stalled = act.phase === 'stalled';
+  const tool = act.currentTool;
+  // Cluster C Phase 4g1: resolve this agent's per-participant control state
+  // for the inline ParticipantStatePills mount. Wire-side envelopes key by
+  // projectId; `busAgentName` is the join. undefined (no match, or no
+  // `projects`) → the pills component renders null.
+  const control = (() => {
+    if (!props.projects) return undefined;
     const proj = props.projects.find((p) => p.busAgentName === agentName);
     if (!proj) return undefined;
     return run.participantControls[proj.id];
   })();
-
   return (
-    <div
-      className={`ma-activity-bar${stalled ? ' is-stalled' : ''}`}
-      role={stalled ? 'alert' : 'status'}
-    >
+    <span className="ma-activity-agent">
       {stalled ? (
         // A hung worker must NOT look like a working one: static glyph,
         // never the breathing orb (no-color-only / no-motion-only).
@@ -2914,7 +2876,7 @@ export function MultiAgentActivityBar(props: {
         <ThinkingIndicator
           variant="inline"
           phase={tool ? 'tool-running' : 'thinking'}
-          startedAt={startedAt}
+          startedAt={act.turnStartedAt}
           toolName={tool}
           label={agentName}
         />
@@ -2945,11 +2907,71 @@ export function MultiAgentActivityBar(props: {
           </>
         )}
       </span>
-      {/* Cluster C Phase 4g1: inline state pills for the currently active
-       *  agent, when it has any control state. Sits right after the agent
-       *  name so the operator's eye lands on "agent X is muted / paused /
-       *  kicked" alongside the working indicator. */}
-      <ParticipantStatePills control={activeAgentControl} />
+      {/* Cluster C Phase 4g1: inline state pills for this agent, when it has
+       *  any control state. Sits right after the agent name so the operator's
+       *  eye lands on "agent X is muted / paused / kicked" alongside the
+       *  working indicator. */}
+      <ParticipantStatePills control={control} />
+    </span>
+  );
+}
+
+/**
+ * Slim "what's running right now" strip, anchored under the main tab nav so
+ * the operator can see which agents are working without scrolling the
+ * scrollback. With parallel workers it shows one indicator per working agent.
+ * Renders nothing unless a run is genuinely computing — hidden for the draft
+ * view, finished runs, R-B read-only recovered runs (awaitingContinue), and
+ * runs blocked behind an operator banner (see `workingAgents`).
+ */
+export function MultiAgentActivityBar(props: {
+  run: MultiAgentRun | null;
+  /**
+   * Cluster C Phase 4g1: projects list, used to map the active agent's
+   * bus slug back to its `projectId` so we can render its
+   * ParticipantStatePills (control envelopes are keyed by projectId).
+   * Optional — when omitted (e.g. legacy call sites or tests), the pills
+   * are simply not rendered; the chip + rest of the bar still work.
+   */
+  projects?: readonly Project[];
+}) {
+  const run = props.run;
+  // Every agent genuinely working right now, keyed by slug. `workingAgents`
+  // applies the run-level suppression (`activitySuppressed`) — a run awaiting
+  // Continue, a pending retry, or a pause-on-dangerous gate holding a worker
+  // renders NO agent, so a worker halted at an unapproved command never shows
+  // green here. With parallel workers there can be several at once; a live
+  // re-attach with no ticks yet falls back to the single tail-inferred agent.
+  const working = run ? workingAgents(run) : {};
+  const agents = Object.values(working);
+  if (!run || agents.length === 0) return null;
+
+  const anyStalled = agents.some((a) => a.phase === 'stalled');
+  // Hop-budget chip: shows cumulative `hopsUsed / hopBudget` with a warn tint
+  // at ≥80% so the operator sees the cap approaching well before the synthetic
+  // `cebab → _sink error` event lands.
+  //
+  // `Cebab-v85`: `hopsUsed` is the router's own counter, carried on the wire.
+  // It was `run.events.length`, which counts five row classes the router
+  // deliberately does not — so the chip read high by a GROWING amount and
+  // could not be reconciled with anything on the server. The chip reading high
+  // is the safe direction, but this number is an input to the operator's
+  // decision about raising the budget, and a wrong input is a wrong decision.
+  const hops = run.hopsUsed;
+  const budget = run.hopBudget;
+  const budgetWarn = budget > 0 && hops / budget >= 0.8;
+
+  return (
+    <div
+      className={`ma-activity-bar${anyStalled ? ' is-stalled' : ''}`}
+      role={anyStalled ? 'alert' : 'status'}
+    >
+      {/* One strip per agent working right now. Parallel workers each get
+       *  their own indicator, so a finishing worker cannot blank a sibling
+       *  still running. */}
+      {agents.map((a) => (
+        <AgentActivityStrip key={a.agentName} activity={a} run={run} projects={props.projects} />
+      ))}
       {/* Cluster G Phase 2c (UI-A3): per-run MOCK chip — placed right after
        *  the participant pills so the persistent posture cluster reads
        *  "agent X is muted/paused/kicked AND the run is MOCK" alongside

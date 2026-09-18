@@ -202,6 +202,6 @@ describe('multi_agent_ended retires every banner slot (item 6)', () => {
     expect(r.pendingMutations).toEqual([]);
     expect(r.pendingQuestion).toBeNull();
     expect(r.recoveryContext).toBeNull();
-    expect(r.activity).toBeNull();
+    expect(r.activityByAgent).toEqual({});
   });
 });

@@ -52,7 +52,7 @@ function mkRun(participantControls: Record<number, ParticipantControlView>): Mul
     lifecycle: 'persistent',
     sessionFolder: '/tmp/.cebab/bus-1',
     awaitingContinue: false,
-    activity: null,
+    activityByAgent: {},
     hopBudget: 30,
     hopsUsed: 0,
     pendingRetry: null,

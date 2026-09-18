@@ -44,7 +44,7 @@ function buildRun(overrides: Partial<MultiAgentRun> = {}): MultiAgentRun {
     lifecycle: 'persistent',
     sessionFolder: '/ws/.cebab/bus-test',
     awaitingContinue: false,
-    activity: null,
+    activityByAgent: {},
     hopBudget: 30,
     hopsUsed: 0,
     pendingRetry: null,
@@ -190,18 +190,20 @@ describe('MultiAgentActivityBar — MockBadge mount predicate', () => {
     container.remove();
   });
 
-  // Populating `activity` is the simplest way past the activity bar's
+  // Populating `activityByAgent` is the simplest way past the activity bar's
   // early returns (the alternative is feeding `events` with a
   // non-sentinel destination so `activeAgent` returns non-null). Either
   // path lands on the same render branch where the chip cluster lives.
   function activeRun(overrides: Partial<MultiAgentRun> = {}): MultiAgentRun {
     return {
       ...buildRun({
-        activity: {
-          agentName: 'workerA',
-          phase: 'working',
-          lastActivityTs: Date.now(),
-          turnStartedAt: Date.now() - 1000,
+        activityByAgent: {
+          workerA: {
+            agentName: 'workerA',
+            phase: 'working',
+            lastActivityTs: Date.now(),
+            turnStartedAt: Date.now() - 1000,
+          },
         },
       }),
       ...overrides,
