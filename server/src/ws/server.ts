@@ -92,6 +92,8 @@ import {
   type SettingScope,
 } from '../repo/project_authority.js';
 import { probeSessionStarted } from '../runner/probe.js';
+import { openMcpControlSession } from '../runner/mcp_control.js';
+import { handleMcpControl } from './mcp_control.js';
 import { createProbeScheduler, type ProbeScheduler } from '../runner/probe_schedule.js';
 import { readModelCatalogue } from '../runner/model_catalogue.js';
 import { recordTrustDecision } from '../repo/mcp_trust.js';
@@ -4874,6 +4876,43 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       // rather than spawn a probe against its Cebab-owned posture.
       assertWorkspaceProject(msg.projectId);
       await respondWithProjectAuthority(conn, msg.projectId, msg.mode);
+      return;
+    }
+    case 'mcp_control': {
+      // `Cebab-ormv`: the live MCP view, and the four actions that can fix a
+      // server. Everything else Cebab knows about MCP comes from a frozen
+      // `system/init` snapshot; this is the only path that re-reads, and the
+      // only one that can act.
+      //
+      // [security] Same refusal as the authority probe above: the assistant
+      // runs a Cebab-owned posture and has no MCP surface of its own, so a
+      // control spawn against it would be Cebab inspecting itself on the
+      // operator's behalf.
+      assertWorkspaceProject(msg.projectId);
+      await handleMcpControl(
+        {
+          openSession: async (projectId) => {
+            const project = getProject(projectId);
+            if (!project) throw new Error(`unknown project ${projectId}`);
+            return openMcpControlSession({
+              cwd: project.path,
+              projectId,
+              // `trustDerivedScopes`, not a hand-rolled scope list, and for the
+              // reason `runAuthorityProbe` states: a session resolved against
+              // scopes the operator's TURNS would not use reports a different
+              // set of servers than the one this panel claims to describe.
+              settingSources: trustDerivedScopes(project.trusted === 1),
+            });
+          },
+          send: (out) => send(conn.ws, out),
+        },
+        {
+          projectId: msg.projectId,
+          op: msg.op,
+          ...(msg.serverName !== undefined ? { serverName: msg.serverName } : {}),
+          ...(msg.enabled !== undefined ? { enabled: msg.enabled } : {}),
+        },
+      );
       return;
     }
     case 'mcp_trust_decision': {

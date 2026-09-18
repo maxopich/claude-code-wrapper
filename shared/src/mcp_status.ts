@@ -35,6 +35,36 @@
 export type McpServerStatus = { name: string; status: string };
 
 /**
+ * `Cebab-ormv`: one server as a LIVE read describes it.
+ *
+ * The same server, seen through `Query.mcpServerStatus()` rather than through
+ * the `system/init` snapshot above — which is a strict superset, measured: init
+ * carries `{ name, status }` and the live read adds the scope, the failure
+ * string, and the server's actual TOOL LIST. It is a separate type rather than
+ * optional fields on `McpServerStatus` because the two come from different
+ * places and mean different things: one is what was true when the session
+ * booted, the other is what is true now.
+ *
+ * It EXTENDS `McpServerStatus` so `isConnected` / `notConnected` /
+ * `toolsForMcpServer` apply to it unchanged. That is the point — a second
+ * status rule for live rows is exactly the drift `mcp_status_single_definition`
+ * exists to prevent.
+ *
+ * `toolNames` is `[]` for a server that contributed none, which is the honest
+ * answer for one that loaded and did not connect. A caller with no tool list at
+ * all must leave the field absent rather than pass `[]`, the same distinction
+ * `toolsForMcpServer`'s header draws between "none" and "we never looked".
+ */
+export type McpServerLive = McpServerStatus & {
+  /** The CLI's own scope label — `user`, `project`, `local`, `claudeai`,
+   *  `managed`. Printed, never interpreted; the set is not frozen. */
+  scope?: string;
+  /** Present when the server reported a failure. Verbatim from the SDK. */
+  error?: string;
+  toolNames: string[];
+};
+
+/**
  * Whether one server's tools are on the session's list.
  *
  * The single-server arm exists because there are three readers of this rule,

@@ -78,6 +78,9 @@ const SAMPLES: ClientMsg[] = [
   { type: 'request_inbox_snapshot' },
   { type: 'clear_dismissed_inbox' },
   { type: 'get_project_authority', projectId: 1, mode: 'cache' },
+  // `Cebab-ormv`: the read op, which is the only one carrying no serverName —
+  // so the sample exercises the optional-field arm rather than the easy one.
+  { type: 'mcp_control', projectId: 1, op: 'status' },
   { type: 'mcp_trust_decision', serverName: 'm', originPath: '/p', decision: 'trust' },
   { type: 'bus_trust_decision', pendingId: 'p', projectId: 1, decision: 'trust' },
   { type: 'acknowledge_and_start', pendingStartId: 'p', typedAcknowledgment: 'inject' },

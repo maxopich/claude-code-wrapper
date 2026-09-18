@@ -315,8 +315,10 @@ export type SessionView = {
    * cannot change mid-session, re-reading it costs the operator screen for the
    * rest of the session and tells them nothing new the second time. In the
    * reported case the two named servers were claude.ai connectors reporting
-   * `needs-auth` — a state that cannot be fixed from inside Cebab at all — so
-   * the banner was pure standing cost above every message.
+   * `needs-auth`, which at the time could not be fixed from inside Cebab at
+   * all — `Cebab-ormv` since made it fixable from the authority panel's live
+   * MCP section, and the argument here is unchanged either way: the banner was
+   * pure standing cost above every message.
    *
    * SEPARATE FROM `mcpStatus`, not folded into it. The facts and the
    * operator's opinion of them are different things: a reducer that dropped
@@ -3972,6 +3974,20 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // — it now accumulates onto `active.routerDrops` for the counter
       // chip in the activity bar; `rate_limit_event` / `auto_retry`
       // exited in Phase 4c — see above.)
+      return state;
+
+    case 'mcp_control_result':
+      // `Cebab-ormv`: owned by McpControlContext, for the same reason
+      // `project_authority` below is owned by the AuthorityPanel — it is
+      // project-scoped, operator-initiated, and re-read on every action, so
+      // routing it through the main store would re-render every chat row each
+      // time the operator clicks Reconnect.
+      //
+      // There is a second reason here that does not apply to the others, and it
+      // is the load-bearing one: an `authenticate` reply carries `authUrl`,
+      // which embeds the operator's organization id. The main store is what
+      // session export and the debug surfaces read; this envelope must not
+      // settle there.
       return state;
 
     case 'project_authority':

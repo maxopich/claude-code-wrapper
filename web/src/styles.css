@@ -12254,3 +12254,49 @@ pre {
   color: var(--fg-2);
   line-height: 1.4;
 }
+
+/* `Cebab-ormv` — the live MCP section.
+ *
+ * Reuses the declared list's card, dot, chip and tool-count classes on purpose:
+ * the two sections sit adjacent in the authority panel and describe the same
+ * servers from different sources, so a reader comparing them should not also
+ * have to reconcile two visual languages. Only what is genuinely new to the
+ * live view is styled here — the action row, the verbatim status chip, the
+ * CLI's error text, and the authorize link. */
+.mcp-live {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.mcp-live-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* The SDK's own status string, printed rather than translated. Neutral chip
+ * styling on purpose — the DOT beside it already carries the severity, and
+ * colouring the text too would mean mapping statuses Cebab has not measured. */
+.mcp-live-status {
+  font-variant-numeric: tabular-nums;
+}
+.mcp-live-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.mcp-live-action {
+  font-size: var(--t-xs);
+}
+/* `--err-ink`, never the `--err` fill: the fill/ink split exists because the
+ * fill has no contrast guarantee against a text background. */
+.mcp-live-error {
+  margin: 0;
+  color: var(--err-ink);
+  font-size: var(--t-xs);
+  overflow-wrap: anywhere;
+}
+.mcp-live-auth {
+  margin: 0;
+  color: var(--warn-ink);
+  font-size: var(--t-xs);
+}

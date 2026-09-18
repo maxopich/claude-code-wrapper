@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 import type { ClientMsg, ProjectAuthority, ServerMsg } from '@cebab/shared/protocol';
 import { AuthorityProvider } from './AuthorityContext';
+import { McpControlProvider } from './McpControlContext';
 import { AuthorityPanel } from './AuthorityPanel';
 
 // Cluster B Phase 6b — AuthorityPanel host contract (UI-B1).
@@ -87,13 +88,21 @@ function mountPanel(props: {
   act(() => {
     root.render(
       <AuthorityProvider send={send} handlerRef={handlerRef}>
-        <AuthorityPanel
-          projectId={props.projectId ?? 1}
-          mode={props.mode}
-          noAutoRequest={props.noAutoRequest}
-          collapsible={props.collapsible}
-          wantLive={props.wantLive}
-        />
+        {/* `Cebab-ormv`: AuthorityPanel renders the live MCP section, which reads
+          this provider. Wrapped here because production wraps it — App.tsx
+          mounts McpControlProvider around the whole tree — rather than to
+          silence a throw. The hook is deliberately strict: a panel that
+          rendered a dead MCP section when the provider was missing would hide
+          a wiring mistake instead of reporting it. */}
+        <McpControlProvider send={() => {}}>
+          <AuthorityPanel
+            projectId={props.projectId ?? 1}
+            mode={props.mode}
+            noAutoRequest={props.noAutoRequest}
+            collapsible={props.collapsible}
+            wantLive={props.wantLive}
+          />
+        </McpControlProvider>
       </AuthorityProvider>,
     );
   });

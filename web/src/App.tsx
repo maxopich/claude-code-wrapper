@@ -65,6 +65,7 @@ import {
 } from './components/notifications';
 import { GateModalsProvider } from './components/authority/GateModalsContext';
 import { AuthorityProvider } from './components/authority/AuthorityContext';
+import { McpControlProvider } from './components/authority/McpControlContext';
 import {
   BannerStack,
   SessionBanner,
@@ -163,6 +164,11 @@ export function App() {
   // ServerMsgs through this ref into the provider's per-project cache. Every
   // mounted `<AuthorityPanel>` reads from that cache via `useAuthoritySlot`.
   const authorityHandlerRef = useRef<((msg: ServerMsg) => void) | null>(null);
+  // `Cebab-ormv`: bridge for the McpControlProvider. Same shape as the
+  // authority handler above — App.tsx routes `mcp_control_result` ServerMsgs
+  // through this ref into the provider's per-project slice, which the panel's
+  // live MCP section reads.
+  const mcpControlHandlerRef = useRef<((msg: ServerMsg) => void) | null>(null);
   // Cluster D Phase 5d: bridges for the ReopenProvider.
   //   - `reopenHandlerRef` — App.tsx routes reopen_session_confirm_required
   //     / reopen_session_failed / multi_agent_started ServerMsgs into the
@@ -231,6 +237,11 @@ export function App() {
   // Cluster B Phase 6e: ClientMsg sink for the AuthorityProvider — pipes
   // `get_project_authority` requests onto the active WS.
   const authoritySend = useCallback((msg: ClientMsg) => {
+    wsRef.current?.send(msg);
+  }, []);
+  // `Cebab-ormv`: ClientMsg sink for the McpControlProvider — pipes
+  // `mcp_control` requests onto the active WS.
+  const mcpControlSend = useCallback((msg: ClientMsg) => {
     wsRef.current?.send(msg);
   }, []);
   // Cluster D Phase 5d: ClientMsg sink for the ReopenProvider. Same wsRef
@@ -319,16 +330,17 @@ export function App() {
       <InboxProvider send={inboxSend} handlerRef={inboxHandlerRef}>
         <GateModalsProvider send={gateSend} handlerRef={gateHandlerRef}>
           <AuthorityProvider send={authoritySend} handlerRef={authorityHandlerRef}>
-            <ReopenProvider send={reopenSend} handlerRef={reopenHandlerRef}>
-              <ReopenBridge requestRef={reopenRequestRef} />
-              <AuthRefreshProvider send={authRefreshSend} handlerRef={authRefreshHandlerRef}>
-                <AuthRefreshBridge requestRef={authRefreshRequestRef} />
-                <RecoveryLogProvider send={recoveryLogSend} handlerRef={recoveryLogHandlerRef}>
-                  <ForensicViewerProvider
-                    send={forensicViewerSend}
-                    handlerRef={forensicViewerHandlerRef}
-                  >
-                    {/*
+            <McpControlProvider send={mcpControlSend} handlerRef={mcpControlHandlerRef}>
+              <ReopenProvider send={reopenSend} handlerRef={reopenHandlerRef}>
+                <ReopenBridge requestRef={reopenRequestRef} />
+                <AuthRefreshProvider send={authRefreshSend} handlerRef={authRefreshHandlerRef}>
+                  <AuthRefreshBridge requestRef={authRefreshRequestRef} />
+                  <RecoveryLogProvider send={recoveryLogSend} handlerRef={recoveryLogHandlerRef}>
+                    <ForensicViewerProvider
+                      send={forensicViewerSend}
+                      handlerRef={forensicViewerHandlerRef}
+                    >
+                      {/*
                       Cebab-8x8.3.2: AssistantProvider is the innermost provider
                       and AssistantDock is a SIBLING of AppShell (before
                       NotificationStack) — outside the `.app` grid, so the popup
@@ -336,33 +348,35 @@ export function App() {
                       adjacency it needs. Same send + handlerRef pair as the
                       inbox provider.
                     */}
-                    <AssistantProvider send={assistantSend} handlerRef={assistantHandlerRef}>
-                      <AppShell
-                        wsRef={wsRef}
-                        notifPushRef={notifPushRef}
-                        notifDismissRef={notifDismissRef}
-                        authTokenRef={authTokenRef}
-                        inboxHandlerRef={inboxHandlerRef}
-                        gateHandlerRef={gateHandlerRef}
-                        authorityHandlerRef={authorityHandlerRef}
-                        reopenHandlerRef={reopenHandlerRef}
-                        authRefreshHandlerRef={authRefreshHandlerRef}
-                        authRefreshRequestRef={authRefreshRequestRef}
-                        openSettingsRef={openSettingsRef}
-                        selectSessionByIdRef={selectSessionByIdRef}
-                        recoveryLogHandlerRef={recoveryLogHandlerRef}
-                        forensicViewerHandlerRef={forensicViewerHandlerRef}
-                        assistantHandlerRef={assistantHandlerRef}
-                        onAck={handleAck}
-                      />
-                      <AssistantDock />
-                      <NotificationStack onAction={onNotificationAction} />
-                      <KickForensicsModal />
-                    </AssistantProvider>
-                  </ForensicViewerProvider>
-                </RecoveryLogProvider>
-              </AuthRefreshProvider>
-            </ReopenProvider>
+                      <AssistantProvider send={assistantSend} handlerRef={assistantHandlerRef}>
+                        <AppShell
+                          wsRef={wsRef}
+                          notifPushRef={notifPushRef}
+                          notifDismissRef={notifDismissRef}
+                          authTokenRef={authTokenRef}
+                          inboxHandlerRef={inboxHandlerRef}
+                          gateHandlerRef={gateHandlerRef}
+                          authorityHandlerRef={authorityHandlerRef}
+                          mcpControlHandlerRef={mcpControlHandlerRef}
+                          reopenHandlerRef={reopenHandlerRef}
+                          authRefreshHandlerRef={authRefreshHandlerRef}
+                          authRefreshRequestRef={authRefreshRequestRef}
+                          openSettingsRef={openSettingsRef}
+                          selectSessionByIdRef={selectSessionByIdRef}
+                          recoveryLogHandlerRef={recoveryLogHandlerRef}
+                          forensicViewerHandlerRef={forensicViewerHandlerRef}
+                          assistantHandlerRef={assistantHandlerRef}
+                          onAck={handleAck}
+                        />
+                        <AssistantDock />
+                        <NotificationStack onAction={onNotificationAction} />
+                        <KickForensicsModal />
+                      </AssistantProvider>
+                    </ForensicViewerProvider>
+                  </RecoveryLogProvider>
+                </AuthRefreshProvider>
+              </ReopenProvider>
+            </McpControlProvider>
           </AuthorityProvider>
         </GateModalsProvider>
       </InboxProvider>
@@ -469,6 +483,9 @@ type AppShellProps = {
    * reducer; the provider caches per project for every mounted AuthorityPanel.
    */
   authorityHandlerRef: React.MutableRefObject<((msg: ServerMsg) => void) | null>;
+  /** `Cebab-ormv`: bridge ref the McpControlProvider populates, so
+   *  `mcp_control_result` envelopes reach the live MCP section. */
+  mcpControlHandlerRef: React.MutableRefObject<((msg: ServerMsg) => void) | null>;
   /**
    * Cluster D Phase 5d: bridge ref the ReopenProvider populates. Routes
    * `reopen_session_confirm_required` / `reopen_session_failed` /
@@ -540,6 +557,7 @@ function AppShell({
   inboxHandlerRef,
   gateHandlerRef,
   authorityHandlerRef,
+  mcpControlHandlerRef,
   reopenHandlerRef,
   authRefreshHandlerRef,
   authRefreshRequestRef,
@@ -968,6 +986,15 @@ function AppShell({
           } catch (err) {
             console.error('[authority] handler threw', err);
           }
+          // `Cebab-ormv`: hand to the McpControlProvider bridge so
+          // `mcp_control_result` envelopes reach the live MCP section. Same
+          // narrow-filter posture — everything else is dropped by the
+          // provider's own type check.
+          try {
+            mcpControlHandlerRef.current?.(msg);
+          } catch (err) {
+            console.error('[mcp-control] handler threw', err);
+          }
           // Cluster D Phase 5d: hand to the ReopenProvider bridge so
           // `reopen_session_confirm_required` / `reopen_session_failed` /
           // `multi_agent_started` envelopes drive the modal's state
@@ -1056,6 +1083,7 @@ function AppShell({
     notifDismissRef,
     authTokenRef,
     authorityHandlerRef,
+    mcpControlHandlerRef,
     authRefreshHandlerRef,
     forensicViewerHandlerRef,
     gateHandlerRef,

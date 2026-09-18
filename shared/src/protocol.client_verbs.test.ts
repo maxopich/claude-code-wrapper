@@ -51,6 +51,7 @@ const CLIENT_MSG_VERBS = [
   'list_templates',
   'load_session',
   'load_session_log',
+  'mcp_control',
   'mcp_trust_decision',
   'multi_agent_ask_user_answer',
   'multi_agent_user_prompt',

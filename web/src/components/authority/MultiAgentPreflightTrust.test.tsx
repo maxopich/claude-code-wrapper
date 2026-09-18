@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 import type { ClientMsg, ProjectAuthority, ServerMsg } from '@cebab/shared/protocol';
 import { AuthorityProvider } from './AuthorityContext';
+import { McpControlProvider } from './McpControlContext';
 import { DraftInspectAuthorityButton } from '../MultiAgentTab';
 
 /**
@@ -127,7 +128,13 @@ function openPreflight(projectIds: number[]) {
   act(() => {
     root.render(
       <AuthorityProvider send={(m) => sent.push(m)} handlerRef={handlerRef}>
-        <DraftInspectAuthorityButton projectIds={projectIds} />
+        {/* `Cebab-ormv`: the panel renders the live MCP section, which reads this
+          provider. Production wraps the whole tree in it (App.tsx); the hook
+          stays strict so a missing provider is a loud error rather than a
+          silently dead section. */}
+        <McpControlProvider send={() => {}}>
+          <DraftInspectAuthorityButton projectIds={projectIds} />
+        </McpControlProvider>
       </AuthorityProvider>,
     );
   });
