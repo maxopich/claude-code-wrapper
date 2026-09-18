@@ -48,7 +48,6 @@ import {
   recordSessionHops,
   recordSessionTeardown,
   setMultiAgentSessionLifecycle,
-  setExecuteMode,
   setMutationPauseState,
   setMutationPromoted,
   setPauseOnDangerous,
@@ -68,6 +67,7 @@ import type {
   ServerMsg,
 } from '@cebab/shared/protocol';
 import { emit as emitNotification } from '../notifications/dispatcher.js';
+import { applyExecuteModeGrant } from './execute_mode_grant.js';
 import {
   dispatchBusMaxTurnsReached,
   dispatchHopBudgetExhausted,
@@ -2773,15 +2773,27 @@ export async function startOrchestratorSession(
       console.error('[orchestrator] persist pause_on_dangerous failed', err);
     }
   }
-  // Persist execute mode at start so R-B reconstruct re-briefs workers in the
-  // same mode (reconstruct reads execute_mode back off the row).
-  if (opts.executeMode) {
-    try {
-      setExecuteMode(sessionId, true);
-    } catch (err) {
-      console.error('[orchestrator] persist execute_mode failed', err);
-    }
-  }
+  // `Cebab-vie.21`: the execute-mode GRANT writes a hash-chained safety_audit
+  // row BEFORE the column flips (BE-1 order) and FAILS CLOSED — if it cannot be
+  // recorded the session downgrades to consultant rather than running the
+  // privilege live with the row denying it. The single resolved local is used
+  // at EVERY forward of the request below (into the wire AND into the roster
+  // prompt), so an ungranted flag can never reach a renderer. Persisting it
+  // also lets R-B reconstruct re-brief workers in the same mode.
+  const executeModeGranted =
+    opts.executeMode === true &&
+    applyExecuteModeGrant(
+      {
+        sessionId,
+        mode: 'orchestrator',
+        projects: opts.workers.map((w) => ({ projectId: w.projectId, agentName: w.agentName })),
+      },
+      (msg) => {
+        if (msg.type === 'notification') {
+          opts.sendNotification?.(msg as NotificationEnvelope & { type: 'notification' });
+        }
+      },
+    ).granted;
 
   const { handle, router, deliver } = wireOrchestratorSession({
     sessionId,
@@ -2802,7 +2814,7 @@ export async function startOrchestratorSession(
     hopBudget: opts.hopBudget,
     maxTurns: opts.maxTurns,
     pauseOnDangerous: opts.pauseOnDangerous,
-    executeMode: opts.executeMode,
+    executeMode: executeModeGranted,
   });
 
   // Roster prompt + initial user prompt → UI/DB parity, then delivered as
@@ -2822,7 +2834,7 @@ export async function startOrchestratorSession(
       };
     }),
     hopBudget: handle.hopBudget,
-    executeMode: opts.executeMode ?? false,
+    executeMode: executeModeGranted,
   });
   router.forwardCebabEvent({
     ts: Date.now(),
