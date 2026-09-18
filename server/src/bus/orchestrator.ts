@@ -28,6 +28,7 @@
  * `bus_send` in, `deliver()` out — see chain.ts for the symmetric story).
  */
 import crypto from 'node:crypto';
+import { auditDangerousContinue } from './dangerous_continue_audit.js';
 import { projectModelSpec } from '../repo/projects.js';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -2656,6 +2657,23 @@ export function wireOrchestratorSession(p: {
       // its teardown clears pending mutations; resolving it here would forge an
       // operator decision the operator did not get to make.
       if (refused) return;
+      // `Cebab-vie.29` [security]: the operator's approval of a halted dangerous
+      // command is the one human decision in the whole bus, and it wrote nothing
+      // to the hash chain — so the chain could not tell "halted and approved"
+      // from "ran free". Audited BEFORE the grant is burnt, and FAILS CLOSED:
+      // if the approval cannot be recorded the command stays blocked, the row
+      // stays pending and the banner stays up, so the operator can click again.
+      // Placed after the `refused` checks so a turn that will never run does
+      // not record an approval that was never acted on.
+      const continueAudit = auditDangerousContinue(
+        { mode: 'orchestrator', sessionId, held },
+        (msg) => {
+          if (msg.type === 'notification') {
+            p.sendNotification?.(msg as NotificationEnvelope & { type: 'notification' });
+          }
+        },
+      );
+      if (!continueAudit.recorded) return;
       const pending = releasePauseForMutation(sessionId, mutationId, p.onPendingMutation);
       if (!pending) return;
       // `Cebab-vie.13`: release the queue hold BEFORE the replay-prompt lookup.

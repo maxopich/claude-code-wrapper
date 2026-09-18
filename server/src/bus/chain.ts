@@ -51,6 +51,7 @@
  * participant scores as interrupted.
  */
 import fs from 'node:fs';
+import { auditDangerousContinue } from './dangerous_continue_audit.js';
 import { projectModelSpec } from '../repo/projects.js';
 import crypto from 'node:crypto';
 import path from 'node:path';
@@ -2159,6 +2160,17 @@ export function wireChainSession(p: {
       // and its teardown clears pending mutations, and resolving it here would
       // forge a decision the operator did not get to make.
       if (router.checkTurnRefused(held.agentName)) return;
+      // `Cebab-vie.29` [security]: audited BEFORE the grant is burnt, and FAILS
+      // CLOSED — an approval that cannot be recorded leaves the command blocked
+      // and the banner up rather than running it with no entry in the chain.
+      // Mirrors orchestrator.ts; the pair has drifted before, which is why the
+      // decision lives in one module.
+      const continueAudit = auditDangerousContinue({ mode: 'chain', sessionId, held }, (msg) => {
+        if (msg.type === 'notification') {
+          p.sendNotification?.(msg as NotificationEnvelope & { type: 'notification' });
+        }
+      });
+      if (!continueAudit.recorded) return;
       const pending = releasePauseForMutation(sessionId, mutationId, p.onPendingMutation);
       if (!pending) return;
       // `Cebab-vie.13`: release the queue hold BEFORE the replay-prompt lookup
