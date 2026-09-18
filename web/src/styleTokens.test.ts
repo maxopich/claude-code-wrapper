@@ -140,6 +140,13 @@ const RUNTIME_SET = [
   '--tpl-trip-dur',
   '--tpl-modal-origin-x',
   '--tpl-modal-origin-y',
+  // `Cebab-aids`: the composer's own measured height, published by `InputBox`
+  // so `.notif-stack` can clear it — the notification dock used to sit on the
+  // Send button and eat the click. Unlike the hues above this is a GEOMETRY
+  // value that changes as the textarea grows, so it cannot be a declared token:
+  // only the mounted composer knows it. Every read carries a `0px` fallback,
+  // which is the no-composer answer.
+  '--composer-clearance',
 ] as const;
 
 const TSX_SOURCES = Object.entries(
