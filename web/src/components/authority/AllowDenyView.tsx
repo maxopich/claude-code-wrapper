@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import type { ToolView } from '@cebab/shared/protocol';
+import type { PermissionRuleView, ToolView } from '@cebab/shared/protocol';
 
 // Cluster B Phase 6c (UI-B16 / B17 / B19 / spec §4.3 + §6.4 F2): allow/deny
 // rule inspector.
@@ -48,8 +48,9 @@ const SCOPE_CHIP_CLASS: Record<ToolView['rulingScope'], string> = {
   default: 'allow-deny-scope-default',
 };
 
-export function AllowDenyView(props: { tools: ToolView[] }) {
+export function AllowDenyView(props: { tools: ToolView[]; unloaded?: PermissionRuleView[] }) {
   const { tools } = props;
+  const unloaded = props.unloaded ?? [];
   const { allowRows, denyRows, defaultDenyCount, unevaluatedNote } = useMemo(() => {
     const allow: ToolView[] = [];
     const deny: ToolView[] = [];
@@ -97,7 +98,51 @@ export function AllowDenyView(props: { tools: ToolView[] }) {
         }
       />
       {unevaluatedNote && <div className="allow-deny-unevaluated-note">{unevaluatedNote}</div>}
+      {unloaded.length > 0 && <UnloadedRules unloaded={unloaded} />}
     </div>
+  );
+}
+
+/**
+ * Cebab-tzz7: allow/deny rules a project declares in a scope its next run will
+ * NOT load — an untrusted project's own `.claude/settings*.json`. They resolve
+ * against nothing, so an operator's accumulated `allow` entries do not stop the
+ * approval prompts they were added to suppress, and no per-tool row above hints
+ * that a rule exists. Name them explicitly, the same way the Hooks and MCP
+ * sections name their inert declarations, rather than letting the panes read
+ * "(none configured)" for rules that plainly exist on disk.
+ */
+function UnloadedRules(props: { unloaded: PermissionRuleView[] }) {
+  const { unloaded } = props;
+  const sorted = [...unloaded].sort(
+    (a, b) => a.effect.localeCompare(b.effect) || a.rule.localeCompare(b.rule),
+  );
+  return (
+    <section className="allow-deny-unloaded">
+      <div className="allow-deny-unloaded-note">
+        {unloaded.length} {unloaded.length === 1 ? 'rule is' : 'rules are'} declared in this
+        project&apos;s own settings but will <strong>not load</strong> while Trust is off, so{' '}
+        {unloaded.length === 1 ? 'it decides' : 'they decide'} nothing this session — an{' '}
+        <code>allow</code> rule will not stop the approval prompt it was meant to. Turning Trust on
+        in the sidebar makes {unloaded.length === 1 ? 'it' : 'them'} take effect.
+      </div>
+      <ul className="allow-deny-unloaded-list">
+        {sorted.map((r, i) => (
+          <li key={`unloaded:${r.effect}:${r.scope}:${r.rule}:${i}`} className="allow-deny-row">
+            <span className={`allow-deny-effect-chip allow-deny-effect-${r.effect}`}>
+              {r.effect}
+            </span>
+            <code className="allow-deny-name">{r.rule}</code>
+            <span
+              className={`allow-deny-scope-chip ${SCOPE_CHIP_CLASS[r.scope]}`}
+              aria-label={`declared scope: ${SCOPE_LABEL[r.scope]}`}
+            >
+              {SCOPE_LABEL[r.scope]}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </section>
   );
 }
 
