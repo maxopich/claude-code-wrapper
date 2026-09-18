@@ -49,6 +49,7 @@ import { pickRunner, type Runner } from '../runner/index.js';
 import { readManagedFile, writeManagedFile } from '../managed_file.js';
 import { mcpStatusNoteSpec } from '../runner/mcp_status_note.js';
 import { projectRulesSpec } from '../runner/project_rules_note.js';
+import { createLiveSink } from './live_sink.js';
 import { composeSystemPromptAppend } from '../runner/system_prompt_append.js';
 import {
   onInFlightChange,
@@ -5778,12 +5779,20 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       //
       // The fallback matters: callbacks can fire before `registerLiveSession`
       // runs, and at that moment `conn.ws` IS the right socket.
+      //
+      // THE TWO DIRECTIONS LIVE IN `ws/live_sink.ts` (`Cebab-gejh`), because
+      // the migration described above took one callback too many with it and
+      // the result was unreachable by any test. `toLiveSink` RESOLVES (right
+      // for every run-scoped callback below); `sendServerMsg` DELIVERS (right
+      // for this connection's own sink, which is what the registry hands out).
+      // Routing the second through the first closed a loop through the
+      // registry and blew the stack on the orchestrator's first turn.
       let liveSessionId: string | null = null;
-      const toLiveSink = (out: ServerMsg): void => {
-        const owner = liveSessionId === null ? undefined : getLiveSession(liveSessionId);
-        if (owner) owner.sendServerMsg(out);
-        else send(conn.ws, out);
-      };
+      const { toLiveSink, sendServerMsg } = createLiveSink({
+        sendToSocket: (out) => send(conn.ws, out),
+        getSessionId: () => liveSessionId,
+        lookup: (id) => getLiveSession(id),
+      });
       // Ephemeral liveness pulse for the active run's in-flight turn. Not
       // persisted and not replayed — but it does now reach a re-attached
       // window, because the alternative measured above is a bar that stops
@@ -5866,10 +5875,6 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       // (`session_superseded`, `chain_not_reconstructed`,
       // `bus_auto_installed`, dangerous-mutation safety toast) reach the
       // browser without one bespoke callback per event.
-      const sendServerMsg = (msg: ServerMsg) => {
-        toLiveSink(msg);
-      };
-
       // Cebab-ws0.8 moved per-session folders into the data dir, so this guard
       // is no longer about them, and the sentence that used to be here said it
       // was. It is about the PARTICIPANTS' cwds, which are workspace
