@@ -63,11 +63,26 @@ function scannedFiles(dir: string): string[] {
  * claude.ts's JSDoc does — is not counted as a writer.
  *
  * A line that writes (or spreads) a `systemPrompt` value onto an options object.
+ *
+ * THE LOCATOR HAD A HOLE, FOUND BY WALKING INTO IT (`Cebab-0fgx`). Both
+ * patterns used to be anchored at `^\s*`, which finds the key only when it
+ * starts its own line — the multi-line object literal `mcp_status_note.ts`
+ * happens to be formatted as. A one-line `return { systemPromptAppend: x };`
+ * was invisible, and two new append writers landed in exactly that shape while
+ * this file stayed green: a gate that measures who writes the system prompt,
+ * reporting that nobody new does, while the code says otherwise
+ * (`project_gates_pass_vacuously`, again).
+ *
+ * So the anchor is now "start of line OR just inside an object literal" —
+ * `^`, `{` or `,`. Measured over the whole tree, the widened pattern returns
+ * the SAME replacement set as the narrow one, so nothing here is being loosened
+ * to accommodate a new entry; it just stops missing a spelling prettier is free
+ * to produce at any time. The inline control below is the case that was absent.
  */
-const WRITER = /^\s*(\.\.\.)?\s*systemPrompt:\s*\S/m;
+const WRITER = /(?:^|[{,])\s*(?:\.\.\.)?\s*systemPrompt:\s*\S/m;
 /** The additive field. Safe by construction, but tracked so the two sets can be
  *  told apart — and so a reader can see that the note MOVED rather than went. */
-const APPENDER = /^\s*(\.\.\.)?\s*systemPromptAppend:\s*\S/m;
+const APPENDER = /(?:^|[{,])\s*(?:\.\.\.)?\s*systemPromptAppend:\s*\S/m;
 
 function matching(files: string[], re: RegExp): string[] {
   return files
@@ -105,7 +120,34 @@ describe('the systemPrompt writer set', () => {
     // asserting where it went is the point: it used to replace the prompt and now
     // appends. A change that moved it back would redden the set above; this makes
     // the reason legible instead of leaving a bare count change.
-    expect(matching(files, APPENDER)).toEqual([path.join('runner', 'mcp_status_note.ts')]);
+    //
+    // The set grew to three in `Cebab-0fgx`, and each entry has a distinct role
+    // worth naming, because "three files append" on its own says nothing about
+    // whether they can coexist:
+    //   - mcp_status_note   — the volatile per-turn reading (`Cebab-ws0.15`).
+    //   - project_rules_note — the project's own CLAUDE.md, on the turns whose
+    //     scope set does not load it. Instruction text, not settings.
+    //   - system_prompt_append — the COMPOSER, and the reason the other two are
+    //     safe together. `systemPromptAppend` is one string, so two specs
+    //     spread side by side is not "both": the second silently wins. This
+    //     entry appearing in the set is what says the seam still exists.
+    expect(matching(files, APPENDER)).toEqual([
+      path.join('runner', 'mcp_status_note.ts'),
+      path.join('runner', 'project_rules_note.ts'),
+      path.join('runner', 'system_prompt_append.ts'),
+    ]);
+
+    // The composer is load-bearing, so assert it is USED rather than merely
+    // present: a call site that went back to spreading the two specs directly
+    // would leave the file above untouched and the set above green, while the
+    // project's rules quietly stopped reaching the model.
+    const serverSrc = fs.readFileSync(path.join(SERVER_SRC, 'ws', 'server.ts'), 'utf8');
+    const spawn = stripComments(serverSrc);
+    expect(spawn).toContain('composeSystemPromptAppend(');
+    // Neither producer may be spread onto the options object on its own — that
+    // is the shape that discards the other one.
+    expect(spawn).not.toMatch(/\.\.\.\s*mcpStatusNoteSpec\(/);
+    expect(spawn).not.toMatch(/\.\.\.\s*projectRulesSpec\(/);
 
     // Tied to the set: `runner/claude.ts` (the file that documents both fields,
     // deliberately excluded from the scan) must NAME the replacement writer and
@@ -113,6 +155,33 @@ describe('the systemPrompt writer set', () => {
     const claudeDoc = fs.readFileSync(path.join(SERVER_SRC, 'runner', 'claude.ts'), 'utf8');
     expect(claudeDoc).toContain('identity.ts');
     expect(claudeDoc).toContain('systemPromptAppend');
+  });
+
+  // The locator's own control, in BOTH directions. Without it the exact-set
+  // assertion above proves only that the pattern matched what it matched: a
+  // pattern that had stopped finding anything would report an empty set and
+  // read as "nobody writes a system prompt", which is the most reassuring
+  // possible rendering of a broken gate.
+  test('the control: the locator finds each spelling, and nothing else', () => {
+    // Own-line, the shape `mcp_status_note.ts` is formatted as.
+    expect(WRITER.test('  systemPrompt: posture.systemPrompt,')).toBe(true);
+    expect(APPENDER.test('  return {\n    systemPromptAppend: [')).toBe(true);
+    // Spread form.
+    expect(WRITER.test('  ...systemPrompt: x')).toBe(true);
+
+    // INLINE — the spelling the old `^\s*` anchor missed entirely, and the
+    // reason this control exists. Delete the `[{,]` alternative and exactly
+    // these two lines redden.
+    expect(APPENDER.test('  return { systemPromptAppend: frame(read.body) };')).toBe(true);
+    expect(WRITER.test('const o = { systemPrompt: s };')).toBe(true);
+
+    // Negatives: a TYPE declaration is not a write, and neither field's name
+    // may be matched by the other's pattern.
+    expect(WRITER.test('  systemPrompt?: string;')).toBe(false);
+    expect(APPENDER.test('  systemPromptAppend?: string;')).toBe(false);
+    expect(APPENDER.test('  systemPrompt: x,')).toBe(false);
+    // A bare mention with no value is prose, not a write.
+    expect(WRITER.test('  systemPrompt:')).toBe(false);
   });
 });
 

@@ -33,7 +33,7 @@ If you don't need to debug the two sides separately, just use `npm run dev` and 
 
 Three different causes look almost identical from inside a session. Work through them in order.
 
-1. **The project is Untrusted, so its `.mcp.json` never loads.** A project's own project-root `.mcp.json` (and its `CLAUDE.md`, `.claude/` hooks and skills) is loaded **only when the project is Trusted**. While it's untrusted, a project-scoped server isn't just inactive — it's invisible. Fix: flip the project's Trust toggle to **trusted**. See 04-permissions-trust-and-authority.md for what else Trust changes.
+1. **The project is Untrusted, so its `.mcp.json` never loads.** A project's own project-root `.mcp.json` (and its `.claude/` hooks and skills) is loaded **only when the project is Trusted**. While it's untrusted, a project-scoped server isn't just inactive — it's invisible. Fix: flip the project's Trust toggle to **trusted**. See 04-permissions-trust-and-authority.md for what else Trust changes. (A project's `CLAUDE.md` is the exception and reaches the agent either way — it is instructions, not configuration, and it starts nothing.)
 
 2. **It loaded but failed to connect.** A server can be declared and loaded and still **fail to come up** — a state that, from inside a chat, looks exactly like a server that was never declared. Cebab surfaces this: the session banner names any server that loaded and did **not** report `connected`, and the **Authority panel** shows each server's status from a real probe. Check there. The status is printed verbatim, not diagnosed — if it names a connection or auth problem, that's the server's own message to act on.
 

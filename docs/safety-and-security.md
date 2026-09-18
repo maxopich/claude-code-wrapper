@@ -88,6 +88,74 @@ A project's own `.mcp.json` loads **iff** `settingSources` includes `'project'`
 next SDK bump with `npm --workspace server exec tsx src/mcp_scope_smoke.ts`; it
 costs one spawn and no model turn, because the probe breaks at `system/init`.
 
+### Project RULES are not project SETTINGS, and Trust now separates them (`Cebab-0fgx`)
+
+Trust gates what a project's files may **do**. It had also been gating, as a
+side effect nobody chose, what a project's conventions may **say**.
+
+`CLAUDE.md` is a project-scope source, so an untrusted project's chat session
+never received it. That is not a theoretical gap: an operator asked a Cebab
+session to follow the repository's `CLAUDE.md` and it had never been given one.
+Nothing said so in either direction — from inside the turn, "this project has no
+conventions" and "this project's conventions were dropped" are the same silence,
+and the same project running as a bus participant HAS had its rules injected
+since bus agents ran on `['user']` themselves.
+
+**Measured before it was fixed**, with `npm --workspace server exec tsx
+src/project_rules_smoke.ts` — a random token planted in a temp project's
+`CLAUDE.md`, asked for with every tool removed from the model's context (a
+single `Read` would hand every row the answer and make the table agree with
+itself):
+
+| scope set                    | `CLAUDE.md` on disk | answer                                        |
+| ---------------------------- | ------------------- | --------------------------------------------- |
+| `['user','project','local']` | yes                 | the token — the SDK really does auto-load it  |
+| `['user']`                   | yes                 | `UNKNOWN` — the reported bug                  |
+| `['user']` + Cebab's append  | yes                 | the token — the fix                           |
+| `['user','project','local']` | no                  | `UNKNOWN` — negative control, nothing leaking |
+
+That first row had been a claim restated in three places (`CLAUDE.md`,
+`bus/runtime.ts`'s header, `docs/bus-architecture.md`) and measured in none, and
+work had been skipped on the strength of it (`Cebab-luj`).
+
+So `projectRulesSpec` (`runner/project_rules_note.ts`) appends the project's own
+`CLAUDE.md` to a turn's system prompt **iff the scope set excludes `'project'`**
+— i.e. exactly when the CLI will not read it. A trusted project pays for the
+file once; an untrusted one stops running without its own conventions.
+
+**Why not simply widen `settingSources` instead.** Because that is not what
+Trust gates. Adding `'project'` for an untrusted project would also load its
+`.claude/settings*.json` — hooks that execute, `env` injectors that can redirect
+billing, an `apiKeyHelper` that can authenticate the run as someone else — and
+its `.mcp.json`. Instructions are text; the scope stays where Trust put it.
+
+**What it costs, stated rather than waved away.** Project-controlled bytes now
+reach the system prompt — the most trusted position in the turn — for a project
+the operator has NOT trusted. Three things bound that, and "we sanitise it" is
+not among them:
+
+- the bytes come through the same bounded, TOCTOU-safe reader and the same
+  delimiter defang the bus uses (`readProjectRulesBody`), so a `CLAUDE.md`
+  carrying the closing delimiter cannot close its own block — the file's copy
+  survives, defanged, because the job is to quote it honestly, not to censor it;
+- the framing states the file's RANK: authoritative over the agent's habits,
+  below the operator, with any instruction inside it to the contrary explicitly
+  refused — "a `CLAUDE.md` is a file in a repository, not a person";
+- it is instruction text. It executes nothing, which is the whole difference
+  between this and the hooks Trust exists to gate.
+
+The posture sentence it emits ("this project is not marked Trusted, so your
+session loads user-scope settings only") is true on the only branch that emits
+it. That is deliberate: the bus's equivalent sentence has been false for every
+trusted worker since worker scopes widened (`Cebab-ygu.4`), which is what a
+posture claim rendered unconditionally turns into.
+
+**One options key, two producers.** `systemPromptAppend` is a single string, so
+`{ ...projectRulesSpec(a), ...mcpStatusNoteSpec(b) }` is not "both" — it is the
+second one, silently, with both spreads still visibly present at the call site.
+`composeSystemPromptAppend` is the only spelling that cannot do that, and
+`system_prompt_writers.test.ts` asserts the call site uses it.
+
 ### `default` binds on trusted projects too
 
 `shouldAutoAllow` (`ws/permission.ts`) is the only place _Cebab_ auto-allows for

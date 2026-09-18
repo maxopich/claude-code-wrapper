@@ -48,6 +48,8 @@ import { closeLogger } from '../runner/logger.js';
 import { pickRunner, type Runner } from '../runner/index.js';
 import { readManagedFile, writeManagedFile } from '../managed_file.js';
 import { mcpStatusNoteSpec } from '../runner/mcp_status_note.js';
+import { projectRulesSpec } from '../runner/project_rules_note.js';
+import { composeSystemPromptAppend } from '../runner/system_prompt_append.js';
 import {
   onInFlightChange,
   registerQuery,
@@ -7476,7 +7478,27 @@ async function runOneTurn(
           // A connection whose probe has not landed yet has no entry at all,
           // and that must spawn exactly as Cebab did before this existed —
           // hence `?.mcpServers` rather than a default.
-          ...mcpStatusNoteSpec(conn.authorityCache.get(project.id)?.mcpServers),
+          //
+          // `Cebab-0fgx`: TWO producers write `systemPromptAppend` now, so they
+          // are COMPOSED rather than spread side by side. Two spreads of the
+          // same key is not "both" — it is the second one, silently, and the
+          // project's rules would vanish with every spread still visibly
+          // present. `composeSystemPromptAppend` is the only spelling that
+          // cannot do that; see its header.
+          //
+          // Order: the project's standing conventions first, the volatile
+          // per-turn MCP reading last, so the freshest operational fact sits
+          // closest to the operator's message.
+          ...composeSystemPromptAppend(
+            // The project's own CLAUDE.md, but ONLY when this turn's scope set
+            // will not load it anyway — i.e. on an untrusted project. Measured
+            // in `src/project_rules_smoke.ts`: trusted scopes really do
+            // auto-load it and untrusted scopes really do not, so a trusted
+            // project pays for the file once and an untrusted one stops
+            // silently running without its own conventions.
+            projectRulesSpec({ cwd: project.path, settingSources }),
+            mcpStatusNoteSpec(conn.authorityCache.get(project.id)?.mcpServers),
+          ),
         }),
   });
   // Cluster G Phase 3 (G1): tag the lifecycle entry with run metadata so
