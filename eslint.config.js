@@ -23,6 +23,27 @@ export default tseslint.config(
       // or compiles it, and linting it would report exactly the problems it
       // is built out of.
       '.semgrep/**',
+      // `Cebab-1513`: the autonomous loop's per-checkout STATE — its config,
+      // logs, ledger and any helper script an operator drops beside them.
+      //
+      // eslint's ignore list and `.gitignore` are independent mechanisms:
+      // `eslint .` walks the tree regardless of what git ignores. So a
+      // gitignored JS file here failed the lint gate in a bead that never
+      // touched lint, with nothing in `git status`, the diff or the loop's
+      // guard to explain it — measured, and it cost a full repair attempt.
+      //
+      // DELIBERATELY NOT DERIVED FROM `.gitignore`, which is the obvious
+      // generalisation and is wrong here. The driver's CODE is gitignored too
+      // (`scripts/loop.mjs`, `scripts/revert-check.mjs`, `scripts/lib/loop/`),
+      // and it is linted TODAY — that lint is very nearly the only automated
+      // check it gets, since being gitignored leaves it with no PR, no review
+      // and no CI. Deriving the list would silently drop it, and no gate could
+      // see the loss: CI clones the repo so those files are not there, and the
+      // loop's own lint step would simply lint less and stay green.
+      //
+      // The distinction is CATEGORY, not gitignore-status: `.loop/` is state,
+      // `scripts/lib/loop/` is code. `eslintIgnores.test.mjs` pins both.
+      '.loop/**',
     ],
   },
   js.configs.recommended,
