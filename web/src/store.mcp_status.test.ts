@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { initialState, reduce, type AppState } from './store';
+import { initialState, mcpStatusBannerServers, reduce, type AppState } from './store';
 
 /**
  * Cebab-ws0.2: the session's `mcpStatus` slice — the MCP servers that loaded
@@ -133,5 +133,87 @@ describe('store / session_started captures the not-connected MCP servers', () =>
 
     s = reduce(s, started('sess-1', [{ name: 'bravo', status: 'failed' }]));
     expect(slice(s, 'sess-1')).toEqual([{ name: 'bravo', status: 'failed' }]);
+  });
+});
+
+/**
+ * `Cebab-9fta`: the operator can close the banner, and closing it hides a
+ * READING without discarding the FACTS.
+ *
+ * Every case here is about a way the flag could be wrong in the operator's
+ * favour and go unnoticed: a dismissal that does not survive a reconnect
+ * (the banner reappears and the affordance looks broken), one that outlives
+ * the facts it was about (a later failure is silently hidden), and one that
+ * takes `mcpStatus` with it (the authority panel loses data the operator only
+ * asked to stop looking at).
+ */
+describe('store / dismissing the MCP status banner', () => {
+  const dismiss = (sessionId: string) => ({ type: 'mcp_status_dismissed' as const, sessionId });
+  const shown = (s: AppState, sessionId: string, projectId = PID) =>
+    mcpStatusBannerServers(s.sessionsByProject[projectId]?.[sessionId]);
+
+  test('THE FIX: dismissing hides the banner and keeps the servers', () => {
+    let s = open();
+    s = reduce(s, started('sess-1', [{ name: 'bravo', status: 'needs-auth' }]));
+    expect(shown(s, 'sess-1')).toHaveLength(1);
+
+    s = reduce(s, dismiss('sess-1'));
+    expect(shown(s, 'sess-1')).toBeUndefined();
+    // The facts stay. Dropping `mcpStatus` here would hide the banner too, and
+    // would also take the data out from under everything else that reads it.
+    expect(slice(s, 'sess-1')).toEqual([{ name: 'bravo', status: 'needs-auth' }]);
+  });
+
+  test('it is per session — a sibling session still shows its own', () => {
+    let s = open();
+    s = reduce(s, started('sess-1', [{ name: 'bravo', status: 'needs-auth' }]));
+    s = reduce(s, started('sess-2', [{ name: 'charlie', status: 'failed' }]));
+    s = reduce(s, dismiss('sess-1'));
+    expect(shown(s, 'sess-1')).toBeUndefined();
+    expect(shown(s, 'sess-2')).toHaveLength(1);
+  });
+
+  test('it survives a WS reconnect', () => {
+    // The banner is re-derived from the session slice, so a dismissal held in
+    // component state would come back on the next render. `ws_close` retires
+    // `running` and `ws_open` sets `connected`; neither may touch this.
+    let s = open();
+    s = reduce(s, started('sess-1', [{ name: 'bravo', status: 'needs-auth' }]));
+    s = reduce(s, dismiss('sess-1'));
+    s = reduce(s, { type: 'ws_close' });
+    s = reduce(s, { type: 'ws_open' });
+    expect(shown(s, 'sess-1')).toBeUndefined();
+  });
+
+  test('a session that RECOVERS and breaks again shows the banner again', () => {
+    // The dismissal was about one set of servers. Letting the flag outlive
+    // them would silently hide the next failure — the one failure mode where
+    // the operator would never learn they had been opted out.
+    let s = open();
+    s = reduce(s, started('sess-1', [{ name: 'bravo', status: 'needs-auth' }]));
+    s = reduce(s, dismiss('sess-1'));
+    expect(shown(s, 'sess-1')).toBeUndefined();
+
+    // Everything connects: the reducer clears the slice, and the flag with it.
+    s = reduce(s, started('sess-1', [{ name: 'bravo', status: 'connected' }]));
+    expect(slice(s, 'sess-1')).toBeUndefined();
+
+    s = reduce(s, started('sess-1', [{ name: 'bravo', status: 'failed' }]));
+    expect(shown(s, 'sess-1')).toEqual([{ name: 'bravo', status: 'failed' }]);
+  });
+
+  test('dismissing a session with no banner arms nothing', () => {
+    // Otherwise a stray dispatch pre-dismisses the reading that has not
+    // arrived yet, and the first real failure of that session is invisible.
+    let s = open();
+    s = reduce(s, started('sess-1'));
+    s = reduce(s, dismiss('sess-1'));
+    s = reduce(s, started('sess-1', [{ name: 'bravo', status: 'failed' }]));
+    expect(shown(s, 'sess-1')).toEqual([{ name: 'bravo', status: 'failed' }]);
+  });
+
+  test('an unknown session id is a no-op, not a crash or a new bucket', () => {
+    const s = reduce(open(), dismiss('sess-nope'));
+    expect(s.sessionsByProject[PID]?.['sess-nope']).toBeUndefined();
   });
 });

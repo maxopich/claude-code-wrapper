@@ -11,8 +11,10 @@ import { buildMcpStatusBannerItem, mcpStatusBannerTitle } from './McpStatusBanne
 // What these pin, in order of how badly a regression would hurt:
 //   1. the status is PRINTED, never interpreted — an unrecognised one renders
 //      verbatim rather than being dressed up as a failure we did not measure;
-//   2. no actions and no dismiss, because Cebab cannot reconnect a server
-//      mid-session and an inert button is the invented remedy all over again;
+//   2. no ACTIONS, because Cebab cannot reconnect a server mid-session and an
+//      inert button is the invented remedy all over again — but dismissal is
+//      offered when the caller wires it (`Cebab-9fta`): hiding a reading the
+//      operator has already read is not the same as pretending to fix it;
 //   3. the copy says the never-loaded case is a different thing, so the
 //      operator is not sent looking in the wrong place.
 
@@ -58,18 +60,54 @@ describe('McpStatusBanner', () => {
     expect(text).toContain('some-future-status');
   });
 
-  test('offers no actions and no dismiss', () => {
-    // Every button in this banner would be inert — the SDK connects servers at
+  test('offers no actions, ever', () => {
+    // Every ACTION in this banner would be inert — the SDK connects servers at
     // spawn and there is no mid-session retry. An affordance that does nothing
-    // is worse than none, which is the whole reason this bead exists.
+    // is worse than none, which is the whole reason this bead exists. This is
+    // the half `Cebab-9fta` did NOT change: dismissal hides a reading, it does
+    // not claim to act on it.
     mount([{ name: 'ledger-tools', status: 'failed' }]);
     const item = buildMcpStatusBannerItem({
       sessionId: 'sess-abcdef12',
       servers: [{ name: 'ledger-tools', status: 'failed' }],
     });
     expect(item.actions).toBeUndefined();
+  });
+
+  test('no dismiss unless the caller wires one — absent, not a dead button', () => {
+    // `SessionBanner` decides "dismissible" by the prop being present, so a
+    // caller that passes nothing must produce an item with no key at all.
+    mount([{ name: 'ledger-tools', status: 'failed' }]);
+    const item = buildMcpStatusBannerItem({
+      sessionId: 'sess-abcdef12',
+      servers: [{ name: 'ledger-tools', status: 'failed' }],
+    });
     expect(item.dismiss).toBeUndefined();
+    expect('dismiss' in item).toBe(false);
     expect(container.querySelectorAll('button').length).toBe(0);
+  });
+
+  test('THE FIX: a wired dismiss renders a labelled button that calls back', () => {
+    let calls = 0;
+    const item = buildMcpStatusBannerItem({
+      sessionId: 'sess-abcdef12',
+      servers: [{ name: 'ledger-tools', status: 'failed' }],
+      dismiss: () => {
+        calls += 1;
+      },
+    });
+    act(() => {
+      root.render(<SessionBanner {...item} />);
+    });
+    const btn = container.querySelector('button');
+    expect(btn).not.toBeNull();
+    // Reachable without sight: the glyph is an x, so the accessible name has to
+    // come from the label rather than the text content.
+    expect(btn!.getAttribute('aria-label')).toBe('Dismiss');
+    act(() => {
+      btn!.click();
+    });
+    expect(calls).toBe(1);
   });
 
   test('warn tier, and an id derived from the session', () => {
