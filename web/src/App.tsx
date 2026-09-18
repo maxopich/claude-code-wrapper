@@ -21,6 +21,7 @@ import {
   activeSession,
   initialState,
   isSessionPending,
+  mcpStatusBannerServers,
   reduce,
   resolveNotificationActionEffect,
   routesToAssistant,
@@ -2979,13 +2980,25 @@ function AppShell({
                           }),
                         );
                       }
-                      if (session.mcpStatus) {
-                        items.push(
-                          buildMcpStatusBannerItem({
-                            sessionId: session.id,
-                            servers: session.mcpStatus,
-                          }),
-                        );
+                      {
+                        // Cebab-9fta: two terms now decide this — the servers
+                        // AND whether the operator has closed the banner — so
+                        // the predicate moved to `mcpStatusBannerServers` in
+                        // store.ts rather than growing an `&&` in the one file
+                        // with no test of its own. Exactly the reason the
+                        // comment above gives for keeping each `if` at one
+                        // slice.
+                        const unhealthy = mcpStatusBannerServers(session);
+                        if (unhealthy) {
+                          items.push(
+                            buildMcpStatusBannerItem({
+                              sessionId: session.id,
+                              servers: unhealthy,
+                              dismiss: () =>
+                                dispatch({ type: 'mcp_status_dismissed', sessionId: session.id }),
+                            }),
+                          );
+                        }
                       }
                       return items;
                     })()}

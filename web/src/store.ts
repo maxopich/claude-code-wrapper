@@ -306,6 +306,30 @@ export type SessionView = {
    * therefore leaves no slice at all; the next live init re-establishes it.
    */
   mcpStatus?: readonly McpServerStatus[];
+  /**
+   * `Cebab-9fta`: the operator closed the MCP-status banner for this session.
+   *
+   * The banner used to be non-dismissible on the stated ground that it
+   * "reflects a state that holds for as long as the session does". That is
+   * true and it is the argument for the WRONG conclusion: because the reading
+   * cannot change mid-session, re-reading it costs the operator screen for the
+   * rest of the session and tells them nothing new the second time. In the
+   * reported case the two named servers were claude.ai connectors reporting
+   * `needs-auth` — a state that cannot be fixed from inside Cebab at all — so
+   * the banner was pure standing cost above every message.
+   *
+   * SEPARATE FROM `mcpStatus`, not folded into it. The facts and the
+   * operator's opinion of them are different things: a reducer that dropped
+   * the servers on dismissal would also drop what the authority panel and
+   * anything else derives from them, and the banner would have no way to come
+   * back if the situation changed.
+   *
+   * Per SESSION, so a different session with a different failing server is new
+   * information and still shows. Cleared when `mcpStatus` is deleted (every
+   * server now connects), so a session that breaks again later is not silently
+   * dismissed by a decision the operator made about a different problem.
+   */
+  mcpStatusDismissed?: boolean;
 };
 
 /** Max number of messages the held-queue accepts before refusing new ones.
@@ -1293,6 +1317,27 @@ export function showsNewChatPreview(state: AppState): boolean {
 }
 
 /**
+ * `Cebab-9fta`: the servers the MCP-status banner should name for a session,
+ * or `undefined` for "no banner".
+ *
+ * IT LIVES HERE BECAUSE `App.tsx` HAS NO TEST FILE. The mount condition used to
+ * be `if (session.mcpStatus)` inline at the call site, which was pinnable only
+ * through a full App render; with a second term in the condition, an inline
+ * version would be a rule nothing could redden. Same reason
+ * `showsNewChatPreview` above is a function rather than an expression in JSX.
+ *
+ * Returns the servers rather than a boolean so the caller cannot ask the
+ * question one way and read the data another.
+ */
+export function mcpStatusBannerServers(
+  session: SessionView | undefined,
+): readonly McpServerStatus[] | undefined {
+  if (!session?.mcpStatus || session.mcpStatus.length === 0) return undefined;
+  if (session.mcpStatusDismissed) return undefined;
+  return session.mcpStatus;
+}
+
+/**
  * Cebab-ygu.30: the single effect a notification action-button click resolves
  * to. Every `NotificationAction` kind maps to exactly one of these, so a dock
  * button is never an inert affordance — five of the eight kinds (`open_session`,
@@ -1673,6 +1718,13 @@ export type Action =
    * losing the marker metadata (the "■ Stopped by you" line stays).
    */
   | { type: 'stop_reason_dismissed'; sessionId: string }
+  /**
+   * `Cebab-9fta`: the operator closed the MCP-status banner. Hides it for this
+   * session only, and keeps `mcpStatus` itself — the facts stay available to
+   * the authority panel and to anything else that reads them, and the banner
+   * can return if this session's servers break again after recovering.
+   */
+  | { type: 'mcp_status_dismissed'; sessionId: string }
   /**
    * Cluster G E3 UI: populate the connection-lost overlay with a
    * specific failure variant. Fired from App.tsx's auth-token fetch
@@ -2306,6 +2358,25 @@ export function reduce(state: AppState, action: Action): AppState {
       return putSession(state, projectId, action.sessionId, {
         ...existing,
         lastInterrupt: { ...existing.lastInterrupt, reasonSubmitted: true },
+      });
+    }
+
+    case 'mcp_status_dismissed': {
+      // `Cebab-9fta`: hide the banner, keep the facts. Same shape as
+      // `stop_reason_dismissed` above — a per-session flag through
+      // `putSession`, so it survives a WS reconnect (which retires `running`
+      // and nothing else) without being global or persisted.
+      //
+      // No-op when there is nothing to dismiss, so a stray dispatch cannot
+      // arm the flag on a session with no banner and pre-dismiss the next
+      // reading that arrives.
+      const projectId = projectFor(state, action.sessionId);
+      if (projectId === null) return state;
+      const existing = state.sessionsByProject[projectId]?.[action.sessionId];
+      if (!existing?.mcpStatus || existing.mcpStatusDismissed) return state;
+      return putSession(state, projectId, action.sessionId, {
+        ...existing,
+        mcpStatusDismissed: true,
       });
     }
 
@@ -3344,6 +3415,11 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         else if (session.mcpStatus !== undefined) {
           const cleared = { ...session };
           delete cleared.mcpStatus;
+          // `Cebab-9fta`: the operator's dismissal goes with the facts it was
+          // about. Leaving the flag set would mean a session that recovers and
+          // then breaks again shows nothing, silently, on the strength of a
+          // decision made about a different set of servers.
+          delete cleared.mcpStatusDismissed;
           session = cleared;
         }
       }

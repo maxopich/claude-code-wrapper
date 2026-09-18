@@ -37,6 +37,8 @@ Three different causes look almost identical from inside a session. Work through
 
 2. **It loaded but failed to connect.** A server can be declared and loaded and still **fail to come up** — a state that, from inside a chat, looks exactly like a server that was never declared. Cebab surfaces this: the session banner names any server that loaded and did **not** report `connected`, and the **Authority panel** shows each server's status from a real probe. Check there. The status is printed verbatim, not diagnosed — if it names a connection or auth problem, that's the server's own message to act on.
 
+   That banner is a reading taken when the session started, and Cebab cannot bring a server back up mid-session — so once you have read it, close it with the **×** in its corner. It stays closed for that session, the Authority panel still has the details, and a different session (or this one, if a server recovers and then fails again) raises it fresh. Starting a new session is what takes a new reading.
+
 3. **You checked `claude mcp list` in a shell and it looked fine.** That command reports your **config files**, not the live session — it's a separate CLI process and does not tell you whether the running agent actually loaded or connected the server. Trust the Authority panel and the session banner instead; they read what the real spawn loaded.
 
 Note: servers declared in your home `~/.claude.json` (added with `claude mcp add --scope user`) load regardless of Trust and are gated on first use, so those are governed differently — again see 04-permissions-trust-and-authority.md.

@@ -19,9 +19,24 @@
 // does nothing is the same defect as the invented remedy, just wearing our
 // name. The banner's whole job is to replace a guess with a measurement.
 //
-// WHY NON-DISMISSIBLE. Same convention as the other recovery banners — it
-// reflects a state that holds for as long as the session does, so hiding it
-// would be hiding something still true.
+// IT WAS NON-DISMISSIBLE, AND THAT WAS WRONG (`Cebab-9fta`). The original
+// reasoning is kept because the premise was right and only the conclusion was
+// not: the banner "reflects a state that holds for as long as the session
+// does, so hiding it would be hiding something still true".
+//
+// The same premise argues the other way. Precisely BECAUSE the reading cannot
+// change mid-session, it says nothing new the second time it is read — and it
+// is a large block above every message for the rest of the session. The
+// reported case was two claude.ai connectors reporting `needs-auth`, a state
+// the operator cannot resolve from inside Cebab at all; the banner named it
+// once, usefully, and then charged rent.
+//
+// So the factory takes an optional `dismiss` and the shell's existing
+// affordance renders it. What dismissal does NOT do is discard the facts: the
+// servers stay in the session slice, the authority panel still reports their
+// health, and a session whose servers recover and break again shows the banner
+// again (`store.ts`, `mcp_status_dismissed`). Hiding is the operator's call;
+// forgetting is not.
 //
 // THE STATUS IS PRINTED, NEVER INTERPRETED. Whatever string the SDK sent is
 // what the row shows. That is what keeps the banner honest for a status this
@@ -40,6 +55,14 @@ export type BuildMcpStatusBannerItemArgs = {
    *  it instead). */
   servers: readonly McpServerStatus[];
   arrivedAt?: number;
+  /**
+   * `Cebab-9fta`: hide this banner for the rest of the session.
+   *
+   * Optional, and absence means non-dismissible — so a caller that has no
+   * business offering the affordance (a preview, a test) gets the old
+   * behaviour by writing nothing, and only the live session wires it.
+   */
+  dismiss?: () => void;
 };
 
 export function mcpStatusBannerTitle(count: number): string {
@@ -49,7 +72,7 @@ export function mcpStatusBannerTitle(count: number): string {
 }
 
 export function buildMcpStatusBannerItem(args: BuildMcpStatusBannerItemArgs): BannerStackItem {
-  const { sessionId, servers, arrivedAt } = args;
+  const { sessionId, servers, arrivedAt, dismiss } = args;
 
   const body = (
     <>
@@ -86,5 +109,11 @@ export function buildMcpStatusBannerItem(args: BuildMcpStatusBannerItemArgs): Ba
     detail,
     detailLabel: servers.length === 1 ? 'Which server' : 'Which servers',
     arrivedAt,
+    // Spread rather than assigned: `SessionBanner` decides "dismissible" by the
+    // prop being PRESENT, so writing `dismiss: undefined` would look identical
+    // here and behave identically there — until someone changes that check to
+    // `in`, at which point every caller silently gains a button that does
+    // nothing.
+    ...(dismiss ? { dismiss } : {}),
   };
 }
