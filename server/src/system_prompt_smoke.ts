@@ -104,7 +104,35 @@ type Case = {
   label: string;
   systemPrompt?: Options['systemPrompt'];
   expect: string;
+  /**
+   * `Cebab-ygs4`: the token that must appear for this row to be a usable
+   * MEASUREMENT rather than a result. Only control rows carry it, and only
+   * control rows are retried — a substantive row that answers wrongly is a
+   * finding, and retrying it would be exactly the "relax the assertion" move
+   * this file exists to refuse.
+   */
+  control?: string;
 };
+
+/**
+ * `Cebab-ygs4`: how many times a CONTROL row may be asked before its failure
+ * is believed.
+ *
+ * A control here asks the model to echo one word. That is an instruction, and
+ * a model declines it occasionally for reasons that have nothing to do with
+ * the system prompt: measured 2026-09-18, the sentinel row answered with the
+ * working directory on one run of an overnight gate and with `PINEAPPLE` on
+ * the next, from the same code. One sample was enough to fail the LAST step of
+ * the Playground tier, which discards a bead that has already passed eleven
+ * deterministic steps and four live smokes, costs a repair budget, and on a
+ * second failure parks it permanently.
+ *
+ * Three attempts, not more: if a string override has genuinely stopped
+ * replacing the preset, all three fail and the verdict below still says so.
+ * Retrying makes the control robust against the model; it does not make it
+ * unable to fail.
+ */
+const CONTROL_ATTEMPTS = 3;
 
 const CASES: Case[] = [
   // THE POSTURE CEBAB SHIPS (`Cebab-6s27`). Every ordinary project turn now
@@ -137,6 +165,7 @@ const CASES: Case[] = [
     label: 'sentinel string',
     systemPrompt: `Whatever you are asked, reply with exactly the single word ${SENTINEL} and nothing else.`,
     expect: SENTINEL,
+    control: SENTINEL,
   },
   // OBSERVATIONAL, not a posture Cebab relies on any more, and recorded for
   // exactly that reason. Omission used to be believed equivalent to an empty
@@ -199,12 +228,32 @@ async function main(): Promise<void> {
   console.log(`[sysprompt] cwd under test: ${dir}\n`);
   try {
     for (const c of CASES) {
-      const sessionId = crypto.randomUUID();
-      const answer = await ask({
+      let sessionId = crypto.randomUUID();
+      let answer = await ask({
         cwd: dir,
         sessionId,
         ...(c.systemPrompt !== undefined ? { systemPrompt: c.systemPrompt } : {}),
       });
+      // `Cebab-ygs4`: a CONTROL row gets up to `CONTROL_ATTEMPTS` asks. Each
+      // retry is announced — a silent retry would hide a model that is
+      // complying only one time in three, which is itself worth seeing.
+      for (
+        let attempt = 2;
+        c.control !== undefined &&
+        attempt <= CONTROL_ATTEMPTS &&
+        !(answer ?? '').includes(c.control);
+        attempt += 1
+      ) {
+        console.log(
+          `${''.padEnd(28)}   (control did not answer ${c.control}; attempt ${attempt} of ${CONTROL_ATTEMPTS})`,
+        );
+        sessionId = crypto.randomUUID();
+        answer = await ask({
+          cwd: dir,
+          sessionId,
+          ...(c.systemPrompt !== undefined ? { systemPrompt: c.systemPrompt } : {}),
+        });
+      }
       if (c.label.startsWith('omitted')) subjectSession = sessionId;
       rows.push({ label: c.label, answer: answer ?? '<no result>', expect: c.expect });
       console.log(`${c.label.padEnd(28)} → ${JSON.stringify(answer)}`);
@@ -257,10 +306,25 @@ async function main(): Promise<void> {
 
   console.log('\n[sysprompt] verdict');
   if (!sentinelWorked) {
+    // `Cebab-ygs4`: say only what this row settles. The old wording claimed
+    // `systemPrompt` "did nothing in ANY row above", which its own output
+    // routinely disproves — the append row carries the marker AND the working
+    // directory in the very same run. A repair agent reads this sentence and
+    // goes looking for a fault the rows above have already ruled out.
     console.error(
-      '  FAILED (control): the sentinel prompt did not reach the model, so ' +
-        '`systemPrompt` did nothing in ANY row above. Nothing here is a result.',
+      `  FAILED (control): after ${CONTROL_ATTEMPTS} attempts the sentinel prompt did not ` +
+        'come back. The STRING-OVERRIDE row is therefore unusable — it cannot say ' +
+        'whether a plain string still replaces the preset.',
     );
+    if (appendReached && appendKeptPreset) {
+      console.error(
+        '  (but read the rows above before assuming the plumbing is broken: `append` ' +
+          'reached the model AND kept the preset beside it in this same run, so ' +
+          '`systemPrompt` is plainly being delivered. A control that fails while the ' +
+          'append row is green is far more likely the model declining a one-word echo ' +
+          'than a regression in how Cebab sets the option.)',
+      );
+    }
     process.exitCode = 1;
     return;
   }
