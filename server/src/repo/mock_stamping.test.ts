@@ -7,6 +7,7 @@ import { closeDb, getDb } from '../db.js';
 import { createMultiAgentSession, listMultiAgentSessions } from './multi_agent.js';
 import { upsertProject } from './projects.js';
 import { createSession } from './sessions.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster G Phase 1 (A3): persister stamping for the new `mock` column on
 // sessions + multi_agent_sessions. The schema test (023_mock_flag.schema)
@@ -33,10 +34,11 @@ beforeEach(() => {
   getDb();
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
   config.mock = originalMock;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

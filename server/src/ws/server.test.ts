@@ -12,6 +12,7 @@ import {
 } from '../repo/multi_agent.js';
 import { busIterationDir, sessionPathsFromFolder } from '../bus/paths.js';
 import { buildIterationsList } from './server.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Isolate DB writes per-test, mirroring the pattern in
 // server/src/repo/multi_agent.test.ts.
@@ -28,9 +29,10 @@ beforeEach(() => {
   getDb();
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

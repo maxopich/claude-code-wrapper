@@ -8,6 +8,7 @@ import { closeDb, getDb } from '../db.js';
 import { _resetCoalesceState, emit, getNotification, markNotificationAcked } from './dispatcher.js';
 import { _resetOperatorIdCache } from './operator.js';
 import * as safetyAudit from './safety_audit.js';
+import { closeLogger } from '../runner/logger.js';
 
 // ---- isolated fs + DB scaffolding ----
 
@@ -27,13 +28,14 @@ beforeEach(() => {
   sent = [];
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
   _resetOperatorIdCache();
   _resetCoalesceState();
   vi.restoreAllMocks();
   vi.useRealTimers();
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

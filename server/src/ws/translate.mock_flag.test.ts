@@ -8,6 +8,7 @@ import { closeDb, getDb } from '../db.js';
 import { upsertProject } from '../repo/projects.js';
 import { createSession } from '../repo/sessions.js';
 import { translate } from './translate.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster G Phase 2b (UI-A3): translate(system.init) projects the
 // per-session `mock` flag (migration 023, sessions.mock column) onto
@@ -53,10 +54,11 @@ beforeEach(() => {
   projectId = project.id;
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
   config.mock = originalMock;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

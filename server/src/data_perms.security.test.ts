@@ -25,6 +25,7 @@ import {
 } from './data_perms_boot.js';
 import { _resetOperatorIdCache } from './notifications/operator.js';
 import { getSetting, setSetting } from './repo/settings.js';
+import { closeLogger } from './runner/logger.js';
 
 // [security] Register H01 — the database and transcripts were created with the
 // ambient umask.
@@ -59,12 +60,13 @@ beforeEach(() => {
   _resetOperatorIdCache();
 });
 
-afterEach(() => {
+afterEach(async () => {
   vi.restoreAllMocks();
   // closeDb before rm: Windows cannot unlink an open SQLite file.
   closeDb();
   config.dataDir = originalDataDir;
   _resetOperatorIdCache();
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

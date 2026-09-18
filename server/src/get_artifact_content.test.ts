@@ -8,6 +8,7 @@ import { closeDb, getDb } from './db.js';
 import { appendMultiAgentMutation, createMultiAgentSession } from './repo/multi_agent.js';
 import { MAX_ARTIFACT_BYTES } from './repo/artifact_content.js';
 import { executeGetArtifactContent } from './get_artifact_content.js';
+import { closeLogger } from './runner/logger.js';
 
 // Cluster I Phase H3 (UI_Findings spec §4.4): coverage for the thin WS
 // delegate. The deep read/redaction behavior is tested in
@@ -27,9 +28,10 @@ beforeEach(() => {
   getDb();
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

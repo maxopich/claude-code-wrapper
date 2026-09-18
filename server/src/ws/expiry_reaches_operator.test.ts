@@ -23,6 +23,7 @@ import { setParticipantPause } from '../repo/per_agent_control.js';
 import { upsertProject } from '../repo/projects.js';
 import type { PauseExpiryEntry } from './pause_expiry.js';
 import type { ServerMsg } from '@cebab/shared/protocol';
+import { closeLogger } from '../runner/logger.js';
 
 /**
  * Register B17 [security]: a pause-expiry outcome must reach whoever is
@@ -57,10 +58,11 @@ beforeEach(() => {
   getDb();
 });
 
-afterEach(() => {
+afterEach(async () => {
   unregisterLiveSession(SESSION_ID);
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

@@ -9,6 +9,7 @@ import { attemptResumeMultiAgent } from './resume.js';
 import { hasLiveSession, registerLiveSession, unregisterLiveSession } from './session_registry.js';
 import { createMultiAgentSession, getMultiAgentSession } from '../repo/multi_agent.js';
 import { _resetCoalesceState } from '../notifications/dispatcher.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster A Phase 4 (D2 precursor / D3 / BE-11): exercise the two
 // previously-silent code paths in `bus/resume.ts` that now ship typed
@@ -72,7 +73,7 @@ beforeEach(() => {
   _resetCoalesceState();
 });
 
-afterEach(() => {
+afterEach(async () => {
   warnSpy.mockRestore();
   errSpy.mockRestore();
   closeDb();
@@ -80,6 +81,7 @@ afterEach(() => {
   unregisterLiveSession(NEWER_SID);
   unregisterLiveSession(OLDER_SID);
   unregisterLiveSession(CHAIN_SID);
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

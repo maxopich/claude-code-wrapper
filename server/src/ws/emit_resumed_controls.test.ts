@@ -15,6 +15,7 @@ import { executeKickParticipant, executeMuteParticipant } from './control_verbs.
 import { emitResumedSession } from './server.js';
 import type { ResumedSession } from '../bus/resume.js';
 import type { OrchestratorSessionHandle } from '../bus/orchestrator.js';
+import { closeLogger } from '../runner/logger.js';
 
 // `Cebab-vie.6` / `Cebab-vie.4`: the attach envelope itself.
 //
@@ -48,10 +49,11 @@ beforeEach(() => {
   warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 });
 
-afterEach(() => {
+afterEach(async () => {
   warnSpy.mockRestore();
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

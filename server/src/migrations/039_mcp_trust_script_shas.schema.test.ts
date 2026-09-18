@@ -5,6 +5,7 @@ import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Schema pin for 039 (Cebab-1af). Every migration since 023 ships one.
 //
@@ -35,9 +36,10 @@ beforeEach(() => {
   getDb(); // applies 001..039
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

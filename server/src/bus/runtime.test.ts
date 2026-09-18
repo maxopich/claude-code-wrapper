@@ -18,6 +18,7 @@ import {
 } from './runtime.js';
 import { BUS_MESSAGE_TAG_STEM } from './message_fence.js';
 import { busIterationDir, busRoot } from './paths.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Same scaffolding shape as install.test.ts — every test gets its own
 // ~/.cebab override so writes don't leak across tests or out to the real
@@ -36,9 +37,10 @@ beforeEach(() => {
   fs.mkdirSync(busRoot(), { recursive: true });
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

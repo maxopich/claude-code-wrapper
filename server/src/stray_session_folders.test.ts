@@ -17,6 +17,7 @@ import { closeDb, getDb } from './db.js';
 import { createMultiAgentSession } from './repo/multi_agent.js';
 import { registerQuery } from './runner/lifecycle.js';
 import { setWorkspaceRoot } from './workspace.js';
+import { closeLogger } from './runner/logger.js';
 import {
   deleteStraySessionFolders,
   scanStraySessionFolders,
@@ -51,9 +52,10 @@ beforeEach(() => {
   setWorkspaceRoot(workspace);
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

@@ -9,6 +9,7 @@ import { recordTrustDecision } from '../repo/mcp_trust.js';
 import { makeTrustGateState, denyOnceKey } from '../repo/mcp_trust_gate.js';
 import { makeStartGateState } from '../repo/session_start_gate.js';
 import { gateProjectsForSpawn, refuseUnapprovedForResume } from './server.js';
+import { closeLogger } from '../runner/logger.js';
 
 // [security] Register H04 + Cebab-x1n.6.22 — the seam where a Deny becomes
 // binding.
@@ -48,10 +49,11 @@ beforeEach(() => {
   setProjectTrusted(projectId, true);
 });
 
-afterEach(() => {
+afterEach(async () => {
   // closeDb before rm: Windows cannot unlink an open SQLite file.
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

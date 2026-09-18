@@ -8,6 +8,7 @@ import { closeDb, getDb } from '../db.js';
 import { maybeDispatchGuardrailViolation } from './guardrail_violation.js';
 import { _resetCoalesceState } from './dispatcher.js';
 import type { MutationRecord } from '../repo/multi_agent.js';
+import { closeLogger } from '../runner/logger.js';
 
 /**
  * Cluster F Phase D5+: when a `multi_agent_mutation` row carries a
@@ -48,10 +49,11 @@ beforeEach(() => {
   _resetCoalesceState();
 });
 
-afterEach(() => {
+afterEach(async () => {
   errSpy.mockRestore();
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

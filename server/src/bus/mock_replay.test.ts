@@ -16,6 +16,7 @@ import { upsertProject } from '../repo/projects.js';
 import * as safetyAudit from '../notifications/safety_audit.js';
 import { computeSessionPaths } from './paths.js';
 import { CEBAB_SOURCE, SINK_RECIPIENT, USER_RECIPIENT, type ResolvedAgent } from './runtime.js';
+import { closeLogger } from '../runner/logger.js';
 
 // F13: end-to-end bus replay through the REAL `pickRunner` seam.
 //
@@ -52,13 +53,14 @@ beforeEach(() => {
   getDb();
 });
 
-afterEach(() => {
+afterEach(async () => {
   for (const id of started.splice(0)) unregisterLiveSession(id);
   closeDb();
   config.dataDir = originalDataDir;
   config.mock = originalMock;
   config.mockIntervalMs = originalInterval;
   config.mockScenario = originalScenario;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

@@ -8,6 +8,7 @@ import { closeDb, getDb } from '../db.js';
 import { appendSafetyAudit } from '../notifications/safety_audit.js';
 import { appendForensics } from '../repo/controllability_forensics.js';
 import { executeKickForensicsSnapshot } from './server.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster C Phase 4g4: server-side coverage for `get_kick_forensics`.
 // Exercises `executeKickForensicsSnapshot` directly against a real SQLite
@@ -38,9 +39,10 @@ beforeEach(() => {
   sent = [];
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

@@ -8,6 +8,7 @@ import { closeDb, getDb } from '../db.js';
 import { _resetOperatorIdCache } from '../notifications/operator.js';
 import { emit, getNotification, type NotificationRow } from '../notifications/dispatcher.js';
 import { requiresTypedAckReason } from './server.js';
+import { closeLogger } from '../runner/logger.js';
 
 // [security] Register H13 — BE-7's typed-acknowledgment requirement.
 //
@@ -35,10 +36,11 @@ beforeEach(() => {
   getDb();
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
   _resetOperatorIdCache();
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

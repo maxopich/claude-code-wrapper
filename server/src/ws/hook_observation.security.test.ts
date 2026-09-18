@@ -10,6 +10,7 @@ import { verifyChain } from '../notifications/safety_audit.js';
 import { gateProjectsForSpawn, reportHookObservations } from './server.js';
 import { makeTrustGateState } from '../repo/mcp_trust_gate.js';
 import { makeStartGateState } from '../repo/session_start_gate.js';
+import { closeLogger } from '../runner/logger.js';
 
 // F6: the spawn path's hook reporter. `hook_trust.test.ts` covers the ledger's
 // identity and change rules; this covers the half that makes them visible —
@@ -38,9 +39,10 @@ beforeEach(() => {
   projectId = upsertProject('proj', projectDir).id;
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

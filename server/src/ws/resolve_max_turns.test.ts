@@ -6,6 +6,7 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { setSetting } from '../repo/settings.js';
 import { resolveMaxTurns } from './server.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster F Phase A1a — resolveMaxTurns precedence chain:
 //   override (>= 1, finite) > DB setting 'max_turns' (>= 1, finite)
@@ -30,10 +31,11 @@ beforeEach(() => {
   originalMaxTurns = config.maxTurns;
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
   config.maxTurns = originalMaxTurns;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

@@ -23,6 +23,7 @@ import { computeSessionPaths } from './paths.js';
 import { CEBAB_SOURCE, USER_RECIPIENT } from './runtime.js';
 import { createMultiAgentSession, listMultiAgentEvents } from '../repo/multi_agent.js';
 import { _resetCoalesceState } from '../notifications/dispatcher.js';
+import { closeLogger } from '../runner/logger.js';
 
 const SESSION_ID = 'chain-stranded-session';
 const AGENTS = ['coder', 'reviewer'];
@@ -43,10 +44,11 @@ beforeEach(() => {
   _resetCoalesceState();
 });
 
-afterEach(() => {
+afterEach(async () => {
   warnSpy.mockRestore();
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

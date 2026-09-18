@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { appendMultiAgentMutation, createMultiAgentSession } from './multi_agent.js';
+import { closeLogger } from '../runner/logger.js';
 import {
   MAX_ARTIFACT_BYTES,
   readArtifactContent,
@@ -32,9 +33,10 @@ beforeEach(() => {
   getDb(); // applies 001..025
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

@@ -7,6 +7,7 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { _resetCoalesceState, emit } from './dispatcher.js';
 import { _resetOperatorIdCache } from './operator.js';
+import { closeLogger } from '../runner/logger.js';
 import {
   buildInboxSnapshot,
   clearDismissedInbox,
@@ -44,12 +45,13 @@ beforeEach(() => {
   sent.length = 0;
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
   _resetOperatorIdCache();
   _resetCoalesceState();
   vi.useRealTimers();
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

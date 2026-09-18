@@ -7,6 +7,7 @@ import { closeDb, getDb } from '../db.js';
 import { setSetting } from './settings.js';
 import { deleteTemplate, listTemplates, saveTemplate } from './templates.js';
 import type { CustomLayout, MultiAgentTemplate } from '@cebab/shared/protocol';
+import { closeLogger } from '../runner/logger.js';
 
 /**
  * PR-6 — repo round-trip + defensive read coverage. Uses the same tmp-dir
@@ -25,9 +26,10 @@ beforeEach(() => {
   getDb();
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

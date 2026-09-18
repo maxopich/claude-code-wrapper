@@ -13,6 +13,7 @@ import {
   setMutationPauseState,
 } from '../repo/multi_agent.js';
 import { executeContinueMultiAgent } from './server.js';
+import { closeLogger } from '../runner/logger.js';
 
 /**
  * Register S08: the RECOVERY Continue must not eat the operator's only way back.
@@ -51,9 +52,10 @@ beforeEach(() => {
   setAwaitingContinue(SID, true);
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

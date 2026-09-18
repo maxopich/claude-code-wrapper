@@ -8,6 +8,7 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { upsertProject } from './projects.js';
 import { listHookTrust, observeProjectHooks, resolveHookScriptSha } from './hook_trust.js';
+import { closeLogger } from '../runner/logger.js';
 
 // F6: the hook TOFU ledger. Hooks are the one authority surface with no gate —
 // `SessionStart` / `PreToolUse` / `PostToolUse` / `Stop` never reach
@@ -35,9 +36,10 @@ beforeEach(() => {
   projectId = upsertProject('proj', projectDir).id;
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

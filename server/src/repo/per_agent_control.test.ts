@@ -6,6 +6,7 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { addParticipant, createMultiAgentSession } from './multi_agent.js';
 import { upsertProject } from './projects.js';
+import { closeLogger } from '../runner/logger.js';
 import {
   clearParticipantPause,
   getControlState,
@@ -34,9 +35,10 @@ beforeEach(() => {
   getDb();
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

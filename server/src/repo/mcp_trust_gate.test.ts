@@ -15,6 +15,7 @@ import {
   refuseUnapprovedForProbe,
 } from './mcp_trust_gate.js';
 import * as safetyAudit from '../notifications/safety_audit.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster B Phase 4b (§4.4): TOFU spawn-gate tests.
 //
@@ -50,11 +51,12 @@ beforeEach(() => {
   getDb(); // apply migrations 001..016
 });
 
-afterEach(() => {
+afterEach(async () => {
   vi.restoreAllMocks();
   closeDb();
   config.dataDir = originalDataDir;
   _resetOperatorIdCache();
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

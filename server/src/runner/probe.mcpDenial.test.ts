@@ -50,6 +50,7 @@ const { probeSessionStarted } = await import('./probe.js');
 const { upsertProject, setProjectTrusted } = await import('../repo/projects.js');
 const { computeBinarySha, recordTrustDecision } = await import('../repo/mcp_trust.js');
 const { __resetForTests } = await import('./lifecycle.js');
+const { closeLogger } = await import('./logger.js');
 
 let tmpRoot: string;
 let projectDir: string;
@@ -81,9 +82,10 @@ beforeEach(() => {
   __resetForTests();
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
   __resetForTests();
 });

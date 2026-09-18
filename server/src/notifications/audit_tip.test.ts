@@ -7,6 +7,7 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { _resetOperatorIdCache } from './operator.js';
 import { appendSafetyAudit, recordCurrentTamperAck, verifyChain } from './safety_audit.js';
+import { closeLogger } from '../runner/logger.js';
 import {
   appendAuditTip,
   auditTipPath,
@@ -43,12 +44,13 @@ beforeEach(() => {
   getDb();
 });
 
-afterEach(() => {
+afterEach(async () => {
   vi.restoreAllMocks();
   // closeDb before rm: Windows cannot unlink an open SQLite file.
   closeDb();
   config.dataDir = originalDataDir;
   _resetOperatorIdCache();
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

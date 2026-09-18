@@ -6,6 +6,7 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { appendSafetyAudit } from '../notifications/safety_audit.js';
 import { findLatestControlReason, findStoppedAuditIdForAckId } from './safety_audit_lookup.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster C Phase 3: lookup-by-interruptAckId. Tests run against real SQLite
 // so the json_extract path is exercised end-to-end.
@@ -22,9 +23,10 @@ beforeEach(() => {
   getDb();
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

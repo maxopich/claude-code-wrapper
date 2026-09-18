@@ -22,6 +22,7 @@ import {
   multiAgentMutationToLogRow,
 } from './session_log.js';
 import type { MultiAgentEventRow } from '../repo/multi_agent.js';
+import { closeLogger } from '../runner/logger.js';
 
 let tmpRoot: string;
 let originalDataDir: string;
@@ -35,9 +36,10 @@ beforeEach(() => {
   getDb();
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

@@ -13,6 +13,7 @@ import {
   type MultiAgentLifecycle,
 } from '../repo/multi_agent.js';
 import { handleBusSend, type BusEvent } from './runner.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster C Phase 4b (spec §3 invariant 1 + §5.10 + AE-1): router mute-drop
 // tests. The drop logic is the spec's "all control verbs enforce at the router,
@@ -36,9 +37,10 @@ beforeEach(() => {
   getDb();
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

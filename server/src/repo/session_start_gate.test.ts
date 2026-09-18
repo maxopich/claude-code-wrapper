@@ -14,6 +14,7 @@ import {
   recordEnvInjectionAcknowledgment,
 } from './session_start_gate.js';
 import * as safetyAudit from '../notifications/safety_audit.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster B Phase 5 (§4.5): env-injection start-gate tests.
 //
@@ -46,11 +47,12 @@ beforeEach(() => {
   getDb(); // apply migrations 001..016
 });
 
-afterEach(() => {
+afterEach(async () => {
   vi.restoreAllMocks();
   closeDb();
   config.dataDir = originalDataDir;
   _resetOperatorIdCache();
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

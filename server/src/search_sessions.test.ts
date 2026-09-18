@@ -9,6 +9,7 @@ import { upsertProject } from './repo/projects.js';
 import { createSession } from './repo/sessions.js';
 import { insertEvent, nextSeq } from './repo/events.js';
 import { executeSearchSessions, type SearchSessionsInput } from './search_sessions.js';
+import { closeLogger } from './runner/logger.js';
 
 // Cluster I Phase C4 (UI_Findings spec §4.2): coverage for the WS delegate's
 // privilege gate. `repo/search.test.ts` exercises the LIKE scan + containment;
@@ -40,9 +41,10 @@ beforeEach(() => {
   sent = [];
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

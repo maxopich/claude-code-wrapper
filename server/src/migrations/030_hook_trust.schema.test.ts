@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Migration 030_hook_trust.sql: the TOFU ledger for `.claude/settings*.json`
 // hooks. Pins the shape a future migration would have to change deliberately —
@@ -22,9 +23,10 @@ beforeEach(() => {
   getDb(); // applies 001..030
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

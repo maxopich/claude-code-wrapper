@@ -18,6 +18,7 @@ import { closeDb, getDb } from '../db.js';
 import { managedAgentsRoot } from '../managed_agent.js';
 import { getProject, upsertProject } from '../repo/projects.js';
 import { handleClientMsg } from './server.js';
+import { closeLogger } from '../runner/logger.js';
 
 let tmpRoot: string;
 let originalDataDir: string;
@@ -56,9 +57,10 @@ beforeEach(() => {
   ordinaryId = upsertProject('my-repo', ordinaryDir).id;
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

@@ -7,6 +7,7 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { scanProject, scanProjects } from './project_scan.js';
 import { setProjectTrusted, upsertProject, type ProjectRow } from './projects.js';
+import { closeLogger } from '../runner/logger.js';
 
 /**
  * Cebab-ws0.6 — the file-scan tier.
@@ -82,10 +83,11 @@ beforeEach(() => {
   redirectHome(path.join(tmpRoot, 'home'));
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
   restoreHome();
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

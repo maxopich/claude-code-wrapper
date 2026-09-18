@@ -8,6 +8,7 @@ import { closeDb, getDb } from './db.js';
 import { upsertProject } from './repo/projects.js';
 import { createSession } from './repo/sessions.js';
 import { setSetting } from './repo/settings.js';
+import { closeLogger } from './runner/logger.js';
 import {
   LAST_AUTO_RECLAIM_AT_KEY,
   LAST_AUTO_RECLAIM_COUNT_KEY,
@@ -45,9 +46,10 @@ beforeEach(() => {
   sent = [];
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

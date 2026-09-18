@@ -31,6 +31,7 @@ const { respondWithProjectAuthority } = await import('./server.js');
 const { config } = await import('../config.js');
 const { closeDb, getDb } = await import('../db.js');
 const { upsertProject } = await import('../repo/projects.js');
+const { closeLogger } = await import('../runner/logger.js');
 
 let tmpRoot: string;
 let originalDataDir: string;
@@ -64,10 +65,11 @@ beforeEach(() => {
   projectId = upsertProject('proj', projectDir).id;
 });
 
-afterEach(() => {
+afterEach(async () => {
   // closeDb before rm: Windows cannot unlink an open SQLite file.
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

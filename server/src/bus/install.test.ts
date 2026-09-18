@@ -13,6 +13,7 @@ import {
   uninstallBusForProject,
 } from './install.js';
 import { isValidAgentName, slugifyAgentName } from './paths.js';
+import { closeLogger } from '../runner/logger.js';
 
 // ---- isolated fs + DB scaffolding ----
 
@@ -30,9 +31,10 @@ beforeEach(() => {
   getDb(); // applies migrations including 005
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

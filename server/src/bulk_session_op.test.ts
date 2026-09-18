@@ -14,6 +14,7 @@ import {
 } from './repo/sessions.js';
 import { getSetting } from './repo/settings.js';
 import { registerQuery } from './runner/lifecycle.js';
+import { closeLogger } from './runner/logger.js';
 import {
   executeBulkSessionOp,
   LAST_AUTO_RECLAIM_AT_KEY,
@@ -58,9 +59,10 @@ beforeEach(() => {
   sent = [];
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

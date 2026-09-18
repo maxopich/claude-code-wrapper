@@ -7,6 +7,7 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { upsertProject } from '../repo/projects.js';
 import { handleClientMsg } from './server.js';
+import { closeLogger } from '../runner/logger.js';
 
 /**
  * Cebab-ws0.7: the two ends of the probe-on-selection wiring.
@@ -58,10 +59,11 @@ beforeEach(() => {
   projectId = upsertProject('proj', projectDir).id;
 });
 
-afterEach(() => {
+afterEach(async () => {
   // closeDb before rm: Windows cannot unlink an open SQLite file.
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

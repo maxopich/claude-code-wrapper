@@ -11,6 +11,7 @@ import { createOrchestratorRouter } from './orchestrator.js';
 import { computeSessionPaths } from './paths.js';
 import type { BusEvent } from './runner.js';
 import type { BusSink } from './session_registry.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Register B01 [security]. `detach()` used to do `sink = NOOP_SINK`
 // unconditionally. With two browser windows on one session that is a trap:
@@ -40,10 +41,11 @@ beforeEach(() => {
   warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 });
 
-afterEach(() => {
+afterEach(async () => {
   warnSpy.mockRestore();
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

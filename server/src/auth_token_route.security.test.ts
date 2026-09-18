@@ -25,6 +25,7 @@ import express from 'express';
 import { config } from './config.js';
 import { initAuthToken } from './auth.js';
 import { mountAuthTokenRoute } from './auth_token_route.js';
+import { closeLogger } from './runner/logger.js';
 
 const TEST_HOST = '127.0.0.1';
 
@@ -73,6 +74,7 @@ afterEach(async () => {
   config.port = originalPort;
   config.allowedOrigins.length = 0;
   config.allowedOrigins.push(...originalAllowedOrigins);
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

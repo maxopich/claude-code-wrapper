@@ -19,6 +19,7 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { appendMultiAgentEvent, createMultiAgentSession } from '../repo/multi_agent.js';
 import { buildContinueNudge } from './server.js';
+import { closeLogger } from '../runner/logger.js';
 
 const SESSION = 'nudge-1';
 const ORCH = 'orchestrator';
@@ -36,9 +37,10 @@ beforeEach(() => {
   createMultiAgentSession(SESSION, 'orchestrator');
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

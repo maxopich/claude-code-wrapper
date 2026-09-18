@@ -9,6 +9,7 @@ import { MaxTurnsReachedError } from '../bus/errors.js';
 import { hopBudgetExhaustedText } from '../bus/turn_guard.js';
 import { dispatchBusMaxTurnsReached, dispatchHopBudgetExhausted } from './bus_limits.js';
 import { _resetCoalesceState } from './dispatcher.js';
+import { closeLogger } from '../runner/logger.js';
 
 /**
  * `Cebab-vie.17` — the two bus runaway brakes and the rows they write.
@@ -35,10 +36,11 @@ beforeEach(() => {
   _resetCoalesceState();
 });
 
-afterEach(() => {
+afterEach(async () => {
   errSpy.mockRestore();
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

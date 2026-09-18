@@ -15,6 +15,7 @@ import {
   type MutationRecord,
 } from '../repo/multi_agent.js';
 import { isPausedForMutation, isTurnStalled, MutationNotRecordedError } from './errors.js';
+import { closeLogger } from '../runner/logger.js';
 import {
   applyPauseGate,
   releasePauseForMutation,
@@ -49,9 +50,10 @@ beforeEach(() => {
   setPauseOnDangerous(SID, true);
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

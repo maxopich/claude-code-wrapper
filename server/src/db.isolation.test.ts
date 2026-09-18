@@ -26,6 +26,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { config } from './config.js';
+import { closeLogger } from './runner/logger.js';
 import {
   __resetRealDataDirIntentForTests,
   closeDb,
@@ -56,10 +57,11 @@ describe('[security] the test suite cannot open the real data directory', () => 
     vi.spyOn(os, 'homedir').mockReturnValue(fakeHome);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     vi.restoreAllMocks();
     config.dataDir = original;
     closeDb();
+    await closeLogger();
     fs.rmSync(fakeHome, { recursive: true, force: true });
   });
 

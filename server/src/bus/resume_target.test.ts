@@ -16,6 +16,7 @@ import {
   type BusSink,
 } from './session_registry.js';
 import { resumeMultiAgentTarget } from './resume.js';
+import { closeLogger } from '../runner/logger.js';
 
 /**
  * Register B32: a failed targeted resume must leave the DB and the live-session
@@ -77,12 +78,13 @@ beforeEach(() => {
   errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 });
 
-afterEach(() => {
+afterEach(async () => {
   fakeReconstruct = null;
   unregisterLiveSession(SID);
   errSpy.mockRestore();
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

@@ -12,6 +12,7 @@ import { upsertProject } from '../repo/projects.js';
 import { createSession } from '../repo/sessions.js';
 import { resolveRevealAudit, startWsServer } from './server.js';
 import { auditRowsInWriteOrder } from '../test_support/audit_order.js';
+import { closeLogger } from '../runner/logger.js';
 
 /**
  * [security] Register H06 — the reveal path leaves a trail.
@@ -62,6 +63,7 @@ afterEach(async () => {
   // `upgrade_gate.security.test.ts` documents.
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

@@ -13,6 +13,7 @@ import {
   verifyChain,
 } from './safety_audit.js';
 import { _resetOperatorIdCache } from './operator.js';
+import { closeLogger } from '../runner/logger.js';
 
 // ---- isolated fs + DB scaffolding ----
 
@@ -29,10 +30,11 @@ beforeEach(() => {
   getDb(); // applies migrations 001..015
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
   _resetOperatorIdCache();
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

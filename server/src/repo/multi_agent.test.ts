@@ -7,6 +7,7 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { countUnackedBySession } from '../notifications/inbox.js';
 import { upsertProject } from './projects.js';
+import { closeLogger } from '../runner/logger.js';
 import {
   addAgentCost,
   addParticipant,
@@ -63,9 +64,10 @@ beforeEach(() => {
   getDb(); // runs migrations including 005 + 006
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

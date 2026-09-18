@@ -42,6 +42,7 @@ import { __resetRegistryForTesting, getPauseExpiryRegistry } from '../ws/pause_e
 import { auditKindsInWriteOrder } from '../test_support/audit_order.js';
 import type { Runner, RunOptions } from '../runner/index.js';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import { closeLogger } from '../runner/logger.js';
 
 let tmpRoot: string;
 let originalDataDir: string;
@@ -94,13 +95,14 @@ beforeEach(() => {
   __resetRegistryForTesting();
 });
 
-afterEach(() => {
+afterEach(async () => {
   warnSpy.mockRestore();
   errSpy.mockRestore();
   closeDb();
   config.dataDir = originalDataDir;
   unregisterLiveSession(SID);
   __resetRegistryForTesting();
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

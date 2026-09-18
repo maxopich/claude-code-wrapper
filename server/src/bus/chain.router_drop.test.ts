@@ -44,6 +44,7 @@ import type {
   RouterDropReasonCode,
 } from '@cebab/shared/protocol';
 import { _resetCoalesceState } from '../notifications/dispatcher.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster A Phase 3 (D4 / BE-9): chain-mode mirror of the orchestrator
 // router-drop coverage. Chain has six drop sites in `handleEvent`, all named
@@ -69,10 +70,11 @@ beforeEach(() => {
   _resetCoalesceState();
 });
 
-afterEach(() => {
+afterEach(async () => {
   warnSpy.mockRestore();
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

@@ -18,6 +18,7 @@ import {
   createMultiAgentSession,
 } from '../repo/multi_agent.js';
 import { buildSessionLogChunk } from './session_log.js';
+import { closeLogger } from '../runner/logger.js';
 
 let tmpRoot: string;
 let originalDataDir: string;
@@ -31,9 +32,10 @@ beforeEach(() => {
   getDb();
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

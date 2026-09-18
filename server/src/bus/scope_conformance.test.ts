@@ -14,6 +14,7 @@ import {
   trustDerivedScopes,
 } from '../repo/project_authority.js';
 import { AgentRunner } from './runner.js';
+import { closeLogger } from '../runner/logger.js';
 
 // [security] Cebab-6fax.21.1 — a bus participant's setting scopes FOLLOW its
 // project's Trust, and the scopes it SPAWNS with are the SAME function of Trust
@@ -42,10 +43,11 @@ beforeEach(() => {
   projectId = upsertProject('proj', projectDir).id;
 });
 
-afterEach(() => {
+afterEach(async () => {
   // closeDb before rm: Windows cannot unlink an open SQLite file.
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

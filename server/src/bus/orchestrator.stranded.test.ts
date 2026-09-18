@@ -27,6 +27,7 @@ import {
 import { upsertProject } from '../repo/projects.js';
 import type { Runner } from '../runner/index.js';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import { closeLogger } from '../runner/logger.js';
 
 let tmpRoot: string;
 let originalDataDir: string;
@@ -45,11 +46,12 @@ beforeEach(() => {
   warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 });
 
-afterEach(() => {
+afterEach(async () => {
   unregisterLiveSession(SESSION_ID);
   warnSpy.mockRestore();
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

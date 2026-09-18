@@ -17,6 +17,7 @@ import {
   listSessionsForProject,
 } from './sessions.js';
 import { createMultiAgentSession } from './multi_agent.js';
+import { closeLogger } from '../runner/logger.js';
 
 /**
  * Register C06: `sessions.ts` had twelve exported functions and no test file,
@@ -52,9 +53,10 @@ beforeEach(() => {
   projectId = upsertProject('demo', path.join(tmpRoot, 'demo')).id;
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
