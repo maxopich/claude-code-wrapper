@@ -16,6 +16,7 @@ import {
 import { MIN_SEARCH_QUERY_LEN, searchSessions } from './search.js';
 import { ensureAssistantProject } from '../assistant/identity.js';
 import { buildSingleAgentSessionLogChunk } from '../ws/session_log.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster I Phase C4 (UI_Findings spec §4.2): server-side coverage for the
 // tier-1 cross-session LIKE scan. We spin a real SQLite under a tmp `~/.cebab`
@@ -34,9 +35,10 @@ beforeEach(() => {
   getDb(); // applies 001..025
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

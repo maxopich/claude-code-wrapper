@@ -40,6 +40,7 @@ import {
 } from '../repo/projects.js';
 import { createSession } from '../repo/sessions.js';
 import { handleClientMsg } from './server.js';
+import { closeLogger } from '../runner/logger.js';
 
 type Conn = Parameters<typeof handleClientMsg>[0];
 
@@ -81,9 +82,10 @@ beforeEach(() => {
   assistant = ensureAssistantProject(KB)!;
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

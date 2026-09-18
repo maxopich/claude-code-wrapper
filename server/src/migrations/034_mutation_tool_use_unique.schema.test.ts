@@ -6,6 +6,7 @@ import Database from 'better-sqlite3';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Migration 034_mutation_tool_use_unique.sql: closes register D20.
 //
@@ -35,9 +36,10 @@ beforeEach(() => {
   getDb(); // applies 001..034
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

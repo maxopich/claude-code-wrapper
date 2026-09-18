@@ -24,6 +24,7 @@ import {
   type LiveBusSession,
 } from '../bus/session_registry.js';
 import { executeReopenSessionConfirmed } from './server.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster D Phase 5c (spec §6.3, BE-D20 / BE-D21 / BE-D24): coverage
 // for the `reopen_session_confirmed` commit handler.
@@ -122,12 +123,13 @@ beforeEach(() => {
   stubResumeNotFound.mockClear();
 });
 
-afterEach(() => {
+afterEach(async () => {
   // The live registry is a process singleton — a test that registers an
   // incumbent must not leak it into the next test's `claimSessionStart`.
   unregisterLiveSession('incumbent');
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

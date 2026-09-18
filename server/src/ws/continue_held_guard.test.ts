@@ -11,6 +11,7 @@ import {
   setMutationPauseState,
 } from '../repo/multi_agent.js';
 import { describeHeldWorkers } from './server.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Register B05 [security]. A pause-on-dangerous pause used to also set
 // `awaiting_continue`, which is R-B's recovery state — so after a re-attach the
@@ -38,9 +39,10 @@ beforeEach(() => {
   createMultiAgentSession(SID, 'orchestrator', '001');
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

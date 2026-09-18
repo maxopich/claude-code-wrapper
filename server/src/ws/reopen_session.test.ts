@@ -13,6 +13,7 @@ import {
 } from '../repo/multi_agent.js';
 import { upsertProject } from '../repo/projects.js';
 import { executeReopenSessionProbe } from './server.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster D Phase 5b (spec §6.3, BE-D19): coverage for the
 // `reopen_session` probe handler.
@@ -51,9 +52,10 @@ beforeEach(() => {
   stubComputeDiff.mockClear();
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

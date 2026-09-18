@@ -36,6 +36,7 @@ import {
   UNPARSABLE_LINE_TYPE,
 } from './session_log_export.js';
 import { isStreamPartial } from './runner/message_classes.js';
+import { closeLogger } from './runner/logger.js';
 
 // ── Pure-function tests ──────────────────────────────────────────────
 
@@ -332,6 +333,7 @@ afterEach(async () => {
   config.allowedOrigins.push(...originalAllowedOrigins);
   _resetOperatorIdCache();
   vi.restoreAllMocks();
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

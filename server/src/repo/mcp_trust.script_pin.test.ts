@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { closeDb, getDb } from '../db.js';
 import { config } from '../config.js';
 import { _resetOperatorIdCache } from '../notifications/operator.js';
+import { closeLogger } from '../runner/logger.js';
 import {
   changedScriptPaths,
   checkTrust,
@@ -46,10 +47,11 @@ beforeEach(() => {
   getDb();
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
   _resetOperatorIdCache();
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

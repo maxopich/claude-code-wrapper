@@ -36,6 +36,7 @@ import { config } from '../config.js';
 import { initAuthToken } from '../auth.js';
 import { closeDb } from '../db.js';
 import { startWsServer } from './server.js';
+import { closeLogger } from '../runner/logger.js';
 
 const TEST_HOST = '127.0.0.1';
 
@@ -91,6 +92,7 @@ afterEach(async () => {
   config.dataDir = originalDataDir;
   config.allowedOrigins.length = 0;
   config.allowedOrigins.push(...originalAllowedOrigins);
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

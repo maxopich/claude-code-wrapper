@@ -16,6 +16,7 @@ import {
 } from './server.js';
 import { upsertProject } from '../repo/projects.js';
 import { createSession } from '../repo/sessions.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster C Phase 3: integration tests for the Stop forensic-bundle path.
 // - executeStoppedAudit: writes session.stopped row + forensics row in
@@ -39,10 +40,11 @@ beforeEach(() => {
   warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 });
 
-afterEach(() => {
+afterEach(async () => {
   warnSpy.mockRestore();
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

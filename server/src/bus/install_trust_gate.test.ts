@@ -12,6 +12,7 @@ import {
 } from '../notifications/safety_audit.js';
 import { getProjectBusTrust, setProjectBusTrust, upsertProject } from '../repo/projects.js';
 import { setProjectBusInstalled } from '../repo/multi_agent.js';
+import { closeLogger } from '../runner/logger.js';
 import {
   awaitBusTrustDecision,
   makeBusTrustGateState,
@@ -59,10 +60,11 @@ beforeEach(() => {
   getDb(); // apply migrations 001..024
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
   _resetOperatorIdCache();
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

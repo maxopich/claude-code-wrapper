@@ -3,6 +3,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { config } from '../config.js';
+import { closeLogger } from '../runner/logger.js';
 import {
   computeSessionPaths,
   isValidAgentName,
@@ -24,8 +25,9 @@ beforeEach(() => {
   config.dataDir = path.join(tmpRoot, '.cebab');
 });
 
-afterEach(() => {
+afterEach(async () => {
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

@@ -13,6 +13,7 @@ import {
 } from '../repo/multi_agent.js';
 import { listForSession } from '../repo/recovery_log.js';
 import { executeArchiveSession } from './server.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster D Phase 5 (spec §6.4, BE-D22 / BE-D23 / BE-D24): server-side
 // coverage for the `archive_session` handler.
@@ -41,9 +42,10 @@ beforeEach(() => {
   sent = [];
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

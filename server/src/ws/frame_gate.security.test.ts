@@ -33,6 +33,7 @@ import { config } from '../config.js';
 import { initAuthToken } from '../auth.js';
 import { closeDb } from '../db.js';
 import { MAX_WS_FRAME_BYTES, startWsServer } from './server.js';
+import { closeLogger } from '../runner/logger.js';
 
 const TEST_HOST = '127.0.0.1';
 
@@ -68,6 +69,7 @@ afterEach(async () => {
   // windows-2022 cannot rmSync a file that is still open.
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

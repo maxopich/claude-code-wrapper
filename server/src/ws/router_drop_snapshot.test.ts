@@ -6,6 +6,7 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { emit as emitNotification } from '../notifications/dispatcher.js';
 import { buildRouterDropSnapshots } from './router_drop_snapshot.js';
+import { closeLogger } from '../runner/logger.js';
 
 // `Cebab-vie.33`: what a re-attaching browser is told about the router drops
 // this session has recorded, so a refresh stops emptying the RouterDropsCounter
@@ -34,10 +35,11 @@ beforeEach(() => {
   errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 });
 
-afterEach(() => {
+afterEach(async () => {
   errSpy.mockRestore();
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

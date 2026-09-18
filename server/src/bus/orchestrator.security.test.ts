@@ -46,6 +46,7 @@ import { unregisterLiveSession } from './session_registry.js';
 import type { BusEvent } from './runner.js';
 import type { Runner } from '../runner/index.js';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import { closeLogger } from '../runner/logger.js';
 
 // F2 / F3 regression coverage for the orchestrator router's handleEvent
 // source-allowlist + cebab-event-forgery drops at orchestrator.ts:514-552.
@@ -82,10 +83,11 @@ beforeEach(() => {
   warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 });
 
-afterEach(() => {
+afterEach(async () => {
   warnSpy.mockRestore();
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

@@ -7,6 +7,7 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { executeStopReason } from './server.js';
 import { appendSafetyAudit } from '../notifications/safety_audit.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster C Phase 2 (spec §4.2 / §4.5): server-side coverage for
 // `executeStopReason`. Tests run against a real SQLite under a tmp
@@ -37,11 +38,12 @@ beforeEach(() => {
   errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 });
 
-afterEach(() => {
+afterEach(async () => {
   logSpy.mockRestore();
   errSpy.mockRestore();
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

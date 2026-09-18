@@ -15,6 +15,7 @@ import {
   executeUnmuteParticipant,
 } from './control_verbs.js';
 import { buildParticipantControlSnapshots } from './participant_control_snapshot.js';
+import { closeLogger } from '../runner/logger.js';
 
 // `Cebab-vie.6` / `Cebab-vie.4`: what a re-attaching browser is told about the
 // controls standing over this session.
@@ -42,10 +43,11 @@ beforeEach(() => {
   warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 });
 
-afterEach(() => {
+afterEach(async () => {
   warnSpy.mockRestore();
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

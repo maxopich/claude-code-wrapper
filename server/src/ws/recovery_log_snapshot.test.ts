@@ -7,6 +7,7 @@ import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { appendRecoveryLog, updateRecoveryOutcome } from '../repo/recovery_log.js';
 import { executeRecoveryLogSnapshot } from './server.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster D Phase 8a (spec §8.5): server-side coverage for the
 // `get_recovery_log_snapshot` handler.
@@ -41,9 +42,10 @@ beforeEach(() => {
   sent = [];
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster G Phase 1 (A3): schema-shape smoke for migration 023_mock_flag.sql.
 //
@@ -25,9 +26,10 @@ beforeEach(() => {
   getDb(); // applies 001..023
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

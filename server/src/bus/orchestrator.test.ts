@@ -19,6 +19,7 @@ import {
   type MultiAgentLifecycle,
 } from '../repo/multi_agent.js';
 import type { BusEvent } from './runner.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Same isolation scaffolding as install.test.ts — each test gets its own
 // tmp ~/.cebab so writes don't leak across tests or out to the real home.
@@ -38,9 +39,10 @@ beforeEach(() => {
   getDb();
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

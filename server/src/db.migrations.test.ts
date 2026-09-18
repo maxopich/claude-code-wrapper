@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { config } from './config.js';
 import { closeDb, getDb, resolveMigrationsDir } from './db.js';
 import { checkAppliedMigrationHashes, hashMigrationSql } from './migration_integrity.js';
+import { closeLogger } from './runner/logger.js';
 
 /**
  * The migration runner's contract, which eight `*.schema.test.ts` files lean on
@@ -41,9 +42,10 @@ beforeEach(() => {
   getDb();
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

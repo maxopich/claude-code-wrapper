@@ -10,6 +10,7 @@ import { makeTrustGateState } from '../repo/mcp_trust_gate.js';
 import { makeBusTrustGateState } from '../bus/install_trust_gate.js';
 import { makeStartGateState } from '../repo/session_start_gate.js';
 import { handleClientMsg } from './server.js';
+import { closeLogger } from '../runner/logger.js';
 
 /**
  * `Cebab-6fax.17` — cancelling a trust/env gate on a single-agent turn must end
@@ -80,9 +81,10 @@ beforeEach(() => {
   setProjectTrusted(project.id, true);
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

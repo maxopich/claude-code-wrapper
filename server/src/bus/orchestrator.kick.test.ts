@@ -13,6 +13,7 @@ import {
   type MultiAgentLifecycle,
 } from '../repo/multi_agent.js';
 import type { BusEvent } from './runner.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster C Phase 4d (spec §5.1 kick semantics + §3 invariant 1): router
 // kick-drop tests. Kick is BIDIRECTIONAL — distinct from mute (which is
@@ -40,9 +41,10 @@ beforeEach(() => {
   getDb();
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

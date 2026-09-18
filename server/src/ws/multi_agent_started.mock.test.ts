@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { createMultiAgentSession, getMultiAgentSession } from '../repo/multi_agent.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster G Phase 2c (UI-A3): the WS handler projects `multi_agent_sessions.mock`
 // (migration 023, stamped at INSERT from `config.mock`) onto the wire-side
@@ -53,10 +54,11 @@ beforeEach(() => {
   getDb();
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
   config.mock = originalMock;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

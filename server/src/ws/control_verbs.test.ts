@@ -26,6 +26,7 @@ import {
   setParticipantPause,
 } from '../repo/per_agent_control.js';
 import { auditRowsInWriteOrder } from '../test_support/audit_order.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster C Phase 4b: WS handler-level tests for executeMuteParticipant /
 // executeUnmuteParticipant. Exercises the full validation chain (reason
@@ -49,11 +50,12 @@ beforeEach(() => {
   errSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
 });
 
-afterEach(() => {
+afterEach(async () => {
   warnSpy.mockRestore();
   errSpy.mockRestore();
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

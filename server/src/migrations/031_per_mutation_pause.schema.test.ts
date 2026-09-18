@@ -4,6 +4,7 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Migration 031_per_mutation_pause.sql: moves the pause-on-dangerous gate's
 // state from multi_agent_sessions (one slot per session) onto
@@ -26,9 +27,10 @@ beforeEach(() => {
   getDb(); // applies 001..031
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

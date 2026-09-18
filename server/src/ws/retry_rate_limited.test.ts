@@ -11,6 +11,7 @@ import {
   type OperatorAction,
 } from '../repo/recovery_log.js';
 import { resolveRetryRateLimited } from './server.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster D Phase 4b (spec §4.2, BE-D4 / BE-D8): server-side coverage
 // for the single-agent rate-limit retry path.
@@ -103,9 +104,10 @@ describe('recovery_log row contract for rate-limit retry (BE-D8 / spec §8.5)', 
     getDb();
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     closeDb();
     config.dataDir = originalDataDir;
+    await closeLogger();
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   });
 

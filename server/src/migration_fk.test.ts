@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 
 import { config } from './config.js';
 import { closeDb, getDb } from './db.js';
+import { closeLogger } from './runner/logger.js';
 
 /**
  * `Cebab-6fax.44` — migrations must not run under foreign-key enforcement.
@@ -115,7 +116,7 @@ describe('and Cebab applies its migrations that way', () => {
     expect(enforce).toBeGreaterThan(apply);
   });
 
-  test('a migration that left a dangling reference would refuse to open', () => {
+  test('a migration that left a dangling reference would refuse to open', async () => {
     // Running with enforcement off trades one silent failure for another
     // unless something checks afterwards, so `foreign_key_check` sits between
     // the two. Asserted through the shipped schema: it must come back empty.
@@ -133,6 +134,7 @@ describe('and Cebab applies its migrations that way', () => {
     } finally {
       closeDb();
       config.dataDir = originalDataDir;
+      await closeLogger();
       fs.rmSync(tmpRoot, { recursive: true, force: true });
     }
   });

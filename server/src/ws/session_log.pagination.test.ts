@@ -59,6 +59,7 @@ import { listMultiAgentMutations } from '../repo/multi_agent.js';
 import { listEvents } from '../repo/events.js';
 import { upsertProject } from '../repo/projects.js';
 import { createSession } from '../repo/sessions.js';
+import { closeLogger } from '../runner/logger.js';
 import {
   buildSessionLogChunk,
   buildSingleAgentSessionLogChunk,
@@ -81,9 +82,10 @@ beforeEach(() => {
   getDb();
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

@@ -26,6 +26,7 @@ import { computeSessionPaths } from './paths.js';
 import { MaxTurnsReachedError } from './errors.js';
 import { createMultiAgentSession } from '../repo/multi_agent.js';
 import { _resetCoalesceState } from '../notifications/dispatcher.js';
+import { closeLogger } from '../runner/logger.js';
 
 const SESSION_ID = 'orch-turn-errors-session';
 
@@ -47,11 +48,12 @@ beforeEach(() => {
   _resetCoalesceState();
 });
 
-afterEach(() => {
+afterEach(async () => {
   warnSpy.mockRestore();
   errorSpy.mockRestore();
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

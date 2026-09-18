@@ -8,6 +8,7 @@ import { closeDb, getDb } from '../db.js';
 import { maybeDispatchDangerousMutation } from './dangerous_mutation.js';
 import { _resetCoalesceState } from './dispatcher.js';
 import type { MutationRecord } from '../repo/multi_agent.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster A Phase 4 (UI-15 / spec §3): a `dangerous`-category
 // `multi_agent_mutation` MUST fan a sticky safety notification with an
@@ -37,10 +38,11 @@ beforeEach(() => {
   _resetCoalesceState();
 });
 
-afterEach(() => {
+afterEach(async () => {
   errSpy.mockRestore();
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

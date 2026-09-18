@@ -6,6 +6,7 @@ import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { config } from '../config.js';
 import { closeDb } from '../db.js';
 import { translate } from './translate.js';
+import { closeLogger } from '../runner/logger.js';
 
 // `translate()` reaches getSession() → getDb() for a couple of subtypes, and
 // this file did not swap `config.dataDir` — so running the suite opened,
@@ -22,10 +23,11 @@ beforeAll(() => {
   closeDb();
 });
 
-afterAll(() => {
+afterAll(async () => {
   // closeDb before rm: Windows cannot unlink an open SQLite file.
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

@@ -22,6 +22,7 @@ import { config } from '../config.js';
 import { upsertProject, setProjectTrusted } from './projects.js';
 import { createSession } from './sessions.js';
 import { insertEvent, nextSeq } from './events.js';
+import { closeLogger } from '../runner/logger.js';
 
 // Cluster B Phase 3 (§4.3): resolver tests cover the four file-read
 // scanners (resolveToolAuthority, detectEnvInjections, detectHooks,
@@ -766,10 +767,11 @@ beforeEach(() => {
   redirectHome(path.join(tmpRoot, 'home'));
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
   restoreHome();
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

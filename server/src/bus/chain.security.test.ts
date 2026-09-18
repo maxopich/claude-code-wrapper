@@ -45,6 +45,7 @@ import { unregisterLiveSession } from './session_registry.js';
 import { AgentRunner, type BusEvent } from './runner.js';
 import type { Runner } from '../runner/index.js';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import { closeLogger } from '../runner/logger.js';
 
 // F2 / F3 regression coverage for chain-mode handleEvent drops at
 // chain.ts:237-260. The chain participant allowlist differs slightly
@@ -72,10 +73,11 @@ beforeEach(() => {
   warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
 });
 
-afterEach(() => {
+afterEach(async () => {
   warnSpy.mockRestore();
   closeDb();
   config.dataDir = originalDataDir;
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 

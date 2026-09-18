@@ -9,6 +9,7 @@ import { closeDb, getDb } from '../db.js';
 import { _resetOperatorIdCache } from '../notifications/operator.js';
 import { appendSafetyAudit } from '../notifications/safety_audit.js';
 import { describeChainFailure, reverifyChainOnAttach } from './server.js';
+import { closeLogger } from '../runner/logger.js';
 
 // [security] Register H07 — chain verification ran once, at boot, and never
 // again.
@@ -37,10 +38,11 @@ beforeEach(() => {
   getDb();
 });
 
-afterEach(() => {
+afterEach(async () => {
   closeDb();
   config.dataDir = originalDataDir;
   _resetOperatorIdCache();
+  await closeLogger();
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
