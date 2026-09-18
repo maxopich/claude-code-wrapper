@@ -14,10 +14,25 @@
 // to resolve before proceeding — misusing it here would train them to ignore
 // the tier that matters.
 //
-// WHY NO ACTIONS. There is nothing Cebab can do about a server that failed to
-// come up: the SDK connects them at spawn, and a "Retry" button that quietly
+// WHY NO ACTIONS *HERE*, and the reason has changed (`Cebab-ormv`). The
+// original said "there is nothing Cebab can do about a server that failed to
+// come up: the SDK connects them at spawn, and a 'Retry' button that quietly
 // does nothing is the same defect as the invented remedy, just wearing our
-// name. The banner's whole job is to replace a guess with a measurement.
+// name." The premise was measured and is now false: `Query` exposes
+// `reconnectMcpServer`, `toggleMcpServer` and an OAuth trio, and Cebab drives
+// them from the authority panel's live MCP section.
+//
+// The conclusion survives its premise, for a different reason. This banner
+// reports a FROZEN reading — `session_started.mcpServers`, captured once at
+// startup and never re-read — so an action button here would act on a fact
+// that may already be stale, and would report its result into a banner with
+// no way to refresh. Worse, the repair is per-server and this is a per-session
+// summary. The live section owns the actions because it owns a current read;
+// this stays what it always was, the thing that ends the guessing.
+//
+// The honest gap that remains: nothing yet routes an operator FROM this banner
+// TO that section. Worth closing, and deliberately not smuggled into the
+// change that made the section exist.
 //
 // IT WAS NON-DISMISSIBLE, AND THAT WAS WRONG (`Cebab-9fta`). The original
 // reasoning is kept because the premise was right and only the conclusion was
@@ -27,9 +42,11 @@
 // The same premise argues the other way. Precisely BECAUSE the reading cannot
 // change mid-session, it says nothing new the second time it is read — and it
 // is a large block above every message for the rest of the session. The
-// reported case was two claude.ai connectors reporting `needs-auth`, a state
-// the operator cannot resolve from inside Cebab at all; the banner named it
-// once, usefully, and then charged rent.
+// reported case was two claude.ai connectors reporting `needs-auth` — which
+// at the time the operator could not resolve from inside Cebab at all, and
+// since `Cebab-ormv` can, from the authority panel's live MCP section. The
+// dismissal argument does not depend on that: the banner named the state once,
+// usefully, and then charged rent for the rest of the session.
 //
 // So the factory takes an optional `dismiss` and the shell's existing
 // affordance renders it. What dismissal does NOT do is discard the facts: the
@@ -82,10 +99,11 @@ export function buildMcpStatusBannerItem(args: BuildMcpStatusBannerItemArgs): Ba
         were meant to be — so if it says a capability does not exist, this is why.
       </p>
       <p>
-        That was the reading at startup, not a live one, and Cebab cannot bring a server back up
-        mid-session. Starting a fresh session measures it again. A server that this project declares
-        but that the session was never allowed to read is a different situation with a different
-        fix, and it does not appear here at all — the sidebar reports that one.
+        That was the reading at startup, not a live one. <strong>Live MCP servers</strong> in the
+        authority panel re-reads it and can reconnect a server, or start authentication for one that
+        needs it. A server that this project declares but that the session was never allowed to read
+        is a different situation with a different fix, and it does not appear here at all — the
+        sidebar reports that one.
       </p>
     </>
   );

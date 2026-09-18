@@ -2,6 +2,7 @@
 // Filled out incrementally as features land — start small.
 
 import type { MutationCategory } from './mutation.js';
+import type { McpServerLive } from './mcp_status.js';
 
 export type Project = {
   id: number;
@@ -643,6 +644,30 @@ export const MANAGED_FILE_KIND_SET: ReadonlySet<ManagedFileKind> = new Set([
 
 export function isManagedFileKind(v: unknown): v is ManagedFileKind {
   return typeof v === 'string' && MANAGED_FILE_KIND_SET.has(v as ManagedFileKind);
+}
+
+/**
+ * `Cebab-ormv`: the closed set of MCP control operations.
+ *
+ * Declared here and composed by the WS validator rather than restated there,
+ * for the reason `managedFileKind` gives one guard up: this field selects which
+ * server-side ACTION runs, so a validator that admitted a spelling the switch
+ * does not handle would pass a frame the handler then has to guess about. A
+ * bare `'string'` shape — which is what `get_project_authority.mode` settles
+ * for — is not enough here, because three of these five ops change state.
+ */
+export type McpControlOp = 'status' | 'reconnect' | 'authenticate' | 'clear_auth' | 'toggle';
+
+export const MCP_CONTROL_OP_SET: ReadonlySet<McpControlOp> = new Set([
+  'status',
+  'reconnect',
+  'authenticate',
+  'clear_auth',
+  'toggle',
+]);
+
+export function isMcpControlOp(v: unknown): v is McpControlOp {
+  return typeof v === 'string' && MCP_CONTROL_OP_SET.has(v as McpControlOp);
 }
 
 /** Why the server refused a managed-file read or write. Rendered by the editor
@@ -1570,6 +1595,50 @@ export type ClientMsg =
       type: 'get_project_authority';
       projectId: number;
       mode: 'cache' | 'probe';
+    }
+  | {
+      /**
+       * `Cebab-ormv`: operator asks Cebab to READ or ACT ON this project's live
+       * MCP servers. The answer rides `mcp_control_result`.
+       *
+       * WHY A LIVE VERB EXISTS AT ALL. Everything else Cebab knows about MCP
+       * comes from `system/init.mcp_servers`: one snapshot, taken at the least
+       * settled moment of a session, carrying `{name, status}` and nothing
+       * else, never re-read. That is how a server can be `✔ Connected` in a
+       * terminal and `needs-auth` inside Cebab with no way to tell or fix it —
+       * the failure this verb exists for, measured 2026-09-18.
+       *
+       * EVERY op RETURNS THE FULL SERVER LIST, not just the one it touched.
+       * The server re-reads status after acting, so the panel re-renders from
+       * an authoritative read rather than guessing what its own click did. It
+       * costs nothing extra (the session is already open) and removes the whole
+       * class of optimistic-update drift.
+       *
+       * The ops, and what each can actually do:
+       *   - `status`      — read only. No side effect beyond the spawn.
+       *   - `reconnect`   — retry the connection. CANNOT clear `needs-auth`:
+       *                     measured, the CLI throws `Server status: needs-auth`
+       *                     rather than re-authenticating. This op is for
+       *                     `failed` and `pending`, and the UI must not offer
+       *                     it where only `authenticate` can work.
+       *   - `authenticate`— start the OAuth flow. Answers with `authUrl` for
+       *                     the operator to open.
+       *   - `clear_auth`  — sign out, so the next authenticate starts clean.
+       *   - `toggle`      — enable/disable for future sessions.
+       *
+       * NOT FREE, and not a poll. Serving this spawns a `claude` process —
+       * which runs the project's `SessionStart` hooks under its own Trust,
+       * exactly as a turn would. It costs no model turn (measured: the control
+       * session's entire message stream is hook rows, no assistant and no
+       * result), but it must stay operator-initiated.
+       */
+      type: 'mcp_control';
+      projectId: number;
+      op: McpControlOp;
+      /** Required for every op but `status`; ignored by it. */
+      serverName?: string;
+      /** `toggle` only. */
+      enabled?: boolean;
     }
   | {
       /**
@@ -3590,6 +3659,45 @@ export type ServerMsg =
       type: 'project_authority';
       projectId: number;
       authority: ProjectAuthority | null;
+    }
+  | {
+      /**
+       * `Cebab-ormv`: reply to `mcp_control`.
+       *
+       * `servers` is the state AFTER the op ran, re-read from the same live
+       * session — so a successful reconnect and its result arrive together and
+       * the panel never has to guess. `null` means the read itself failed (the
+       * control session could not be opened, or timed out); an empty array
+       * means the read succeeded and this project genuinely loads no MCP
+       * servers. Those are different answers and must not be collapsed.
+       *
+       * `error` is set when the OP failed while the session was otherwise fine
+       * — most importantly `reconnect` on a `needs-auth` server, which the CLI
+       * refuses with `Server status: needs-auth`. It carries the CLI's own text
+       * rather than a Cebab paraphrase, for the reason `mcp_status.ts` gives
+       * about never interpreting a status: Cebab has not measured what every
+       * failure means and should not invent a cause.
+       *
+       * `authUrl` rides an `authenticate` op the operator must act on. It is
+       * NOT logged and NOT persisted anywhere: the measured URL embeds the
+       * operator's organization id, and this repo is public.
+       */
+      type: 'mcp_control_result';
+      projectId: number;
+      op: McpControlOp;
+      /** Echoed back so a reply can be matched to the row that asked. */
+      serverName?: string;
+      servers: McpServerLive[] | null;
+      authUrl?: string;
+      /**
+       * `authenticate` only, and it is a REFUSAL rather than a failure: this
+       * server wants an OAuth callback delivered to the same process that
+       * started the flow, which Cebab has never measured and does not
+       * implement. Reported honestly instead of shipped half-built — see
+       * `McpAuthStart` in `server/src/runner/mcp_control.ts`.
+       */
+      callbackUnsupported?: boolean;
+      error?: string;
     }
   | {
       /**

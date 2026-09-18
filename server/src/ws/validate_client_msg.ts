@@ -47,6 +47,7 @@ import {
   isControlReasonCode,
   isKickMode,
   isManagedFileKind,
+  isMcpControlOp,
   isPauseExpiryAction,
   isSessionPermissionMode,
   isStopReasonCode,
@@ -112,6 +113,12 @@ const kickMode = { kind: 'string', is: isKickMode } as const;
  * a validator that admits a kind the resolver then refuses.
  */
 const managedFileKind = { kind: 'string', is: isManagedFileKind } as const;
+/**
+ * `Cebab-ormv`. Composed from the shared set rather than restated: three of the
+ * five ops change state, so a validator that admitted a spelling the handler's
+ * switch does not know would hand it a frame it has to guess about.
+ */
+const mcpControlOp = { kind: 'string', is: isMcpControlOp } as const;
 
 const SHAPES: Table = {
   list_projects: {},
@@ -222,6 +229,15 @@ const SHAPES: Table = {
   request_inbox_snapshot: { filters: 'object?' },
   clear_dismissed_inbox: {},
   get_project_authority: { projectId: 'number', mode: 'string' },
+  mcp_control: {
+    projectId: 'number',
+    op: mcpControlOp,
+    // Optional on the wire because `status` carries neither; the handler
+    // refuses an op that needs a name and did not get one, which is a
+    // different answer from a malformed frame and is reported as such.
+    serverName: 'string?',
+    enabled: 'boolean?',
+  },
   mcp_trust_decision: {
     pendingId: 'string?',
     serverName: 'string',

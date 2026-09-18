@@ -90,7 +90,14 @@ const SCOPE_CHIP_CLASS: Record<McpServerView['scope'], string> = {
   unknown: 'mcp-scope-unknown',
 };
 
-function statusDotClass(status: string): string {
+/**
+ * Exported for `McpLiveServers` (`Cebab-ormv`), which renders the same statuses
+ * from the LIVE read rather than from the file scan. A second copy of this
+ * mapping is exactly the drift `shared/src/mcp_status.ts` was written to stop —
+ * two surfaces disagreeing about what a status looks like is how one of them
+ * ends up dressing `needs-auth` as healthy.
+ */
+export function statusDotClass(status: string): string {
   return STATUS_DOT_CLASS[status] ?? 'mcp-status-muted';
 }
 

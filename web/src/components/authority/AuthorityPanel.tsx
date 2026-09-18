@@ -12,6 +12,7 @@ import { AuthoritySection } from './AuthoritySection';
 import { ModelIdentityCard } from './ModelIdentityCard';
 import { ToolsList, type UsageToggle } from './ToolsList';
 import { McpServersList } from './McpServersList';
+import { McpLiveServers } from './McpLiveServers.js';
 import { AllowDenyView } from './AllowDenyView';
 import { EnvScrubInspector } from './EnvScrubInspector';
 import { HooksList } from './HooksList';
@@ -197,10 +198,10 @@ export function AuthorityPanel(props: AuthorityPanelProps) {
       </header>
       {collapsible ? (
         <div id={bodyId} hidden={collapsed}>
-          {renderBody(slot, mode)}
+          {renderBody(slot, mode, projectId)}
         </div>
       ) : (
-        renderBody(slot, mode)
+        renderBody(slot, mode, projectId)
       )}
     </section>
   );
@@ -224,7 +225,7 @@ function renderStatus(slot: AuthoritySlot): string {
   return `${slot.lastFetchedMode} · ${timeAgo(slot.receivedAt)}`;
 }
 
-function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode) {
+function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode, projectId: number) {
   if (slot.status === 'idle' || slot.status === 'requesting') {
     return <div className="authority-panel-loading">Loading authority…</div>;
   }
@@ -325,6 +326,12 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode) {
           unloaded={unloadedMcpServers}
         />
       </AuthoritySection>
+      {/* `Cebab-ormv`: the EFFECTIVE half, immediately after the declared one.
+          Adjacent on purpose — the two answer different questions, and the
+          operator most often needs to compare them. This project's servers can
+          be entirely absent above (a claude.ai connector declares nothing on
+          disk) and entirely present here. */}
+      <McpLiveServers projectId={projectId} />
       <AuthoritySection
         title="Allow / deny rules"
         // Count derived from the same per-tool attribution AllowDenyView

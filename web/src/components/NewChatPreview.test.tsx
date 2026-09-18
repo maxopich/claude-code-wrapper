@@ -4,6 +4,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { act } from 'react';
 import type { ClientMsg, ProjectAuthority, ServerMsg } from '@cebab/shared/protocol';
 import { AuthorityProvider } from './authority/AuthorityContext';
+import { McpControlProvider } from './authority/McpControlContext';
 import { NewChatPreview } from './NewChatPreview';
 
 /**
@@ -61,25 +62,33 @@ function mount(over: { model?: boolean; startMode?: boolean } = {}) {
   act(() => {
     root.render(
       <AuthorityProvider send={(m) => sent.push(m)} handlerRef={handlerRef}>
-        <NewChatPreview
-          projectId={5}
-          projectName="ledger-agent"
-          {...(over.model === false
-            ? {}
-            : {
-                model: {
-                  entries: [],
-                  value: null,
-                  onChange: () => {},
-                  onRefresh: () => {},
-                  refreshing: false,
-                  capturedAt: null,
-                },
-              })}
-          {...(over.startMode === false
-            ? {}
-            : { startMode: { value: null, trusted: false, onChange: () => {} } })}
-        />
+        {/* `Cebab-ormv`: AuthorityPanel renders the live MCP section, which reads
+          this provider. Wrapped here because production wraps it — App.tsx
+          mounts McpControlProvider around the whole tree — rather than to
+          silence a throw. The hook is deliberately strict: a panel that
+          rendered a dead MCP section when the provider was missing would hide
+          a wiring mistake instead of reporting it. */}
+        <McpControlProvider send={() => {}}>
+          <NewChatPreview
+            projectId={5}
+            projectName="ledger-agent"
+            {...(over.model === false
+              ? {}
+              : {
+                  model: {
+                    entries: [],
+                    value: null,
+                    onChange: () => {},
+                    onRefresh: () => {},
+                    refreshing: false,
+                    capturedAt: null,
+                  },
+                })}
+            {...(over.startMode === false
+              ? {}
+              : { startMode: { value: null, trusted: false, onChange: () => {} } })}
+          />
+        </McpControlProvider>
       </AuthorityProvider>,
     );
   });

@@ -215,6 +215,44 @@ which reads exactly what the spawn will load and records what was measured.
 For a single-session override there's also an inline pill above the chat. It
 flips `permissionMode` only — `settingSources` is fixed when the run starts.
 
+## MCP servers: what is actually running, and fixing one that isn't
+
+A project's authority panel has two MCP sections, and the difference between
+them is the point. **MCP servers** lists what the project's files _declare_,
+from a file scan, with each one's trust state. **Live MCP servers** asks a real
+session what it _observes_ — status, scope, and the tools each server actually
+contributed.
+
+They can disagree completely, and for some setups they always will. If your MCP
+servers are claude.ai connectors, nothing is declared on disk at all: the
+declared list is empty while six servers are live in every session.
+
+Press **Read live** and each server reports one of `connected`, `pending`,
+`failed`, `needs-auth` or `disabled` — printed verbatim, never translated into
+Cebab's own vocabulary. Each row then offers only the action that can actually
+work for that state:
+
+| State               | What you get     | Why                                                                             |
+| ------------------- | ---------------- | ------------------------------------------------------------------------------- |
+| `failed`, `pending` | **Reconnect**    | retries the connection                                                          |
+| `needs-auth`        | **Authenticate** | opens the provider's authorisation page; press Read live again when you're back |
+| `connected`         | **Sign out**     | so you can re-authorise as somebody else                                        |
+| `disabled`          | **Enable**       |                                                                                 |
+
+**Reconnect is deliberately absent on `needs-auth`.** Measured: the CLI refuses
+it there with `Server status: needs-auth`, so a Reconnect button on that row
+would be a button that cannot work. This is the difference the panel exists to
+make — a server that is `✔ Connected` in your terminal can sit in `needs-auth`
+inside Cebab, contributing nothing, and until this existed there was no way to
+see that or do anything about it.
+
+Two honest limits. A server that wants an OAuth **callback** delivered back to
+the session that started the flow is refused rather than half-supported —
+authorise that one from a terminal with `/mcp`. And reading costs a short-lived
+`claude` process: no model turn (measured), but it does run the project's
+`SessionStart` hooks exactly as a real turn would, which is why Cebab asks
+rather than polls.
+
 ## Reading a session
 
 A turn's tool calls and their output are the agent's working-out, and by default
