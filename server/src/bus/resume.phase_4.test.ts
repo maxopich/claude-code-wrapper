@@ -99,6 +99,9 @@ describe('[BE-11 / D3] attemptResumeMultiAgent emits session_superseded for orph
       onEnded: vi.fn(),
       hopBudget: 1000,
       maxTurns: 50,
+      // Test stand-in: the no-op required gate. Never appears in production —
+      // the three real seams pass `refuseUnapprovedForResume`/`gateProjectsForSpawn`.
+      gateParticipants: async () => new Map<number, readonly string[]>(),
       sendServerMsg: (m) => sent.push(m),
     });
 
@@ -146,6 +149,9 @@ describe('[BE-11 / D3] attemptResumeMultiAgent emits session_superseded for orph
       onEnded: vi.fn(),
       hopBudget: 1000,
       maxTurns: 50,
+      // Test stand-in: the no-op required gate. Never appears in production —
+      // the three real seams pass `refuseUnapprovedForResume`/`gateProjectsForSpawn`.
+      gateParticipants: async () => new Map<number, readonly string[]>(),
       sendServerMsg: (m) => sent.push(m),
     });
 
@@ -182,6 +188,9 @@ describe('[BE-11 / D3] attemptResumeMultiAgent emits session_superseded for orph
       onEnded: vi.fn(),
       hopBudget: 1000,
       maxTurns: 50,
+      // Test stand-in: the no-op required gate. Never appears in production —
+      // the three real seams pass `refuseUnapprovedForResume`/`gateProjectsForSpawn`.
+      gateParticipants: async () => new Map<number, readonly string[]>(),
       sendServerMsg: (m) => sent.push(m),
     });
 
@@ -247,6 +256,9 @@ describe('[B02] the supersede sweep does not crash-mark a still-live session [se
       onEnded: vi.fn(),
       hopBudget: 1000,
       maxTurns: 50,
+      // Test stand-in: the no-op required gate. Never appears in production —
+      // the three real seams pass `refuseUnapprovedForResume`/`gateProjectsForSpawn`.
+      gateParticipants: async () => new Map<number, readonly string[]>(),
       sendServerMsg: vi.fn(),
     });
 
@@ -267,6 +279,9 @@ describe('[B02] the supersede sweep does not crash-mark a still-live session [se
       onEnded: vi.fn(),
       hopBudget: 1000,
       maxTurns: 50,
+      // Test stand-in: the no-op required gate. Never appears in production —
+      // the three real seams pass `refuseUnapprovedForResume`/`gateProjectsForSpawn`.
+      gateParticipants: async () => new Map<number, readonly string[]>(),
       sendServerMsg: (m) => sent.push(m),
     });
 
@@ -292,6 +307,8 @@ describe('[B02] the supersede sweep does not crash-mark a still-live session [se
         onEnded: vi.fn(),
         hopBudget: 1000,
         maxTurns: 50,
+        // Test stand-in: the no-op required gate (never a production value).
+        gateParticipants: async () => new Map<number, readonly string[]>(),
         sendServerMsg: (m) => sent.push(m),
       }),
     ).resolves.not.toThrow();
@@ -315,6 +332,9 @@ describe('[BE-11 / D2 precursor] attemptResumeMultiAgent emits chain_not_reconst
       onEnded: vi.fn(),
       hopBudget: 1000,
       maxTurns: 50,
+      // Test stand-in: the no-op required gate. Never appears in production —
+      // the three real seams pass `refuseUnapprovedForResume`/`gateProjectsForSpawn`.
+      gateParticipants: async () => new Map<number, readonly string[]>(),
       onResumeFailed,
       sendServerMsg: (m) => {
         sent.push(m);
@@ -363,6 +383,9 @@ describe('[BE-11 / D2 precursor] attemptResumeMultiAgent emits chain_not_reconst
       onEnded: vi.fn(),
       hopBudget: 1000,
       maxTurns: 50,
+      // Test stand-in: the no-op required gate. Never appears in production —
+      // the three real seams pass `refuseUnapprovedForResume`/`gateProjectsForSpawn`.
+      gateParticipants: async () => new Map<number, readonly string[]>(),
       sendServerMsg: (m) => sent.push(m),
     });
 

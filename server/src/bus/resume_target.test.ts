@@ -91,6 +91,8 @@ const CALLBACKS = {
   onEnded: vi.fn(),
   hopBudget: 1000,
   maxTurns: 50,
+  // Test stand-in: the no-op required gate (never a production value).
+  gateParticipants: async () => new Map<number, readonly string[]>(),
 };
 
 /** Register a live session whose `rebind` behaves however the case needs. */

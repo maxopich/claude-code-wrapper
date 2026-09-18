@@ -80,7 +80,13 @@ function seedReconstructable(opts?: { mode?: 'orchestrator' | 'chain' }): {
   return { sessionFolder };
 }
 
-const cbs = () => ({ onEvent: vi.fn(), onEnded: vi.fn(), hopBudget: 1000, maxTurns: 50 });
+const cbs = () => ({
+  onEvent: vi.fn(),
+  onEnded: vi.fn(),
+  hopBudget: 1000,
+  maxTurns: 50,
+  mcpDenials: new Map<number, readonly string[]>(),
+});
 
 beforeEach(() => {
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-reconstruct-'));
@@ -381,6 +387,8 @@ describe('restart simulation via attemptResumeMultiAgent', () => {
       onResumeFailed,
       hopBudget: 1000,
       maxTurns: 50,
+      // Test stand-in: the no-op required gate (never a production value).
+      gateParticipants: async () => new Map<number, readonly string[]>(),
     });
 
     expect(resumed).not.toBeNull();
@@ -409,6 +417,8 @@ describe('restart simulation via attemptResumeMultiAgent', () => {
       onResumeFailed,
       hopBudget: 1000,
       maxTurns: 50,
+      // Test stand-in: the no-op required gate (never a production value).
+      gateParticipants: async () => new Map<number, readonly string[]>(),
     });
 
     expect(resumed).not.toBeNull();
@@ -487,7 +497,7 @@ describe('reconstruct re-gates a resumed hop against a standing MCP denial [secu
       hopBudget: 1000,
       maxTurns: 50,
       runnerFactory: captureFactory(captured),
-      ...(mcpDenials ? { mcpDenials } : {}),
+      mcpDenials: mcpDenials ?? new Map<number, readonly string[]>(),
     };
     const ok =
       opts.mode === 'chain'
@@ -540,6 +550,7 @@ describe('Cluster A Phase 6: session_reconstructed emit on R-B success', () => {
       onEnded: vi.fn(),
       hopBudget: 1000,
       maxTurns: 50,
+      mcpDenials: new Map<number, readonly string[]>(),
       sendServerMsg,
     });
 
@@ -585,6 +596,7 @@ describe('Cluster A Phase 6: session_reconstructed emit on R-B success', () => {
         onEnded: vi.fn(),
         hopBudget: 1000,
         maxTurns: 50,
+        mcpDenials: new Map<number, readonly string[]>(),
       }),
     ).not.toThrow();
     // Banner still landed in scrollback as the fallback recovery signal.

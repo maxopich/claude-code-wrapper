@@ -21,10 +21,16 @@ import { stripComments } from '../test_support/strip_comments.js';
  * function has its own `[security]` cases. The WIRING between them has
  * neither. Measured on this branch: replacing the sweep's
  * `gateParticipants` with `() => Promise.resolve(new Map())` left every test
- * under `bus/` and `ws/` green (1477 passing). `gateParticipants` is an
- * OPTIONAL field on `ResumeCallbacks`, so the compiler says nothing either;
- * making it required is `Cebab-mccp`, and until that lands this scan is what
- * stands in for it.
+ * under `bus/` and `ws/` green (1477 passing). `gateParticipants` is now a
+ * REQUIRED field on `ResumeCallbacks` (`Cebab-mccp`), so the compiler enforces
+ * that the field is PRESENT; this scan enforces what it cannot — that each seam
+ * names the gate beside its own `...resumeCallbacks(` spread. The two are not
+ * redundant: a future author could satisfy the required field by folding a
+ * default into `resumeCallbacks(conn)` far from a seam, and the compiler would
+ * stay silent at all three while this scan reddens. What neither can see is
+ * whether the gate GATES — an `async () => new Map()` no-op passes both (this
+ * file's own cases at the "reports an ungated seam" describe say as much), so
+ * that literal must never appear at a production seam in `server.ts`.
  *
  * The rule is deliberately narrow: a site that builds resume callbacks must
  * also name the gate. It asserts nothing about WHICH variant — the prompting
