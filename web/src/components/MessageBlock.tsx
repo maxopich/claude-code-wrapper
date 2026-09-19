@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useRef, useState } from 'react';
 import type { ContentBlock } from '@cebab/shared/protocol';
 import type { MessageView } from '../store';
 import { rendersAnything } from '../quietChat';
@@ -10,7 +10,7 @@ import { badgeTooltip, PermissionActions, renderPermissionBody } from './Permiss
 import { MaxTurnsResultCard } from './MaxTurnsResultCard';
 import { AskUserQuestionAnswered, AskUserQuestionCard } from './AskUserQuestionCard';
 
-export function MessageBlock(props: {
+function MessageBlockImpl(props: {
   message: MessageView;
   onPermissionDecide?: (requestId: string, decision: 'allow' | 'deny') => void;
   /**
@@ -273,6 +273,20 @@ export function MessageBlock(props: {
 
   return null;
 }
+
+/**
+ * Cebab-0u8x: memoised so a stream_delta (which produces a new session object
+ * but preserves every existing message's identity) does not re-render and
+ * re-parse the markdown of every message already on screen. The default shallow
+ * compare is correct: every reducer path that changes a message rebuilds that
+ * message object while leaving the untouched ones identical (`putSession` at
+ * store.ts:1364, `permission_decided` at store.ts:3505, `drainPendingPermission
+ * Cards` at store.ts:1480, `ask_user_answered`/`ask_user_resolved` at
+ * store.ts:2264 and 3559), so a custom comparator would only risk missing one.
+ * ChatView stabilises the callback props so this bailout actually fires.
+ */
+export const MessageBlock = memo(MessageBlockImpl);
+MessageBlock.displayName = 'MessageBlock';
 
 /**
  * Cebab-003: the tool-output card.
