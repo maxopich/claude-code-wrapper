@@ -122,6 +122,7 @@ import {
   buildSingleAgentSessionLogChunk,
   multiAgentEventToLogRow,
   multiAgentMutationToLogRow,
+  parseLogCursor,
 } from './session_log.js';
 import { pendingRetryToDescriptor } from '../bus/pending_retry.js';
 import { InstallError, installBusForProject, uninstallBusForProject } from '../bus/install.js';
@@ -6947,6 +6948,11 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       }
       const offset = Number.isFinite(msg.offset) ? Math.max(0, Math.floor(msg.offset)) : 0;
       const limit = Number.isFinite(msg.limit) ? Math.max(1, Math.floor(msg.limit)) : 200;
+      // Cebab-6fax.44.2: keyset continuation. Present for "load more"; when it
+      // is, it — not `offset` — locates the page, so a row that vanished before
+      // the cursor cannot shift it. `offset` is still echoed back below as the
+      // client's page-sequencing token.
+      const cursor = parseLogCursor(msg.cursor);
 
       const reveal = resolveRevealAudit({
         requested: msg.revealSensitive === true,
@@ -6962,6 +6968,7 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
         offset,
         limit,
         revealSensitive: reveal,
+        cursor,
       });
       send(conn.ws, {
         type: 'session_log_chunk',

@@ -24,7 +24,12 @@
  * Pure projection function over DB state: same DB → same output.
  */
 
-import { type LogRow, type MultiAgentEventKind, redactSensitive } from '@cebab/shared';
+import {
+  type LogCursor,
+  type LogRow,
+  type MultiAgentEventKind,
+  redactSensitive,
+} from '@cebab/shared';
 import {
   getMultiAgentEventsByIds,
   getMultiAgentMutationsByIds,
@@ -57,6 +62,14 @@ export type BuildLogRowsOpts = {
   offset: number;
   limit: number;
   revealSensitive: boolean;
+  /**
+   * Cebab-6fax.44.2: keyset continuation cursor. When present, the page begins
+   * at the first key that sorts strictly after this position in the comparator
+   * order, and `offset` is ignored for locating rows — so a row that vanished
+   * since the client's previous page cannot shift the next page. When absent,
+   * the page slices from `offset` (the first-page / builder-test path).
+   */
+  cursor?: LogCursor;
 };
 
 /**
@@ -68,7 +81,7 @@ export type BuildLogRowsOpts = {
  * the same millisecond don't flip places between page loads.
  */
 export function buildSessionLogChunk(opts: BuildLogRowsOpts): SessionLogChunk {
-  const { sessionId, offset, limit, revealSensitive } = opts;
+  const { sessionId, offset, limit, revealSensitive, cursor } = opts;
 
   // Register S04. Read the SORT KEY for the whole stream, order and slice
   // that, and only then fetch and convert the page's own rows. Converting a
@@ -102,12 +115,10 @@ export function buildSessionLogChunk(opts: BuildLogRowsOpts): SessionLogChunk {
   keys.sort(compareSortKeys);
 
   const total = keys.length;
-  const clampedOffset = Math.max(0, Math.min(offset, total));
-  const clampedLimit = Math.max(0, limit);
   // The byte cap can stop the page short, so fetch at most `limit` rows and
   // let the cap trim from there. Fetching the whole tail "just in case" would
   // reintroduce exactly the cost this change removes.
-  const pageKeys = keys.slice(clampedOffset, clampedOffset + clampedLimit);
+  const { startIdx, pageKeys } = pageKeysFrom(keys, cursor, offset, limit);
 
   const eventById = new Map(
     getMultiAgentEventsByIds(pageKeys.filter((k) => k.stream === 'event').map((k) => k.rowId)).map(
@@ -142,8 +153,59 @@ export function buildSessionLogChunk(opts: BuildLogRowsOpts): SessionLogChunk {
     bytes += rowBytes;
   }
 
-  const hasMore = clampedOffset + sliced.length < total;
+  const hasMore = startIdx + sliced.length < total;
   return { rows: sliced, total, hasMore, revealedSensitive: revealSensitive };
+}
+
+/**
+ * Cebab-6fax.44.2: turn the sorted key list into the page to fetch, keyset-
+ * first. With a `cursor`, resume at the first key that sorts strictly after
+ * that position (via the SAME `compareSortKeys` the list was ordered by), so a
+ * row that vanished before the cursor since the client's last page is simply
+ * absent and cannot shift the page — no skip, no duplicate. With no cursor,
+ * slice from the clamped `offset` (the first page, and the builder tests that
+ * page by absolute index). `startIdx` is returned so the caller can compute
+ * `hasMore` against where the page actually began.
+ */
+function pageKeysFrom(
+  keys: SortKey[],
+  cursor: LogCursor | undefined,
+  offset: number,
+  limit: number,
+): { startIdx: number; pageKeys: SortKey[] } {
+  const clampedLimit = Math.max(0, limit);
+  let startIdx: number;
+  if (cursor) {
+    const at: SortKey = {
+      ts: cursor.ts,
+      agent: cursor.agent,
+      // `id` is unused by `compareSortKeys`; a placeholder keeps the shape.
+      id: '',
+      stream: cursor.stream,
+      rowId: cursor.rowId,
+    };
+    const i = keys.findIndex((k) => compareSortKeys(k, at) > 0);
+    startIdx = i === -1 ? keys.length : i;
+  } else {
+    startIdx = Math.max(0, Math.min(offset, keys.length));
+  }
+  return { startIdx, pageKeys: keys.slice(startIdx, startIdx + clampedLimit) };
+}
+
+/**
+ * Cebab-6fax.44.2: validate an untrusted wire value into a `LogCursor`, or
+ * `undefined` when it is absent or malformed. A malformed cursor degrades to
+ * the first-page path rather than throwing — the operator re-sees page one, no
+ * bytes leak, and there is nothing to crash on. Exported for the WS handler.
+ */
+export function parseLogCursor(value: unknown): LogCursor | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const o = value as Record<string, unknown>;
+  if (typeof o.ts !== 'number' || !Number.isFinite(o.ts)) return undefined;
+  if (typeof o.agent !== 'string') return undefined;
+  if (o.stream !== 'event' && o.stream !== 'mutation') return undefined;
+  if (typeof o.rowId !== 'number' || !Number.isFinite(o.rowId)) return undefined;
+  return { ts: o.ts, agent: o.agent, stream: o.stream, rowId: o.rowId };
 }
 
 /**
@@ -349,7 +411,7 @@ export type SingleAgentLogRowKind = Extract<LogRow['kind'], 'tool' | 'llm' | 'er
  * so two pages of the same chunk don't flip ordering between requests.
  */
 export function buildSingleAgentSessionLogChunk(opts: BuildLogRowsOpts): SessionLogChunk {
-  const { sessionId, offset, limit, revealSensitive } = opts;
+  const { sessionId, offset, limit, revealSensitive, cursor } = opts;
 
   // Register S04, the half the finding did not name. This is the SAME defect
   // as `buildSessionLogChunk` over the `events` table — and the bigger one in
@@ -369,9 +431,7 @@ export function buildSingleAgentSessionLogChunk(opts: BuildLogRowsOpts): Session
   keys.sort(compareSortKeys);
 
   const total = keys.length;
-  const clampedOffset = Math.max(0, Math.min(offset, total));
-  const clampedLimit = Math.max(0, limit);
-  const pageKeys = keys.slice(clampedOffset, clampedOffset + clampedLimit);
+  const { startIdx, pageKeys } = pageKeysFrom(keys, cursor, offset, limit);
   const byId = new Map(getEventsByIds(pageKeys.map((k) => k.rowId)).map((r) => [r.id, r]));
 
   const sliced: LogRow[] = [];
@@ -386,7 +446,7 @@ export function buildSingleAgentSessionLogChunk(opts: BuildLogRowsOpts): Session
     bytes += rowBytes;
   }
 
-  const hasMore = clampedOffset + sliced.length < total;
+  const hasMore = startIdx + sliced.length < total;
   return { rows: sliced, total, hasMore, revealedSensitive: revealSensitive };
 }
 

@@ -1456,8 +1456,17 @@ export type ClientMsg =
        *     budget reuse the multi-agent path verbatim. No schema migration.
        *
        * Pagination contract:
-       *   - `offset`: skip the first N rows in the merged stream (after
-       *     filtering, before chunk-cap slicing).
+       *   - `cursor` (Cebab-6fax.44.2): when present, resume at the first row
+       *     that sorts strictly after this position in the merged order — the
+       *     keyset continuation the client uses for "load more". A vanished row
+       *     before the cursor cannot shift the next page. Absent means "from the
+       *     start" (the first page, a refresh, or a reveal-flip re-fetch).
+       *   - `offset`: the position TOKEN the client sequences its own pages by
+       *     (0 for the first page, `rows.length` for a continuation) and the
+       *     server echoes back verbatim on `session_log_chunk`. It is NOT used to
+       *     locate rows whenever a `cursor` is supplied — that is the shape the
+       *     cursor replaced. With no cursor it still slices from that offset (the
+       *     first-page / builder-test path).
        *   - `limit`: hard cap on rows to return in this chunk. The server may
        *     return fewer when a ~2 MB byte budget trips first.
        *   - `revealSensitive`: when true, the dangerous-field redaction is
@@ -1477,6 +1486,12 @@ export type ClientMsg =
        */
       scope?: SessionLogScope;
       offset: number;
+      /**
+       * Cebab-6fax.44.2: keyset continuation. Absent on the first page / a
+       * refresh / a reveal-flip; present for "load more", naming the last row
+       * the client holds. See `LogCursor`.
+       */
+      cursor?: LogCursor;
       limit: number;
       revealSensitive?: boolean;
     }
@@ -4993,6 +5008,32 @@ export type LogRowKind = 'tool' | 'bus' | 'llm' | 'error' | 'artifact';
  * always asking for.
  */
 export type SessionLogScope = 'multi_agent' | 'single';
+
+/**
+ * `Cebab-6fax.44.2`: a keyset cursor for `load_session_log` continuation.
+ *
+ * It names a POSITION IN THE ORDER — the projector's comparator key for the
+ * last row the client already holds — not a row offset. The server resumes at
+ * the first row that sorts strictly after this position, so a row that
+ * VANISHED between the client's previous page and this one (a session delete,
+ * the 7-day purge, a bulk op racing a live reader) simply is not there and the
+ * next page still begins exactly where the client left off. An offset would
+ * shift by one for every vanished row before the cursor and skip or duplicate a
+ * row; a position cannot.
+ *
+ * The four fields are exactly what the projector's `compareSortKeys` orders on,
+ * built on the tie-break `Cebab-6fax.44`/PR #578 corrected — `(ts, agent,
+ * stream, rowId)`, with `rowId` NUMERIC (not the lexicographic `event:<id>`
+ * display string that used to sort `event:10` before `event:9`). The client
+ * derives all four from the last `LogRow` it received: `ts`/`agent` directly,
+ * and `stream`/`rowId` by splitting the composite `id` (`event:N` / `mutation:N`).
+ */
+export type LogCursor = {
+  ts: number;
+  agent: string;
+  stream: 'event' | 'mutation';
+  rowId: number;
+};
 
 export const LOG_ROW_KINDS: ReadonlySet<LogRowKind> = new Set([
   'tool',

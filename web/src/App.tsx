@@ -5,6 +5,7 @@ import type {
   ManagedFileKind,
   KickMode,
   MultiAgentLifecycle,
+  LogCursor,
   MultiAgentTemplate,
   NotificationAction,
   NotificationEnvelope,
@@ -2537,6 +2538,7 @@ function AppShell({
     limit: number,
     revealSensitive: boolean,
     scope?: SessionLogScope,
+    cursor?: LogCursor,
   ) {
     // Phase H: pure WS round-trip. The matching `session_log_chunk` reply
     // is consumed by the LogsModal via its `subscribeServerMsg` subscriber
@@ -2546,6 +2548,11 @@ function AppShell({
     // callers (multi-agent TopRunBar / participants list mount) omit it;
     // the server defaults to `'multi_agent'` so the existing projection
     // still answers. The single-agent LogsButton mount passes `'single'`.
+    //
+    // Cebab-6fax.44.2: `cursor` is present only on a "load more" continuation
+    // and names the position the client left off at, so a row purged since the
+    // previous page cannot shift this one. `offset` still rides along as the
+    // reducer's page-sequencing token.
     wsRef.current?.send({
       type: 'load_session_log',
       sessionId,
@@ -2553,6 +2560,7 @@ function AppShell({
       limit,
       revealSensitive,
       ...(scope !== undefined ? { scope } : {}),
+      ...(cursor !== undefined ? { cursor } : {}),
     });
   }
   // W10: `useCallback([])`, not a plain `function`. Every consumer of this
