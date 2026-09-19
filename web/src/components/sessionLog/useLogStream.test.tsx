@@ -2,7 +2,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { LogRow, ServerMsg, SessionLogScope } from '@cebab/shared/protocol';
+import type { LogCursor, LogRow, ServerMsg, SessionLogScope } from '@cebab/shared/protocol';
 import { useLogStream, type LogStreamHandle } from './useLogStream';
 
 // Cluster H C3 UI — pins useLogStream's `scope` forwarding contract:
@@ -53,6 +53,7 @@ type LoadCall = {
   limit: number;
   revealSensitive: boolean;
   scope?: SessionLogScope;
+  cursor?: LogCursor;
 };
 
 type Harness = {
@@ -79,8 +80,8 @@ function renderProbe(
       sessionId,
       scope,
       tailSafetyCap,
-      onLoadSessionLog: (sid, offset, limit, revealSensitive, sc) => {
-        loadCalls.push({ sessionId: sid, offset, limit, revealSensitive, scope: sc });
+      onLoadSessionLog: (sid, offset, limit, revealSensitive, sc, cursor) => {
+        loadCalls.push({ sessionId: sid, offset, limit, revealSensitive, scope: sc, cursor });
       },
       subscribeServerMsg: (cb: (msg: ServerMsg) => void) => {
         subscriberCb = cb;
@@ -264,6 +265,41 @@ describe('useLogStream — tail-mode (Cluster H D12 client)', () => {
       row: busRow('event:5'),
     });
     expect(h.handle().rows.map((r) => r.id)).toEqual(['event:1', 'event:2', 'event:3']);
+  });
+
+  test('keyset continuation (Cebab-6fax.44.2): loadMore resumes from the last row position', () => {
+    const h = renderProbe(undefined, 'sess-1');
+    // The first load carries NO cursor (it starts from the top). Asserted here
+    // rather than as a standalone case: on its own "first load has no cursor"
+    // passes with the fix reverted (the client never sent one before), so the
+    // revert-check would rightly call it vacuous. It is anti-vacuity for the
+    // loadMore assertion below, which does depend on the change.
+    expect(h.loadCalls[0]?.cursor).toBeUndefined();
+
+    // A first page arrives with more rows to come.
+    h.emit({
+      type: 'session_log_chunk',
+      sessionId: 'sess-1',
+      offset: 0,
+      rows: [busRow('event:1', 1700000000001), busRow('mutation:9', 1700000000002)],
+      total: 5,
+      hasMore: true,
+      revealedSensitive: false,
+    });
+    act(() => {
+      h.handle().loadMore();
+    });
+    const last = h.loadCalls[h.loadCalls.length - 1]!;
+    // The cursor names the LAST held row's ordering position — ts, agent, and
+    // the stream + numeric rowId split from its composite id — so a row purged
+    // before it cannot shift the next page. A bare offset could not, and with
+    // the fix reverted loadMore sends no cursor at all, so this reddens.
+    expect(last.cursor).toEqual({
+      ts: 1700000000002,
+      agent: 'worker',
+      stream: 'mutation',
+      rowId: 9,
+    });
   });
 
   test('refresh() re-arms the tail: counter + tripped flag reset, reload fires', () => {

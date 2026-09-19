@@ -29,7 +29,7 @@
  * and re-arms the tail).
  */
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { LogRow, ServerMsg, SessionLogScope } from '@cebab/shared/protocol';
+import type { LogCursor, LogRow, ServerMsg, SessionLogScope } from '@cebab/shared/protocol';
 
 const DEFAULT_PAGE = 500;
 
@@ -54,7 +54,29 @@ type LoadSessionLog = (
   limit: number,
   revealSensitive: boolean,
   scope?: SessionLogScope,
+  /**
+   * Cebab-6fax.44.2: keyset continuation cursor. Absent on the first page /
+   * refresh / reveal-flip; on `loadMore` it names the last row the client
+   * holds, so the server resumes at the position after it rather than at a
+   * numeric `offset` that a vanished row would have shifted. `offset` is still
+   * sent alongside as the page-sequencing token the reducer keys append on.
+   */
+  cursor?: LogCursor,
 ) => void;
+
+/**
+ * Cebab-6fax.44.2: derive the keyset cursor from the last row the client
+ * holds. `ts`/`agent` come straight off the row; `stream`/`rowId` are split
+ * from the composite id (`event:N` / `mutation:N`) the projector minted. This
+ * is the inverse of how `buildSessionLogChunk` builds a row's `id`, and it must
+ * stay in step with it.
+ */
+function cursorFromRow(row: LogRow): LogCursor {
+  const at = row.id.lastIndexOf(':');
+  const stream = row.id.slice(0, at) === 'mutation' ? 'mutation' : 'event';
+  const rowId = Number(row.id.slice(at + 1));
+  return { ts: row.ts, agent: row.agent, stream, rowId };
+}
 
 export type LogStreamState = {
   rows: LogRow[];
@@ -248,9 +270,17 @@ export function useLogStream(opts: {
   }, [sessionId, reveal, expectedTailScope, tailSafetyCap, subscribeServerMsg]);
 
   function loadMore() {
-    if (stateRef.current.loading || !stateRef.current.hasMore) return;
+    const cur = stateRef.current;
+    if (cur.loading || !cur.hasMore) return;
+    // Cebab-6fax.44.2: continue from the POSITION of the last row we hold, not
+    // from a row offset. `offset: rows.length` still rides along as the
+    // page-sequencing token the reducer appends on, but the server locates the
+    // page from the cursor — so a row purged before it cannot skip or duplicate
+    // the next page. If we somehow hold no rows, fall back to a first-page load.
+    const last = cur.rows[cur.rows.length - 1];
+    const cursor = last ? cursorFromRow(last) : undefined;
     setState((prev) => ({ ...prev, loading: true }));
-    onLoadRef.current(sessionId, stateRef.current.rows.length, pageSize, reveal, scope);
+    onLoadRef.current(sessionId, cur.rows.length, pageSize, reveal, scope, cursor);
   }
 
   function refresh() {
