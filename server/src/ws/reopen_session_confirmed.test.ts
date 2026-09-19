@@ -135,6 +135,26 @@ afterEach(async () => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
+/** A fake live session whose `stop` mimics a real router teardown: it
+ *  unregisters itself from the process registry (as chain/orchestrator
+ *  `teardown` does via `unregisterLiveSession`). Hoisted to module scope
+ *  (Cebab-r833) so both the Cebab-1tty and Cebab-r833 describes can reuse it. */
+function registerFakeLive(sessionId: string): { stop: ReturnType<typeof vi.fn> } {
+  const stop = vi.fn(async (reason: string) => {
+    void reason;
+    unregisterLiveSession(sessionId);
+  });
+  const fake = {
+    sessionId,
+    mode: 'orchestrator' as const,
+    handle: { sessionId, stop },
+    rebind: vi.fn(() => 1),
+    sendServerMsg: vi.fn(),
+  };
+  registerLiveSession(fake as unknown as LiveBusSession);
+  return { stop };
+}
+
 describe('executeReopenSessionConfirmed — happy paths', () => {
   test('clean workspace + ack → reactivates without typed gate; adopts + recovery_log written', async () => {
     const proj = upsertProject('P', '/projects/p');
@@ -541,25 +561,6 @@ describe('executeReopenSessionConfirmed — reactivation failures', () => {
 // run stayed live in-process forever while its row read `crashed`, which is
 // what refused a managed-agent delete, no-op'd stop, and wedged the next start.
 describe('executeReopenSessionConfirmed — a displaced LIVE incumbent is torn down (Cebab-1tty)', () => {
-  /** A fake live session whose `stop` mimics a real router teardown: it
-   *  unregisters itself from the process registry (as chain/orchestrator
-   *  `teardown` does via `unregisterLiveSession`). */
-  function registerFakeLive(sessionId: string): { stop: ReturnType<typeof vi.fn> } {
-    const stop = vi.fn(async (reason: string) => {
-      void reason;
-      unregisterLiveSession(sessionId);
-    });
-    const fake = {
-      sessionId,
-      mode: 'orchestrator' as const,
-      handle: { sessionId, stop },
-      rebind: vi.fn(() => 1),
-      sendServerMsg: vi.fn(),
-    };
-    registerLiveSession(fake as unknown as LiveBusSession);
-    return { stop };
-  }
-
   test('reopening B while A is live leaves A absent from the live registry', async () => {
     const proj = upsertProject('P', '/projects/p');
     createMultiAgentSession('incumbent', 'orchestrator', '100'); // stays running
@@ -774,5 +775,131 @@ describe('executeReopenSessionConfirmed — a failed reopen keeps the incumbent 
     expect(stubResumeOk).not.toHaveBeenCalled();
     expect(detach).not.toHaveBeenCalled();
     expect(getMultiAgentSession('incumbent')?.status).toBe('running');
+  });
+});
+
+// Cebab-r833: the displacement is resolved PROCESS-WIDE, not from
+// `currentActiveSessionId` (which is only `conn.multiAgent?.sessionId`). A run
+// live on ANOTHER connection — the reopening window connected before it started
+// — used to be neither stopped nor unregistered, so the reopen brought the
+// target live BESIDE it: two live sessions, and every subsequent start blocked.
+describe('executeReopenSessionConfirmed — a cross-connection live run is displaced (Cebab-r833)', () => {
+  test('7a: currentActiveSessionId null — a cross-connection live run is torn down; the reopened target is spared', async () => {
+    // The reverse-check case. `currentActiveSessionId: null` is the input every
+    // existing displacement case omits, and is exactly what the old
+    // `if (currentActiveSessionId && …)` gate skipped on. A fixture with a
+    // non-null incumbent would pass on unfixed code and prove nothing. Reverting
+    // item 2 skips the whole block, so the incumbent's `stop` is never called and
+    // this reddens.
+    //
+    // This case also CARRIES the guard-rail (was a separate 7c): the reopened
+    // target, which step 4 put in the live registry so it too appears in
+    // `listLiveSessionIds()`, must be EXCLUDED from the displaced set. On its own
+    // "target not stopped" does NOT redden on revert — the old code never
+    // displaced the target either — so a standalone case would be a
+    // pass-on-revert test the revert-check rightly flags as vacuous (cf. the
+    // Cebab-1tty block above, which documents its non-reddening case in a comment
+    // for the same reason). Folded here it rides inside a case that does redden,
+    // while still failing against a "displace everything live" regression.
+    const proj = upsertProject('P', '/projects/p');
+    // A real `running` row for the incumbent (no endMultiAgentSession), so the
+    // crashed-row assertion is meaningful.
+    createMultiAgentSession('incumbent', 'orchestrator', '100');
+    createMultiAgentSession('target', 'orchestrator', '101');
+    endMultiAgentSession('target', 'crashed');
+    addParticipant('target', proj.id, 'worker', null);
+
+    // 'incumbent' is live on a DIFFERENT connection than the one reopening
+    // (reused id so the module afterEach unregisters it), so the reopening
+    // conn's `conn.multiAgent` is null. 'target' is live because step 4 would
+    // have re-registered it; we register it by hand since the stubbed
+    // `resumeTarget` skips `resumeMultiAgentTarget`.
+    const { stop } = registerFakeLive('incumbent');
+    const { stop: targetStop } = registerFakeLive('target');
+    expect(hasLiveSession('incumbent')).toBe(true);
+    expect(hasLiveSession('target')).toBe(true);
+
+    const detach = vi.fn();
+
+    await executeReopenSessionConfirmed({
+      sessionId: 'target',
+      acknowledgedWorkspaceDiff: true,
+      typedConfirmation: undefined,
+      currentActiveSessionId: null, // the reopening connection owns nothing
+      detachCurrentActive: detach,
+      adoptResumed: vi.fn(),
+      resumeCallbacks: dummyResumeCallbacks,
+      send: captureSend,
+      computeDiff: async () => EMPTY_DIFF,
+      resumeTarget: stubResumeOk,
+    });
+
+    // The other connection's live run was really torn down…
+    expect(stop).toHaveBeenCalledWith('crashed');
+    expect(hasLiveSession('incumbent')).toBe(false);
+    expect(getMultiAgentSession('incumbent')?.status).toBe('crashed');
+    // …and its supersede notice was sent…
+    const superseded = sent.find(
+      (m) => m.type === 'session_superseded' && m.sessionId === 'incumbent',
+    );
+    expect(superseded).toBeDefined();
+    // …while the reopening conn, which owns nothing, is never detached…
+    expect(detach).not.toHaveBeenCalled();
+    // …and the target the operator just reopened is spared, though it is live
+    // (guard-rail against a "displace everything live" regression).
+    expect(targetStop).not.toHaveBeenCalled();
+    expect(hasLiveSession('target')).toBe(true);
+
+    // afterEach only clears 'incumbent'; clean up 'target' too so the
+    // process-global registry does not leak into a later test.
+    unregisterLiveSession('target');
+  });
+
+  test('7b: the displaced incumbent is stopped BEFORE the conn sink is detached', async () => {
+    // Ordering pin for the emit-`multi_agent_ended` decision: `stop` must run
+    // while the router still holds the real sink, so its teardown broadcasts the
+    // end. Detaching first swaps the sink to NOOP_SINK and the broadcast is lost.
+    // Reverting to detach-first makes `detachedAtStop` true and reddens this.
+    const proj = upsertProject('P', '/projects/p');
+    createMultiAgentSession('incumbent', 'orchestrator', '100'); // stays running
+    createMultiAgentSession('target', 'orchestrator', '101');
+    endMultiAgentSession('target', 'crashed');
+    addParticipant('target', proj.id, 'worker', null);
+
+    let detached = false;
+    let detachedAtStop: boolean | null = null;
+    const detach = vi.fn(() => {
+      detached = true;
+    });
+    const stop = vi.fn(async (reason: string) => {
+      void reason;
+      detachedAtStop = detached; // observe the sink state at stop time
+      unregisterLiveSession('incumbent');
+    });
+    registerLiveSession({
+      sessionId: 'incumbent',
+      mode: 'orchestrator' as const,
+      handle: { sessionId: 'incumbent', stop },
+      rebind: vi.fn(() => 1),
+      sendServerMsg: vi.fn(),
+    } as unknown as LiveBusSession);
+
+    await executeReopenSessionConfirmed({
+      sessionId: 'target',
+      acknowledgedWorkspaceDiff: true,
+      typedConfirmation: undefined,
+      currentActiveSessionId: 'incumbent', // same connection owns the incumbent
+      detachCurrentActive: detach,
+      adoptResumed: vi.fn(),
+      resumeCallbacks: dummyResumeCallbacks,
+      send: captureSend,
+      computeDiff: async () => EMPTY_DIFF,
+      resumeTarget: stubResumeOk,
+    });
+
+    expect(stop).toHaveBeenCalledWith('crashed');
+    expect(detach).toHaveBeenCalledTimes(1);
+    // The whole point: stop ran while the sink was still attached.
+    expect(detachedAtStop).toBe(false);
   });
 });
