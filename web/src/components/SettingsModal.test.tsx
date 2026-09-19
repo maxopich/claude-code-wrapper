@@ -307,6 +307,23 @@ describe('SettingsModal — Storage section', () => {
     expect(text).toContain('7d'); // 604,800,000 ms cutoff
   });
 
+  // Cebab-6fax.44.1: the 7-day purge runs unattended, so its point-of-deletion
+  // note never reaches the operator. The Storage section — the copy that
+  // describes the purge — must say plainly what neither delete nor cleanup
+  // removes: the CLI's own unredacted transcript under ~/.claude.
+  function cliTranscriptNoteText(): string {
+    return document.querySelector('[data-testid="storage-cli-transcript-note"]')?.textContent ?? '';
+  }
+
+  test('names the CLI transcript neither delete nor cleanup removes', () => {
+    renderWithStorage();
+    feed();
+    const text = cliTranscriptNoteText();
+    expect(text).toContain('~/.claude/projects/');
+    expect(text).toContain('.jsonl');
+    expect(text.toLowerCase()).toContain('unredacted');
+  });
+
   // Cebab-6fax.43.3: the managed-agent tree size, and its truncation flag —
   // an operator reads a plain number as complete, so a capped walk must SAY so
   // rather than show a silently-smaller figure.

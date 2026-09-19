@@ -439,6 +439,14 @@ export function SettingsModal(props: {
                 soft-deleted sessions {Math.round(storage.purgeAfterMs / 86_400_000)}d after you
                 delete them. Sessions you never delete are kept.
               </p>
+              {/* Cebab-6fax.44.1: the purge runs unattended, so the operator
+               *  never sees its point-of-deletion note. Say here, plainly and
+               *  by location, what neither delete nor cleanup touches. */}
+              <p className="hint" data-testid="storage-cli-transcript-note">
+                Neither deleting a session nor this cleanup removes Claude&rsquo;s own transcript at{' '}
+                <code>~/.claude/projects/&lt;encoded-cwd&gt;/&lt;session-id&gt;.jsonl</code>. That
+                copy is unredacted and stays on disk until you remove it yourself.
+              </p>
               <p className="hint" data-testid="storage-auto-reclaim">
                 {storage.autoReclaim.enabled
                   ? `Auto-reclaim: on — sessions idle over ${storage.autoReclaim.idleDays}d are soft-deleted (recoverable for 7 days)${

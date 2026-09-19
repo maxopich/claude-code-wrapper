@@ -295,6 +295,28 @@ describe('ProjectList — Delete typed-confirmation (C5-2)', () => {
     expect(h.onBulkSessionOp).not.toHaveBeenCalled();
   });
 
+  // Cebab-6fax.44.1: deleting a session does NOT remove the CLI's own
+  // transcript under ~/.claude. An operator deleting for privacy would
+  // otherwise believe the conversation is gone. The confirm substate — the
+  // point of deletion — must name that file plainly, by location, and say
+  // Cebab does not remove it.
+  test('the confirm substate names the CLI transcript Cebab does not delete', () => {
+    render({ expanded: true, sessions: [summary('a')] });
+    click(toggleBtn());
+    click(sessionRows()[0]);
+    click(actionButton('Delete'));
+
+    const bar = container.querySelector('.bulk-action-bar.confirming');
+    expect(bar).not.toBeNull();
+    const text = bar?.textContent ?? '';
+    // The location, named — not softened to "some data may remain".
+    expect(text).toContain('~/.claude/projects/');
+    expect(text).toContain('.jsonl');
+    // The claim: Cebab does not delete it, and it is unredacted.
+    expect(text.toLowerCase()).toContain('unredacted');
+    expect(text).toContain('does not delete');
+  });
+
   test('Cancel in the confirm substate returns to the action bar without deleting', () => {
     const h = render({ expanded: true, sessions: [summary('a')] });
     click(toggleBtn());
