@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { StopReasonCode } from '@cebab/shared/protocol';
 import { isPinnedToBottom } from '../scrollAnchor';
 import { groupTurns } from '../quietChat';
@@ -105,6 +105,63 @@ export function ChatView(props: {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [sessionId]);
 
+  /**
+   * Cebab-0u8x: every streamed token produces a new session object, so ChatView
+   * re-renders per token; without this the four callback props below would be
+   * fresh identities on every one of those renders and `memo(MessageBlock)`
+   * would never bail out — a token would re-render (and re-parse the markdown
+   * of) every message already on screen.
+   *
+   * The callbacks come from AppShell, where all four are plain `function`
+   * declarations recreated per render and two of them close over `session`,
+   * whose identity also changes per token. Rather than wrap them in App.tsx
+   * (which has no test file, so a wrong dependency array — a stale
+   * `onPermissionDecide` approving the WRONG tool call — could not be pinned),
+   * we hold the current closures in a ref refreshed on every render and hand
+   * MessageBlock `useCallback(_, [])` wrappers that read `ref.current`. A ref
+   * always holds AppShell's newest closure, so staleness is impossible by
+   * construction and the wrapper identities never change.
+   *
+   * Hooks sit above the sessionless early return (`rules-of-hooks`), so the ref
+   * tracks `props.session?.id`, not the `session` const bound after it.
+   */
+  const handlersRef = useRef({
+    onPermissionDecide: props.onPermissionDecide,
+    onAskUserAnswer: props.onAskUserAnswer,
+    onExtendMaxTurns: props.onExtendMaxTurns,
+    onEndMaxTurnsSession: props.onEndMaxTurnsSession,
+    sessionId: props.session?.id,
+  });
+  // `useLayoutEffect` (no dependency array) so the ref is current before the
+  // operator can see and click the freshly-painted frame.
+  useLayoutEffect(() => {
+    handlersRef.current = {
+      onPermissionDecide: props.onPermissionDecide,
+      onAskUserAnswer: props.onAskUserAnswer,
+      onExtendMaxTurns: props.onExtendMaxTurns,
+      onEndMaxTurnsSession: props.onEndMaxTurnsSession,
+      sessionId: props.session?.id,
+    };
+  });
+  const stableOnPermissionDecide = useCallback(
+    (requestId: string, decision: 'allow' | 'deny') =>
+      handlersRef.current.onPermissionDecide(requestId, decision),
+    [],
+  );
+  const stableOnAskUserAnswer = useCallback(
+    (toolUseId: string, answers: Record<string, string>) =>
+      handlersRef.current.onAskUserAnswer(toolUseId, answers),
+    [],
+  );
+  const stableOnExtendMaxTurns = useCallback((bumpBy: number) => {
+    const { sessionId, onExtendMaxTurns } = handlersRef.current;
+    if (sessionId) onExtendMaxTurns?.(sessionId, bumpBy);
+  }, []);
+  const stableOnEndMaxTurnsSession = useCallback(() => {
+    const { sessionId, onEndMaxTurnsSession } = handlersRef.current;
+    if (sessionId) onEndMaxTurnsSession?.(sessionId);
+  }, []);
+
   if (!props.session) {
     // Cebab-ws0.5: this sentence used to render for BOTH sessionless cases,
     // and it was wrong in the commoner one — a selected project with no
@@ -122,21 +179,21 @@ export function ChatView(props: {
   const lastInterrupt = session.lastInterrupt;
   const pending = pendingToolCall(session);
 
+  // The four callbacks are the stable ref-backed wrappers built above, so
+  // `memo(MessageBlock)`'s shallow compare bails out across a stream_delta. The
+  // ternaries are preserved because the two max-turns props are optional and
+  // other callers rely on `undefined` meaning "no card affordance"; a stable
+  // wrapper inside a preserved ternary is still referentially stable while the
+  // prop stays defined.
   const renderMessage = (m: MessageView) => (
     <MessageBlock
       key={m.id}
       message={m}
-      onPermissionDecide={props.onPermissionDecide}
-      onAskUserAnswer={props.onAskUserAnswer}
+      onPermissionDecide={stableOnPermissionDecide}
+      onAskUserAnswer={stableOnAskUserAnswer}
       extensionsUsed={props.extensionsUsed}
-      onExtendMaxTurns={
-        props.onExtendMaxTurns
-          ? (bumpBy) => props.onExtendMaxTurns?.(session.id, bumpBy)
-          : undefined
-      }
-      onEndMaxTurnsSession={
-        props.onEndMaxTurnsSession ? () => props.onEndMaxTurnsSession?.(session.id) : undefined
-      }
+      onExtendMaxTurns={props.onExtendMaxTurns ? stableOnExtendMaxTurns : undefined}
+      onEndMaxTurnsSession={props.onEndMaxTurnsSession ? stableOnEndMaxTurnsSession : undefined}
     />
   );
 
