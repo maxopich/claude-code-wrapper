@@ -89,9 +89,13 @@ export type ResumeCallbacks = {
    *     "Resume" button, Reopen) supplies the prompting `gateProjectsForSpawn`,
    *     exactly as a fresh start would.
    *
-   * Omit → no gating (legacy callers / unit tests) → byte-identical to before.
+   * REQUIRED (`Cebab-mccp`), for the same reason `maxTurns` above is: absence
+   * has no correct meaning, so it must not be expressible — the compiler is the
+   * gate on every resume seam. A caller that genuinely wants no gating writes it
+   * out loud (`async () => new Map()`), so the choice is visible at the call
+   * site instead of being the silent default that let the next seam go ungated.
    */
-  gateParticipants?: (projectIds: number[]) => Promise<ReadonlyMap<number, readonly string[]>>;
+  gateParticipants: (projectIds: number[]) => Promise<ReadonlyMap<number, readonly string[]>>;
   /** Item #4: pending-retry set/clear callback for a reconstructed router.
    *  Forwarded into `wireOrchestratorSession`; the initial banner restore
    *  travels on `multi_agent_started.pendingRetry` (hydrated from the
@@ -180,14 +184,13 @@ async function reconstructForMode(
 ): Promise<boolean> {
   // [security] `Cebab-faoa`: gate the resumed run's participant MCP servers and
   // apply the refusals to the rebuilt specs. `gateParticipants` decides prompt
-  // (operator resume) vs refuse-unapproved (auto sweep); a caller that omits it
-  // (unit tests) gets the pre-`Cebab-faoa` ungated rebuild. The gate runs BEFORE
-  // the reconstruct so the denials are on the specs the moment they exist — and
-  // an operator-resume gate that the operator declines throws here, before any
-  // read-only re-attach, leaving the row untouched.
-  const mcpDenials = callbacks.gateParticipants
-    ? await callbacks.gateParticipants(resumeParticipantProjectIds(row.id))
-    : undefined;
+  // (operator resume) vs refuse-unapproved (auto sweep); `Cebab-mccp` made it
+  // REQUIRED, so this call is unconditional — a caller that wants no gating
+  // passes an explicit `async () => new Map()` rather than omitting the field.
+  // The gate runs BEFORE the reconstruct so the denials are on the specs the
+  // moment they exist — and an operator-resume gate that the operator declines
+  // throws here, before any read-only re-attach, leaving the row untouched.
+  const mcpDenials = await callbacks.gateParticipants(resumeParticipantProjectIds(row.id));
   const args = {
     onEvent: callbacks.onEvent,
     onEnded: callbacks.onEnded,

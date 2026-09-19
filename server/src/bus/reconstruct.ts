@@ -326,9 +326,12 @@ export function reconstructOrchestratorSession(
      * Continue, `retry_worker`, or a reseeded pause-expiry resume. Before this,
      * reconstruct passed nothing, so a server the operator had denied (or, on
      * the auto-resume sweep, never approved) started on the resumed hop; only
-     * `continue_multi_agent` re-gated, and `retry_worker` bypassed it. Omit when
-     * the gate refused nothing (the common case). */
-    mcpDenials?: ReadonlyMap<number, readonly string[]>;
+     * `continue_multi_agent` re-gated, and `retry_worker` bypassed it. REQUIRED
+     * (`Cebab-mccp`), the reconstruct twin of `ResumeCallbacks.gateParticipants`
+     * being required and of the `maxTurns` precedent above: absence must not be
+     * expressible. Pass an empty map when the gate refused nothing (the common
+     * case). */
+    mcpDenials: ReadonlyMap<number, readonly string[]>;
     /** Injectable for tests, threaded straight into `wireOrchestratorSession`
      *  (which already accepts it for the same reason). Omit in production so the
      *  default mock-aware `pickRunner` is used. */
@@ -677,8 +680,10 @@ export function reconstructChainSession(
     maxTurns: number;
     /** [security] `Cebab-faoa`: the resume gate's per-project MCP refusals,
      *  applied to the rebuilt participant specs via `wireChainSession`'s
-     *  `mcpDenials` param — the chain twin of the orchestrator field above. */
-    mcpDenials?: ReadonlyMap<number, readonly string[]>;
+     *  `mcpDenials` param — the chain twin of the orchestrator field above, and
+     *  REQUIRED (`Cebab-mccp`) for the same reason. Pass an empty map when the
+     *  gate refused nothing. */
+    mcpDenials: ReadonlyMap<number, readonly string[]>;
     /** Injectable for tests, threaded into `wireChainSession`. */
     runnerFactory?: Parameters<typeof wireChainSession>[0]['runnerFactory'];
     onPendingRetry?: BusSink['onPendingRetry'];
