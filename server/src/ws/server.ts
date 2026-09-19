@@ -2187,9 +2187,10 @@ export async function executeReopenSessionConfirmed(args: {
   // Safe to run while the incumbent is still `running`: the guards below key on
   // the TARGET row only, nothing in `server/src` reads "the one running
   // session", and there is no `await` between this returning and the
-  // displacement, so no other WS message can observe the overlap. The conn
-  // hand-off order is unchanged — detach (which nulls `conn.multiAgent`) still
-  // precedes adopt.
+  // displacement, so no other WS message can observe the overlap. Detach still
+  // precedes adopt (Cebab-r833 moved it to AFTER the displacement stop so the
+  // incumbent's teardown can broadcast `multi_agent_ended`; on the success path
+  // `onEnded` nulls `conn.multiAgent` first, so the later detach no-ops).
   const reactivate = args.resumeTarget ?? resumeMultiAgentTarget;
   let result: Awaited<ReturnType<typeof resumeMultiAgentTarget>>;
   try {
@@ -2232,58 +2233,82 @@ export async function executeReopenSessionConfirmed(args: {
     return;
   }
 
-  // ---- Step 5: displace the current active (if any) ----
+  // ---- Step 5: displace every OTHER live session (Cebab-r833) ----
   // The target is back, so the swap is now safe to commit. Same posture as the
-  // existing auto-sweep in bus/resume.ts — the displaced row is marked crashed
+  // existing auto-sweep in bus/resume.ts — each displaced row is marked crashed
   // + a typed `session_superseded` notification fires. Different here: the
   // reasonCode is `operator_reopen` (not `swept_competing`) so the inbox panel
   // / recovery_log can distinguish the two causes.
+  //
+  // Cebab-r833: the displaced set is resolved PROCESS-WIDE, not from
+  // `currentActiveSessionId` alone. That value is only ever
+  // `conn.multiAgent?.sessionId` — the run THIS connection is attached to — so a
+  // run started or resumed on ANOTHER connection was neither in it nor
+  // displaced. A window that connected before a second window started a run
+  // holds `conn.multiAgent === null`, so its Reopen used to bring the target
+  // live BESIDE the incumbent: two live sessions, after which
+  // `describeLiveSessionConflict` names both and blocks every new start until a
+  // later resume sweep clears one — and not necessarily the one the operator
+  // asked for. So consult `listLiveSessionIds()` (the same view
+  // `start_multi_agent` / `resume_multi_agent` guard on) and displace whatever
+  // is actually live.
+  //
+  // We do NOT reuse `claimSessionStart` / `describeLiveSessionConflict` as a
+  // gate: both REFUSE whenever anything is live, and a live incumbent is
+  // reopen's normal precondition. Reopen needs the same VIEW with displacement
+  // as the action, not refusal.
+  //
+  // EXCLUDE the reopened target itself: by now step 4's `resumeMultiAgentTarget`
+  // has put it in the live registry (re-attached an already-live entry or
+  // reconstructed one), so `listLiveSessionIds()` includes `sessionId`.
+  // Displacing "everything live" would stop the session the operator just
+  // reopened.
+  const displacedIds: string[] = [];
+  // `currentActiveSessionId` first, when it is a real displaceable id, so the
+  // single-incumbent message order stays byte-identical. It can be set but NOT
+  // live (the redundant `endMultiAgentSession` below still covers that).
   if (currentActiveSessionId && currentActiveSessionId !== sessionId) {
+    displacedIds.push(currentActiveSessionId);
+  }
+  for (const id of listLiveSessionIds()) {
+    if (id === sessionId) continue; // the target we just reactivated
+    if (id === currentActiveSessionId) continue; // already first
+    displacedIds.push(id);
+  }
+
+  for (const displacedId of displacedIds) {
     try {
-      detachCurrentActive();
-      // Cebab-1tty: `detachCurrentActive` is a bare sink swap — it silences
-      // the WS stream but leaves the incumbent's AgentRunner alive and its
-      // entry in the live registry, which NOTHING else here ever clears. So
-      // the `crashed` row we write next would be a lie: the run stays live for
-      // the life of the process, refusing a managed-agent delete that took
-      // part in it, defeating stop_multi_agent, and wedging claimSessionStart.
-      // Tear it down for real first, exactly as the auto-sweep does before its
-      // own `endMultiAgentSession` (`markCrashedAndAnnounceSuperseded`, Register
-      // B02). `stop()` runs its own teardown (endMultiAgentSession +
-      // unregisterLiveSession); the redundant end-call below still covers the
-      // not-live case.
+      // Cebab-1tty: `stop('crashed')` is a REAL teardown — it silences the WS
+      // stream AND unregisters the entry from the live registry, unlike the bare
+      // `detachCurrentActive` sink swap that used to run here and left the run
+      // live for the life of the process (refusing a managed-agent delete,
+      // no-op'ing stop_multi_agent, wedging claimSessionStart). The redundant
+      // `endMultiAgentSession` below still covers the not-live case.
       //
-      // AWAITING HERE IS SAFE FOR A REASON WORTH STATING, because it is not a
-      // property of `stop` in general: `teardown` skips its one awaited step,
-      // `onTeardown`, exactly when `reason === 'crashed'`, so this resolves
-      // through microtasks and yields no macrotask. That is what keeps the
-      // claim above — no other WS message can observe the overlap — true. A
-      // future `onTeardown` that ran on the crashed path would break it, and
-      // another connection could then see both rows `running` and both
-      // sessions live.
+      // AWAITING is safe for a reason worth restating: `teardown` skips its one
+      // awaited step, `onTeardown`, exactly when `reason === 'crashed'`, so each
+      // stop resolves through microtasks and yields no macrotask — no other WS
+      // message can observe the overlap.
       //
       // A throwing `stop` is logged and swallowed so the row is never left
-      // `running` — but swallowing alone would re-create the very leak this
-      // block exists to close, since a throw before `unregisterLiveSession`
-      // leaves the entry behind with a `crashed` row beside it. Clear it in the
-      // catch. Unregistering twice is harmless (a Map delete); leaving it is
-      // not.
-      const liveActive = getLiveSession(currentActiveSessionId);
-      if (liveActive) {
+      // `running` — but a throw before `unregisterLiveSession` would re-create
+      // the leak this closes, so the catch clears the entry itself.
+      const live = getLiveSession(displacedId);
+      if (live) {
         try {
-          await liveActive.handle.stop('crashed');
+          await live.handle.stop('crashed');
         } catch (err) {
           console.error(
-            `[reopen_session_confirmed] failed to stop live displaced session ${currentActiveSessionId}`,
+            `[reopen_session_confirmed] failed to stop live displaced session ${displacedId}`,
             err,
           );
-          unregisterLiveSession(currentActiveSessionId);
+          unregisterLiveSession(displacedId);
         }
       }
-      endMultiAgentSession(currentActiveSessionId, 'crashed');
+      endMultiAgentSession(displacedId, 'crashed');
       send({
         type: 'session_superseded',
-        sessionId: currentActiveSessionId,
+        sessionId: displacedId,
         supersedingSessionId: sessionId,
         supersedingTs: Date.now(),
       });
@@ -2291,14 +2316,14 @@ export async function executeReopenSessionConfirmed(args: {
         {
           class: 'operational',
           severity: 'warn',
-          dedupeKey: `session_superseded:${currentActiveSessionId}`,
+          dedupeKey: `session_superseded:${displacedId}`,
           title: 'A prior session was superseded',
-          message: `Session ${currentActiveSessionId.slice(
+          message: `Session ${displacedId.slice(
             0,
             8,
           )} was crashed because you reopened an older one.`,
-          sessionId: currentActiveSessionId,
-          action: { kind: 'archive', sessionId: currentActiveSessionId },
+          sessionId: displacedId,
+          action: { kind: 'archive', sessionId: displacedId },
           sticky: true,
           reasonCode: 'operator_reopen',
         },
@@ -2311,11 +2336,30 @@ export async function executeReopenSessionConfirmed(args: {
         );
       }
     } catch (err) {
-      console.error(`[reopen_session_confirmed] failed to displace ${currentActiveSessionId}`, err);
-      // Continue — the swap is still useful even if the displacement
-      // notification didn't ship. The DB end-call is what matters; the
-      // notification is best-effort.
+      // One bad id must not strand the rest — a later id could still be live.
+      // The DB end-call is what matters; the notification is best-effort.
+      console.error(`[reopen_session_confirmed] failed to displace ${displacedId}`, err);
     }
+  }
+
+  // Detach THIS connection's own sink AFTER the stop above (Cebab-r833). The
+  // old order detached first, which swapped the router's sink to NOOP_SINK
+  // before `teardown` reached `sink.onEnded` — so the `multi_agent_ended`
+  // broadcast in `resumeCallbacks(conn).onEnded` never fired, even though the
+  // run genuinely ended. The auto-sweep this path mirrors DOES emit it, so
+  // every window should be told; stopping first lets the same-connection
+  // incumbent's teardown broadcast before the swap.
+  //
+  // Gated on `currentActiveSessionId` exactly as before: only the reopening
+  // conn's OWN session is detachable here, and in the cross-connection case
+  // (`conn.multiAgent === null`) there is nothing to detach — so 7a's null case
+  // still never calls it. Two consequences, deliberate: on a successful stop
+  // `onEnded` already nulled `conn.multiAgent`, so `detachCurrentActive` finds
+  // null and no-ops (harmless — the router is already torn down); and when
+  // `stop` THREW, `onEnded` never fired, so this is the call that detaches on
+  // that path.
+  if (currentActiveSessionId && currentActiveSessionId !== sessionId) {
+    detachCurrentActive();
   }
 
   // ---- Step 6: adopt + emit ----
@@ -2326,7 +2370,10 @@ export async function executeReopenSessionConfirmed(args: {
   try {
     appendRecoveryLog({
       sessionId,
-      parentSessionId: currentActiveSessionId,
+      // Cebab-r833: in the cross-connection case `currentActiveSessionId` is
+      // null, so fall back to the first displaced id — otherwise the swap
+      // lineage would be lost in exactly the case this fix is about.
+      parentSessionId: currentActiveSessionId ?? displacedIds[0] ?? null,
       failureClass: 'sweep',
       operatorAction: 'reopen',
     });

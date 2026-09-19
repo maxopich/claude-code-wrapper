@@ -178,10 +178,14 @@ in-process map, so the refusal is scoped to a truly live run; a stranded row is 
 ended by the end-the-stranded-row loop further down `managed_delete.ts` (`Cebab-6fax.33`),
 which flips it to `stopped`.
 
-**One way the two signals disagree, and it traps the operator** (`Cebab-1tty`). The
-in-process map is cleared only by a router's teardown, and the reopen flow displaces the
-active run with `detachCurrentActive()` + `endMultiAgentSession(…, 'crashed')` — a sink
-swap, not a teardown. The row then reads `crashed` (the UI says **failed**) while the
-registry still holds the session, so the delete refuses on a run the operator has every
-reason to believe is over, and `Stop` no-ops on it because the connection no longer points
-at it. The refusal names the session id for that reason; the fix belongs at the source.
+**The reopen flow used to leave a live orphan** (`Cebab-1tty`, `Cebab-r833`). The
+in-process map is cleared only by a router's teardown, and the reopen flow originally
+displaced the active run with a bare `detachCurrentActive()` sink swap — the row then read
+`crashed` (the UI says **failed**) while the registry still held the session, so a delete
+refused on a run the operator believed was over and `Stop` no-op'd on it. Reopen now runs a
+real `stop('crashed')` teardown on each displaced session, and it resolves the displaced set
+**process-wide** via `listLiveSessionIds()` rather than from the reopening connection's own
+`conn.multiAgent`, so a run that is live on a _different_ connection is stopped and
+unregistered too instead of surviving beside the reopened target. The stop runs before the
+connection's own sink is detached, so the displaced run's `multi_agent_ended` still
+broadcasts to every window.
