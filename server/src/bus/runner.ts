@@ -677,6 +677,19 @@ export type AgentRunnerDeps = {
    */
   onGuardrailViolation?: (agentName: string, toolName: string) => void;
   /**
+   * `Cebab-mu5l`: a muted worker attempted `AskUserQuestion`. The gate has
+   * already denied it with `MUTED_ASK_DENIAL_TEXT` (no card, nobody waited on);
+   * this hook is the observability side-channel that gives the OPERATOR parity
+   * with a muted `bus_send` — that raises a danger `Muted X tried to emit …`
+   * notification at the router, whereas a muted ask was previously silent to
+   * the operator. orchestrator.ts wires it to the safety dispatcher so the
+   * attempt lands in the hash-chained audit log + an operator notification.
+   * Fire-and-forget, same contract as `onGuardrailViolation`: the runner never
+   * awaits it and a throw must not affect the (already-decided) deny. Absent
+   * (chain mode has no mute verb; the single-agent / test paths) → no-op.
+   */
+  onMutedAskAttempt?: (agentName: string) => void;
+  /**
    * `Cebab-vie.11` [security]: may `agentName` start a turn RIGHT NOW? Asked at
    * DEQUEUE time — immediately before a queued delivery would become a real
    * `claude` process — not when that delivery was enqueued.
@@ -1516,21 +1529,17 @@ export class AgentRunner {
       // worker could still stall the whole run on a human. Read `isMuted` live
       // (mute flips mid-run) and deny with the muted message rather than parking
       // — no card is emitted and nobody is waited on.
-      // `Cebab-6fax.41.1` [security]: a muted worker cannot park the run on an
-      // operator question. Mute already drops this worker's `bus_send` output at
-      // the router; `AskUserQuestion` is the one tool not auto-allowed, and it
-      // does NOT flow through `onEvent`, so it is the remaining way a muted
-      // worker could still stall the whole run on a human. Read `isMuted` live
-      // (mute flips mid-run) and deny with the muted message rather than parking
-      // — no card is emitted and nobody is waited on.
-      // `Cebab-6fax.41.1` [security]: a muted worker cannot park the run on an
-      // operator question. Mute already drops this worker's `bus_send` output at
-      // the router; `AskUserQuestion` is the one tool not auto-allowed, and it
-      // does NOT flow through `onEvent`, so it is the remaining way a muted
-      // worker could still stall the whole run on a human. Read `isMuted` live
-      // (mute flips mid-run) and deny with the muted message rather than parking
-      // — no card is emitted and nobody is waited on.
+      //
+      // `Cebab-mu5l`: the deny is silent to the operator, unlike a muted
+      // `bus_send` (a danger notification at the router). Fire the observability
+      // hook so the operator gets parity — an ask attempt is as noteworthy as an
+      // emit attempt. Fire-and-forget: a throwing sink must not affect the deny.
       if (this.deps.isMuted?.(agentName)) {
+        try {
+          this.deps.onMutedAskAttempt?.(agentName);
+        } catch (err) {
+          console.error('[bus] onMutedAskAttempt threw', err);
+        }
         return { behavior: 'deny', message: MUTED_ASK_DENIAL_TEXT };
       }
       // Suspend the stalled-turn watchdog while the operator is being asked:

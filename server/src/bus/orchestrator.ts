@@ -2085,6 +2085,38 @@ export function wireOrchestratorSession(p: {
         console.error('[orchestrator] guardrail_block dispatcher.emit failed', result.error);
       }
     },
+    // `Cebab-mu5l`: a muted worker's `AskUserQuestion` attempt is denied in the
+    // runner (`MUTED_ASK_DENIAL_TEXT`, no card, nobody waited on) but was silent
+    // to the operator — unlike a muted `bus_send`, which raises a danger
+    // `Muted X tried to emit …` notification at the router. This restores parity:
+    // an ask attempt is as noteworthy as an emit attempt, so it lands in the
+    // hash-chained audit log + a danger operator notification. The deny already
+    // happened in the runner — this is the observability side-channel.
+    onMutedAskAttempt: (agentName) => {
+      const result = emitNotification(
+        {
+          class: 'safety',
+          severity: 'danger',
+          dedupeKey: `muted_ask:${sessionId}:${agentName}`,
+          title: `Muted ${agentName} tried to ask a question`,
+          message:
+            `\`${agentName}\` is muted but attempted to ask you a question. ` +
+            `Denied — a muted worker cannot park the run on an operator answer.`,
+          sessionId,
+          reasonCode: 'muted_ask_attempt',
+          auditKind: 'guardrail.muted_ask_attempt',
+          auditAgentId: agentName,
+        },
+        (msg) => {
+          if (msg.type === 'notification') {
+            p.sendNotification?.(msg as NotificationEnvelope & { type: 'notification' });
+          }
+        },
+      );
+      if (!result.ok) {
+        console.error('[orchestrator] muted_ask dispatcher.emit failed', result.error);
+      }
+    },
     abortController,
     runnerFactory: p.runnerFactory,
     ...(p.overloadBackoffMs !== undefined ? { overloadBackoffMs: p.overloadBackoffMs } : {}),

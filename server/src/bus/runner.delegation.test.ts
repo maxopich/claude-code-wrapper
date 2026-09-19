@@ -54,10 +54,12 @@ async function captureTurn(spec: {
   opts: RunOptions & Partial<MockOptions>;
   violations: Array<[string, string]>;
   asked: string[];
+  mutedAskAttempts: string[];
 }> {
   const calls: (RunOptions & Partial<MockOptions>)[] = [];
   const violations: Array<[string, string]> = [];
   const asked: string[] = [];
+  const mutedAskAttempts: string[] = [];
   const runner = new AgentRunner({
     onEvent: () => {},
     onAskUserQuestion: async (agent) => {
@@ -65,6 +67,7 @@ async function captureTurn(spec: {
       return 'User selected: Ship it';
     },
     onGuardrailViolation: (agent, tool) => violations.push([agent, tool]),
+    onMutedAskAttempt: (agent) => mutedAskAttempts.push(agent),
     ...(spec.isMuted ? { isMuted: spec.isMuted } : {}),
     runnerFactory: (opts) => {
       calls.push(opts);
@@ -73,7 +76,7 @@ async function captureTurn(spec: {
   });
   runner.register({ name: spec.name, cwd: `/tmp/${spec.name}`, toolPolicy: spec.toolPolicy });
   await runner.deliverTurn(spec.name, 'go');
-  return { opts: calls[0]!, violations, asked };
+  return { opts: calls[0]!, violations, asked, mutedAskAttempts };
 }
 
 describe('isDelegationAllowedTool', () => {
@@ -160,6 +163,9 @@ describe('delegate-only tool policy', () => {
     expect(mutedAsk.message).toBe(MUTED_ASK_DENIAL_TEXT);
     // The operator is never asked — no card was emitted for the muted worker.
     expect(muted.asked).toEqual([]);
+    // `Cebab-mu5l`: the deny is NOT silent — the observability hook fires once so
+    // the operator gets a notification, parity with a muted bus_send at the router.
+    expect(muted.mutedAskAttempts).toEqual(['coder']);
 
     // Anti-vacuity control, in the SAME case so a revert reddens the whole test:
     // the same gate with isMuted=false must reach the park branch and return the
@@ -172,6 +178,9 @@ describe('delegate-only tool policy', () => {
     expect(unmutedAsk.message).toBe('User selected: Ship it');
     expect(unmutedAsk.message).not.toBe(MUTED_ASK_DENIAL_TEXT);
     expect(unmuted.asked).toEqual(['coder']);
+    // The observability hook is the mute check firing, not AskUserQuestion: an
+    // unmuted ask parks for the operator and never touches the muted-attempt sink.
+    expect(unmuted.mutedAskAttempts).toEqual([]);
   });
 
   test('[security] an unrestricted agent auto-allows every tool (no regression)', async () => {
