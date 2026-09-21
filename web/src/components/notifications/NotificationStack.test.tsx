@@ -338,6 +338,44 @@ describe('NotificationStack — onAck wiring (BE-6 client side)', () => {
   });
 });
 
+/**
+ * Cebab-6wa1. The dock is bottom-anchored, bounded (`max-height` +
+ * `overflow-y: auto`) and `flex-direction: column-reverse`. Under column-reverse
+ * the FIRST DOM child renders at the visual bottom and the scroller pins to that
+ * end, so for the newest toast to stay in view — instead of being clipped below
+ * the fold when a burst overflows the cap — the newest must be rendered first in
+ * the DOM. Before the fix `visible` was mapped oldest-first, putting the newest
+ * card last, i.e. at the pinned-off end; a flood of operational toasts could
+ * push a fresh danger alert out of sight, the very harm the bound was added for.
+ *
+ * jsdom runs no layout, so the scroll geometry itself reads 0 and cannot be
+ * asserted here (the CSS invariant is scanned in `notifStackBounded.test.ts`).
+ * This asserts the other half the fix needs: DOM order is newest-first.
+ */
+describe('NotificationStack — newest toast renders first, at the pinned end (Cebab-6wa1)', () => {
+  test('a later push is ordered before an earlier one in the DOM', () => {
+    const actions: { push?: (n: NotificationEnvelope) => void } = {};
+    act(() => {
+      root.render(<Harness actionsRef={actions} />);
+    });
+    act(() => {
+      actions.push?.(env({ id: 'oldest', title: 'Oldest' }));
+    });
+    act(() => {
+      actions.push?.(env({ id: 'middle', title: 'Middle' }));
+    });
+    act(() => {
+      // A danger alert arriving last is the case that must stay visible.
+      actions.push?.(env({ id: 'newest', severity: 'danger', title: 'Newest' }));
+    });
+    const titles = [...container.querySelectorAll('.notif-title')].map((el) => el.textContent);
+    // Newest first in the DOM → with column-reverse it sits at the visual
+    // bottom, the pinned/always-visible end. Pre-fix this was ['Oldest',
+    // 'Middle', 'Newest'] — newest last, i.e. at the end that scrolls away.
+    expect(titles).toEqual(['Newest', 'Middle', 'Oldest']);
+  });
+});
+
 describe('NotificationStack — reducer integration via context', () => {
   test('coalesce in-place updates the visible toast count badge', () => {
     const actions: { push?: (n: NotificationEnvelope) => void } = {};

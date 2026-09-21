@@ -59,4 +59,19 @@ describe('[a11y] the toast dock is bounded so sticky safety toasts cannot fill t
     // of sight; scrolling is what keeps every pinned notice reachable.
     expect(body).toMatch(/overflow-y:\s*auto/);
   });
+
+  test('the dock pins its scroll to the newest end (Cebab-6wa1)', () => {
+    // The bound above scrolls overflow inside the dock, but a plain `column`
+    // scroller rests at scrollTop:0 and shows the OLDEST cards while the newest
+    // arrival — appended at the bottom — is clipped below the fold. That trims
+    // the wrong end: a burst of operational toasts could push a fresh danger
+    // alert out of view, the exact harm the bound existed to stop.
+    // `column-reverse` pins the scroll to the newest end instead; paired with
+    // NotificationStack rendering `visible` newest-first (asserted in
+    // NotificationStack.test.tsx), the visual order is unchanged but the newest
+    // card is always in view.
+    expect(body).toMatch(/flex-direction:\s*column-reverse/);
+    // Anti-vacuity: must not silently be the plain `column` this replaced.
+    expect(body).not.toMatch(/flex-direction:\s*column\s*;/);
+  });
 });
