@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import WebSocket from 'ws';
 import { DEFAULT_PORT } from '@cebab/shared/net';
+import { resolveSmokeTarget } from './smoke_server_guard.js';
 import { formatVerdict, judgeSmokeRun, type SmokeObservation } from './smoke_assertions.js';
 
 // F4: read the per-launch token from the server's data dir. The same uid
@@ -14,7 +15,10 @@ import { formatVerdict, judgeSmokeRun, type SmokeObservation } from './smoke_ass
 //     callers (CI on another user) can override via $CEBAB_AUTH_TOKEN.
 const tokenPath = process.env.CEBAB_AUTH_TOKEN_FILE ?? path.join(os.homedir(), '.cebab/auth-token');
 const token = process.env.CEBAB_AUTH_TOKEN ?? fs.readFileSync(tokenPath, 'utf8').trim();
-const base = process.env.WS_URL ?? `ws://127.0.0.1:${DEFAULT_PORT}`;
+// Resolved, not assumed (`Cebab-c0n2`): ci_smoke passes the port it started the
+// server on, and reading only the compiled-in default meant this connected to
+// whatever was sitting on that default instead.
+const base = resolveSmokeTarget(process.env, DEFAULT_PORT).wsUrl;
 const url = `${base}/?token=${encodeURIComponent(token)}`;
 const ws = new WebSocket(url);
 

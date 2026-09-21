@@ -146,6 +146,14 @@ rules:
       - pattern-not: '$F($CMD, $ARGS, {..., shell: $SHELL, ...})'
       # Spawning the Node binary itself: a real executable, never a shim.
       - pattern-not: '$F(process.execPath, $ARGS, {...})'
+      # `git` is a real executable on every platform — Git for Windows installs
+      # `git.exe`, and no npm package shims the name. Added because the rule
+      # fired on `execFileSync('git', …)` in `scripts/verify-git-hooks.mjs`
+      # (`Cebab-o1to`), where complying would have been a REGRESSION: with
+      # `shell: true` the args go through cmd.exe, and a repo path containing a
+      # space stops being one argument. An exclusion beats a call site that
+      # quietly does the wrong thing to keep a gate quiet.
+      - pattern-not: '$F("git", $ARGS, {...})'
     message: |
       This child process is spawned without a `shell` option. On Windows an
       npm-installed CLI is a `.cmd` shim and Node refuses to spawn one
@@ -154,8 +162,14 @@ rules:
       silent. Add `shell: process.platform === 'win32'`, keeping the POSIX
       path shell-free. Keep the command a bare name rather than appending
       `.cmd`, so cmd.exe's PATHEXT lookup resolves shims and native binaries
-      alike. If the command is `process.execPath` or another real
-      executable, this rule already excludes it.
+      alike.
+
+      If the command is a REAL executable rather than an npm shim, it does
+      not need a shell and should not get one. Two are excluded by name
+      above: `process.execPath` and `git`. That list is the whole exclusion
+      — it is not "any real executable", which is what this message used to
+      imply. To add one, add the `pattern-not` and an `ok:` fixture line, so
+      the exclusion is itself pinned.
     languages: [typescript, javascript]
     severity: ERROR
     paths:

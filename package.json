@@ -20,6 +20,7 @@
     "smoke": "npm --workspace server run smoke",
     "bootstrap": "node scripts/bootstrap.mjs",
     "verify:native": "node scripts/verify-native-binary.mjs",
+    "verify:hooks": "node scripts/verify-git-hooks.mjs",
     "setup": "npm rebuild better-sqlite3 --foreground-scripts --ignore-scripts=false && husky",
     "prepare": "husky",
     "lint": "eslint . --max-warnings 0",
