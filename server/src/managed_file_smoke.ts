@@ -5,9 +5,11 @@
  *   npm --workspace server exec tsx src/managed_file_smoke.ts
  *
  * WHY THIS IS A SMOKE AND NOT A TEST. It spawns the real `claude` CLI, which
- * needs the operator's credentials; CI has none. Costs no model turn —
- * `probeSessionStarted` breaks at `system/init`, before the CLI contacts the
- * API. Same shape and same reason as `mcp_scope_smoke.ts` next door.
+ * needs the operator's credentials; CI has none. `probeSessionStarted` breaks
+ * at `system/init`, but that is NOT free — by then the CLI has already
+ * dispatched a small, billed request the SDK's close grace does not cancel
+ * (measured — see `runner/probe.ts` and `probe_no_model_turn_smoke.ts`). Same
+ * shape and same reason as `mcp_scope_smoke.ts` next door.
  *
  * WHY IT EXISTS. `Cebab-ws0.10`'s acceptance criterion is that an edit is what
  * the next spawn loads, "verified via the probe, not by reading the file back".

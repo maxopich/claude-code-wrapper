@@ -2,8 +2,11 @@
  * Cebab-ws0.7: when to spend a process on an authority probe.
  *
  * `probeSessionStarted` already knows HOW to ask the SDK what a project
- * actually loads, and it is cheap as these things go — it breaks at
- * `system/init`, so it costs a process spawn and no model turn. What it has
+ * actually loads. It is NOT free: it breaks at `system/init`, but by then the
+ * CLI has already dispatched a real, billed request and the SDK's close grace
+ * does not cancel it — a probe is a process spawn AND a small billed request
+ * (measured; see `runner/probe.ts` and `probe_no_model_turn_smoke.ts`). Whether
+ * to accept that per-selection cost is `Cebab-lh24`. What it has
  * never had is a caller other than the operator pressing Refresh, which means
  * the one answer the authority panel exists to give arrives only if they know
  * to ask for it. This module decides when to ask on their behalf.

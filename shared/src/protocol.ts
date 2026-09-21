@@ -871,8 +871,10 @@ export type ClientMsg =
        * Ask for the model catalogue (Cebab-ws0.3). Without `refresh`, answers
        * from the cache and costs nothing. With `refresh: true` and a
        * `projectId`, spawns the authority probe for that project, which
-       * repopulates the cache as a side effect — a process spawn and no model
-       * turn.
+       * repopulates the cache as a side effect — a process spawn plus the
+       * probe's small billed request (it breaks at init, but the CLI has
+       * already dispatched a request the SDK's close grace does not cancel; see
+       * `runner/probe.ts`).
        *
        * `projectId` is optional because a cache read needs no project; a
        * refresh without one cannot spawn and is answered from cache instead.

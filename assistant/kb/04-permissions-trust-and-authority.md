@@ -55,7 +55,7 @@ Because the pill only touches permission mode, switching a session to `default` 
 
 Before you start a session, you often want to know exactly what the agent _will_ load and what it will be able to do. The **Authority panel** answers that. Open it from the Authority chip in the chat header — its tooltip reads _"Open the AuthorityPanel preflight inspector for this project."_ It also appears as a preview when you open a new chat on a selected project, and can be reviewed after a run.
 
-The panel is not a guess from the config files alone. It runs a real, lightweight probe: Cebab spawns the agent just far enough to read what the session actually resolves (it stops at initialization and spends no model turn), then shows you the result. A freshness line shows how long ago the snapshot was taken; **Refresh** re-probes. If no session has ever run for the project on this connection, Refresh still reads and shows what the settings files declare — only the parts that need a live run stay empty until the project runs one.
+The panel is not a guess from the config files alone. It runs a real, lightweight probe: Cebab spawns the agent just far enough to read what the session actually resolves (it stops at initialization — but this still sends one small, billed request to the model service, whose reply is usually discarded, so a probe is cheap but not free), then shows you the result. A freshness line shows how long ago the snapshot was taken; **Refresh** re-probes. If no session has ever run for the project on this connection, Refresh still reads and shows what the settings files declare — only the parts that need a live run stay empty until the project runs one.
 
 The panel is organised into sections:
 
