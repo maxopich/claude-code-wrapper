@@ -242,10 +242,13 @@ export function computeBinarySha(command: string): string | null {
  * resolve, so an args array of a thousand file paths would otherwise be a
  * read amplifier aimed at the operator's own machine.
  *
- * Over the cap we return `null` — no pin at all — rather than the first eight.
- * A partial pin would report "unchanged" for a declaration whose ninth file was
- * rewritten, and a pin that is silently narrower than what it appears to cover
- * is the failure this whole module exists to avoid.
+ * Over the cap `computeScriptPin` returns `{ kind: 'oversized', reason:
+ * 'script_bytes' }` — no pin at all — rather than the first eight. A partial pin
+ * would report "unchanged" for a declaration whose ninth file was rewritten, and
+ * a pin that is silently narrower than what it appears to cover is the failure
+ * this whole module exists to avoid. `Cebab-6fax.42.1`: the caller turns that
+ * `oversized` result into a REFUSAL (`trust: 'pin_oversized'`), not the silent
+ * null it used to collapse to.
  *
  * `Cebab-6fax.42`: this counts BYTES HASHED, not candidates examined, and that
  * distinction is the whole protection for a realistic declaration.
@@ -271,11 +274,13 @@ const MAX_HASHED_SCRIPTS = 8;
  * and rebuilt on every resolve after it, so a thousand-token args array would
  * otherwise become a thousand-entry row in the operator's own database.
  *
- * Over this ceiling we return `null`, the same posture as the hash cap and for
- * the same reason — a partial pin that reads as complete is the failure this
- * module exists to avoid. 64 is far past any real declaration (the largest
- * observed is a filesystem server with a handful of roots) and far below the
- * shapes that make either cost interesting.
+ * Over this ceiling `computeScriptPin` returns `{ kind: 'oversized', reason:
+ * 'arg_count' }`, the same posture as the hash cap and for the same reason — a
+ * partial pin that reads as complete is the failure this module exists to avoid.
+ * `Cebab-6fax.42.1`: the caller REFUSES an oversized result rather than storing
+ * the silent null it used to become. 64 is far past any real declaration (the
+ * largest observed is a filesystem server with a handful of roots) and far below
+ * the shapes that make either cost interesting.
  */
 const MAX_SCRIPT_CANDIDATES = 64;
 
@@ -366,27 +371,44 @@ export const SCRIPT_ABSENT = 'absent';
  * direction was already the module's accepted trade — an entry can produce a
  * prompt, never suppress one.
  *
- * Returns `null` in exactly two cases, and they are not the same thing —
- * a contradiction this header carried until `Cebab-6fax.42`, because it claimed
- * "only when there was NO candidate token at all" while the cap below had
- * always been a second null.
+ * Returns one of THREE outcomes (`ScriptPinResult`), and the split is the whole
+ * of `Cebab-6fax.42.1`. Until it, this returned `null` for two unrelated things
+ * — a header contradiction `Cebab-6fax.42` had already named — and the caller
+ * could not tell them apart, so both degraded to "no script-change detection":
  *
- *  1. No candidate token at all (`node` alone, `npx` with only flags). No
- *     identity to track, exactly as for `binary_sha`. It does NOT mean "the
- *     files did not resolve" — that is a map of `SCRIPT_ABSENT` entries, which
- *     a later spawn IS compared against.
- *  2. A declaration past either ceiling. This one is a loss of protection, not
- *     an absence of it: the row is approved with a NULL pin and no later spawn
- *     can report `script_changed` for it. The ceilings are set so this is an
- *     adversarial shape rather than a real one; making it degrade to a REFUSAL
- *     instead of a null is tracked on the bead and is a separate change,
- *     because it needs its own `McpServerView['trust']` state to be visible.
+ *  1. `{ kind: 'none' }` — no candidate token at all (`node` alone, `npx` with
+ *     only flags). No identity to track, exactly as for `binary_sha`. It does
+ *     NOT mean "the files did not resolve" — that is a `pinned` map of
+ *     `SCRIPT_ABSENT` entries, which a later spawn IS compared against. Benign
+ *     and common; stored as a NULL `script_shas_json`.
+ *  2. `{ kind: 'oversized' }` — a declaration past either ceiling. This is a
+ *     LOSS of protection, not an absence of it: approving it with a NULL pin
+ *     means no later spawn can ever report `script_changed` for the row. #577
+ *     fixed the realistic filesystem-server shape that reached here by
+ *     miscounting; what is left is a declaration that GENUINELY exceeds the
+ *     budget, and "silently stop protecting" is the exact anti-pattern this
+ *     module exists to avoid. So it no longer collapses to a null the caller
+ *     cannot see — `enrichWithTrustState` maps it to `trust: 'pin_oversized'`,
+ *     which the gate REFUSES (see that state's header in `protocol.ts`).
+ *  3. `{ kind: 'pinned'; shas }` — a map of one entry per candidate token.
  */
-export function computeScriptShas(
+/**
+ * `Cebab-6fax.42.1`: an `oversized` result carries WHICH ceiling it hit, so the
+ * refusal note in the panel can name the real trigger rather than guessing:
+ *   - `'script_bytes'` — more readable files than `MAX_HASHED_SCRIPTS` can hash.
+ *   - `'arg_count'`    — more candidate tokens than `MAX_SCRIPT_CANDIDATES`.
+ * Both fail closed to the same refusal; the reason is copy, not enforcement.
+ */
+export type ScriptPinResult =
+  | { kind: 'pinned'; shas: Record<string, string> }
+  | { kind: 'none' }
+  | { kind: 'oversized'; reason: 'script_bytes' | 'arg_count' };
+
+export function computeScriptPin(
   command: string,
   args: readonly string[],
   projectPath: string,
-): Record<string, string> | null {
+): ScriptPinResult {
   const out: Record<string, string> = Object.create(null) as Record<string, string>;
   const seen = new Set<string>();
   let hashed = 0;
@@ -396,7 +418,7 @@ export function computeScriptShas(
     seen.add(token);
     // Checked BEFORE the read, so the ceiling bounds the reads it is there to
     // bound rather than being noticed one read late.
-    if (seen.size > MAX_SCRIPT_CANDIDATES) return null;
+    if (seen.size > MAX_SCRIPT_CANDIDATES) return { kind: 'oversized', reason: 'arg_count' };
     // `path.resolve` leaves an absolute token alone and anchors every other
     // one at the spawn cwd, which for both the single-agent turn and every bus
     // participant is the project root.
@@ -417,15 +439,40 @@ export function computeScriptShas(
       // made a filesystem server's directory list disable its own script pin
       // (`Cebab-6fax.42`).
       hashed += 1;
-      if (hashed > MAX_HASHED_SCRIPTS) return null;
+      if (hashed > MAX_HASHED_SCRIPTS) return { kind: 'oversized', reason: 'script_bytes' };
     }
   }
 
   const keys = Object.keys(out);
-  if (keys.length === 0) return null;
+  if (keys.length === 0) return { kind: 'none' };
   const sorted: Record<string, string> = {};
   for (const k of keys.sort()) sorted[k] = out[k];
-  return sorted;
+  return { kind: 'pinned', shas: sorted };
+}
+
+/**
+ * TEST-ONLY (`Cebab-6fax.42.1`). The `Record<string, string> | null` shape that
+ * the ledger's write and lookup inputs (`scriptShas`, `candidateScriptShas`)
+ * take, built for the tests that assemble those inputs by hand. It has **no
+ * production caller** — `enrichWithTrustState` is the only site that turns a
+ * declaration into a pin, and it uses `computeScriptPin` directly so it can see
+ * the `oversized` case and REFUSE it. Do NOT reintroduce this on a write or
+ * resolve path: it collapses `oversized` to `null`, which is exactly the silent
+ * no-protection state this bead removed — a null stored on approval can never
+ * report `script_changed` again.
+ *
+ * BOTH `none` and `oversized` collapse to `null` here, and that is correct for a
+ * TEST that only needs the stored/compared shas (genuinely absent in both cases).
+ * The difference between the two — whether the resolver refuses — is made from
+ * the richer `computeScriptPin` and is not this helper's to express.
+ */
+export function computeScriptShas(
+  command: string,
+  args: readonly string[],
+  projectPath: string,
+): Record<string, string> | null {
+  const pin = computeScriptPin(command, args, projectPath);
+  return pin.kind === 'pinned' ? pin.shas : null;
 }
 
 /** The tokens `computeScriptShas` will try to read, in declaration order. */
@@ -530,6 +577,26 @@ export function changedScriptPaths(
     if (approved[token] !== candSha) changed.push(token);
   }
   return changed.sort();
+}
+
+/**
+ * `Cebab-6fax.42.1`: does today's declaration fingerprint at least one REAL
+ * file? Used by the pre-#577 re-gate to tell "a null pin hiding a stale
+ * miscount, whose files could be rewritten invisibly" (re-prompt) from "a
+ * declaration that genuinely has no local script to protect" (leave trusted).
+ *
+ * A real sha — not `SCRIPT_ABSENT` and not `SCRIPT_TOO_LARGE` — is exactly the
+ * value an in-place rewrite would change and a null pin would miss. Absent-only
+ * maps do NOT count: `/bin/echo hi` pins `{ hi: 'absent' }` (a literal argument
+ * that names no file), and an `npx <pkg> <dirs>` filesystem server pins only
+ * absent sentinels — neither has a local script to swap, so a null pin is the
+ * honest value and re-prompting it would be pure noise on every ordinary spawn.
+ * The validator's case — a filesystem-server declaration that DOES name a local
+ * `.mjs` — has a real sha and re-gates; its `npx`-only cousin does not.
+ */
+function candidatePinsSomething(candidate: Readonly<Record<string, string>> | null): boolean {
+  if (candidate === null) return false;
+  return Object.values(candidate).some((sha) => sha !== SCRIPT_ABSENT && sha !== SCRIPT_TOO_LARGE);
 }
 
 // ---- write path ----
@@ -738,6 +805,23 @@ export function checkTrust(input: TrustLookupInput): TrustLookupResult {
         previousShas: approvedShas!,
         candidateShas: input.candidateScriptShas!,
       };
+    }
+
+    // `Cebab-6fax.42.1`: the pre-#577 re-gate. A row approved BEFORE #577 stored
+    // a NULL `script_shas_json` for an ordinary declaration whose files ARE
+    // pinnable — the per-candidate miscount disabled the pin for a filesystem
+    // server's arg list. Today's resolve pins those files non-null. With nothing
+    // stored to compare against, `changedScriptPaths` returned [] above and the
+    // row would pass as `trusted` forever, blind to exactly the in-place rewrite
+    // the pin exists to catch (`script_changed` can never fire for a null-pinned
+    // row). There is no before-state to build a diff from, so re-prompt as
+    // `first_seen`: the operator is asked once more and the approval backfills a
+    // real pin. This is a re-prompt, NOT a silent backfill — the point is that
+    // they are asked. Gated on the candidate actually pinning something, so the
+    // benign `none` case (`npx` with only flags: null then, null now) still
+    // passes untouched.
+    if (approvedShas === null && candidatePinsSomething(input.candidateScriptShas)) {
+      return { decision: 'first_seen' };
     }
 
     if (exact.decision === 'trusted') return { decision: 'trusted' };

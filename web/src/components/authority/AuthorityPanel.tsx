@@ -1,4 +1,5 @@
 import type { HookView } from '@cebab/shared/protocol';
+import { mcpOriginLoads } from '@cebab/shared';
 import { useEffect, useRef, useState } from 'react';
 import { timeAgo } from '../../format';
 import { readStored, writeStored } from '../../prefs';
@@ -283,6 +284,14 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode, projectId: nu
   const shownHooks = authority.hooks;
   const shownMcpServers = authority.mcpServers;
   const scopeRead = projectScopeRead;
+  // Cebab-6fax.42.1: a refused-because-too-large server is as consequential as a
+  // Trust-blocked one, so force the section open and stripe it the same way. Only
+  // count rows that would actually load (`mcpOriginLoads`), matching where the
+  // refusal note renders — a settings-layer declaration never runs anyway.
+  const hasShownPinOversized = shownMcpServers.some(
+    (s) => s.trust === 'pin_oversized' && mcpOriginLoads(s.scope),
+  );
+  const forceMcpOpen = unloadedMcpServers.length > 0 || hasShownPinOversized;
 
   return (
     <div className="authority-panel-body">
@@ -317,9 +326,10 @@ function renderBody(slot: AuthoritySlot, mode: AuthorityPanelMode, projectId: nu
               : undefined
         }
         // Force-open when a declared server sits inert behind Trust — the
-        // operator is about to decide whether to trust exactly these.
-        defaultOpen={unloadedMcpServers.length > 0}
-        stripe={unloadedMcpServers.length > 0 ? 'accent' : 'none'}
+        // operator is about to decide whether to trust exactly these — or when a
+        // shown server was refused as too-large to pin (Cebab-6fax.42.1).
+        defaultOpen={forceMcpOpen}
+        stripe={forceMcpOpen ? 'accent' : 'none'}
       >
         <McpServersList
           servers={shownMcpServers}

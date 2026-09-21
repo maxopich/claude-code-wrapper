@@ -10,6 +10,7 @@ import { closeLogger } from '../runner/logger.js';
 import {
   changedScriptPaths,
   checkTrust,
+  computeScriptPin,
   computeScriptShas,
   parseScriptShas,
   recordTrustDecision,
@@ -252,6 +253,69 @@ describe('[security] computeScriptShas — which tokens get pinned', () => {
   });
 });
 
+// ---- computeScriptPin: none vs oversized vs pinned (Cebab-6fax.42.1) ----
+
+describe('[security] computeScriptPin — the three outcomes are distinct', () => {
+  // The finding: `computeScriptShas` collapsed "nothing to pin" and "too large
+  // to pin" into one `null`, so the caller could not degrade the second to a
+  // refusal. Every case below reddens if the two ever merge back into a bare
+  // null the caller cannot tell apart.
+
+  test('no candidate token → kind "none", NOT "oversized"', () => {
+    // Benign and common (`npx <pkg>` with only flags, bare `node`). This must
+    // stay `none` so the resolver leaves it to the binary/declaration gates
+    // rather than refusing every ordinary stdio server.
+    expect(computeScriptPin('npx', ['-y', '--foo'], projectPath)).toEqual({ kind: 'none' });
+    expect(computeScriptPin('node', [], projectPath)).toEqual({ kind: 'none' });
+  });
+
+  test('a readable file → kind "pinned" with its shas', () => {
+    const sha = writeScript('mcp/server.mjs', 'the script\n');
+    expect(computeScriptPin('node', ['mcp/server.mjs'], projectPath)).toEqual({
+      kind: 'pinned',
+      shas: { 'mcp/server.mjs': sha },
+    });
+  });
+
+  test('more readable files than the hash cap → kind "oversized", not "none"', () => {
+    // The residue #577 left: a declaration that GENUINELY exceeds the byte
+    // budget. Before this split it returned null indistinguishable from `none`
+    // and the resolver stored no pin. Reddens: returning `{ kind: 'none' }` (or
+    // any null-equivalent) here, which is the silent no-protection state.
+    const args: string[] = [];
+    for (let i = 0; i < 9; i += 1) {
+      writeScript(`h${i}.mjs`, `file ${i}\n`);
+      args.push(`h${i}.mjs`);
+    }
+    // Cebab-6fax.42.1: the byte budget carries `reason: 'script_bytes'` so the
+    // panel note can name it.
+    expect(computeScriptPin('node', args, projectPath)).toEqual({
+      kind: 'oversized',
+      reason: 'script_bytes',
+    });
+    // One under the cap still pins — the boundary is the stated one.
+    expect(computeScriptPin('node', args.slice(0, 8), projectPath).kind).toBe('pinned');
+  });
+
+  test('more candidate tokens than the candidate ceiling → kind "oversized"', () => {
+    writeScript('server.mjs', 'the script\n');
+    const flood = Array.from({ length: 64 }, (_, i) => `missing-${i}.txt`);
+    // Cebab-6fax.42.1: the token ceiling carries `reason: 'arg_count'`.
+    expect(computeScriptPin('node', ['server.mjs', ...flood], projectPath)).toEqual({
+      kind: 'oversized',
+      reason: 'arg_count',
+    });
+  });
+
+  // NOTE: no case pins `computeScriptShas` returning null for both none and
+  // oversized. That was the PRE-existing behaviour this change did not touch —
+  // the wrapper collapses both to null on purpose, and the distinction lives in
+  // `computeScriptPin`. A test asserting it would pass with the change reverted
+  // (revert-check flagged exactly that), i.e. it measures nothing about the fix.
+  // The existing `computeScriptShas` describe block above already covers the
+  // wrapper's null contract via `.toBeNull()` on the over-budget shapes.
+});
+
 // ---- changedScriptPaths: only a value present on BOTH sides proves a change --
 
 describe('[security] changedScriptPaths — what counts as a change', () => {
@@ -403,17 +467,54 @@ describe('[security] checkTrust — a rewritten script under an unchanged declar
     expect(look()).toEqual({ decision: 'denied_remember' });
   });
 
-  test('a row decided before migration 039 pins nothing and prompts for nothing', () => {
-    // The no-backfill posture, from the other side: a row that pinned nothing
-    // must claim nothing. Reddens `changedScriptPaths` short-circuiting a null
-    // approval to "everything changed" — which would make every pre-039 row on
-    // a live install prompt on its next spawn — and it is the case a read-time
-    // backfill would have to break to be written at all.
+  test('Cebab-6fax.42.1: a NULL-pin row re-gates once its declaration pins non-null', () => {
+    // REVERSAL of this test's prior assertion, which asserted `trusted` and was
+    // defending the residue #577 named. A row whose `script_shas_json` is NULL —
+    // the pre-#577 miscount stored one for an ordinary declaration whose files
+    // ARE pinnable, and every pre-039 row carries one too — used to stay
+    // `trusted` no matter what its script did: a null approval compared against
+    // any candidate reports no change, so a rewritten script was invisible for
+    // the row's whole life, which is exactly the state a pin exists to catch. It
+    // now RE-PROMPTS as `first_seen`, because today's declaration DOES pin
+    // something and there is no stored baseline to build a `script_changed` diff
+    // from — the operator is asked once more and the approval backfills a real
+    // pin. NOT a silent backfill; the point is the prompt. The sibling test
+    // above ("declaration untouched, script rewritten → script_changed") is the
+    // pinned CONTROL that keeps its baseline, so this is the NULL-pin row's own
+    // behaviour and not a blanket re-gate. Reddens on old code, which returned
+    // `{ decision: 'trusted' }`.
     writeScript('mcp/kitchen-server.mjs', 'v1\n');
     approve();
     getDb().prepare('UPDATE mcp_trust SET script_shas_json = NULL').run();
     writeScript('mcp/kitchen-server.mjs', 'v2\n');
-    expect(look()).toEqual({ decision: 'trusted' });
+    expect(look()).toEqual({ decision: 'first_seen' });
+
+    // ANTI-VACUITY CONTROL, in the SAME case so the reddening assertion above
+    // guards it (a standalone control passes on old code and measures nothing).
+    // The re-gate must fire ONLY when today's declaration is pinnable: a benign
+    // flag-only `npx` pins nothing then and nothing now, so a NULL
+    // `script_shas_json` is the honest value and re-prompting it would be pure
+    // noise. This half stays `trusted` on old code AND new — its job is to prove
+    // the re-gate above is not a blanket "any null re-prompts".
+    recordTrustDecision({
+      serverName: 'flagsonly',
+      originPath: ORIGIN,
+      command: 'npx',
+      args: ['-y', '--foo'],
+      binarySha: null,
+      scriptShas: null,
+      decision: 'trusted',
+    });
+    expect(
+      checkTrust({
+        serverName: 'flagsonly',
+        originPath: ORIGIN,
+        candidateSha: null,
+        command: 'npx',
+        args: ['-y', '--foo'],
+        candidateScriptShas: computeScriptShas('npx', ['-y', '--foo'], projectPath),
+      }),
+    ).toEqual({ decision: 'trusted' });
   });
 
   test('approving again re-baselines, so the next spawn is silent', () => {

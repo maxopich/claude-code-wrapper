@@ -1653,6 +1653,111 @@ describe('[security] resolveProjectAuthority — Cebab-1af script pinning', () =
     // needed a reason of its own rather than reusing `declaration_changed`.
     expect(changed.config).toEqual(pending.config);
   });
+
+  test('Cebab-6fax.42.1: a declaration too large to pin resolves to pin_oversized, not pending_tofu', () => {
+    // The residue #577 left. A declaration that names more readable files than
+    // the hash budget cannot be fingerprinted, and used to degrade to a NULL
+    // pin — approvable, and then permanently unable to report `script_changed`.
+    // The resolver now marks it `pin_oversized` instead. Reddens: mapping the
+    // oversized `computeScriptPin` result to a null pin + `pending_tofu` (the
+    // old silent-no-protection path), which this asserts against.
+    fs.mkdirSync(path.join(projectPath, 'big'), { recursive: true });
+    const args: string[] = [];
+    for (let i = 0; i < 9; i += 1) {
+      fs.writeFileSync(path.join(projectPath, 'big', `s${i}.mjs`), `file ${i}\n`);
+      args.push(`big/s${i}.mjs`);
+    }
+    fs.writeFileSync(
+      path.join(projectPath, '.mcp.json'),
+      JSON.stringify({ mcpServers: { huge: { command: 'node', args } } }),
+    );
+    const huge = resolveProjectAuthority({ projectId, mode: 'cache' })!.mcpServers.find(
+      (s) => s.name === 'huge',
+    )!;
+    expect(huge.trust).toBe('pin_oversized');
+    // This one blew the BYTE budget (nine readable files), so the note names
+    // that trigger, not the argument ceiling.
+    expect(huge.pinOversizedReason).toBe('script_bytes');
+    // And no pin is carried — there is nothing to store, which is the whole
+    // point: an "Allow" must not be able to persist a null.
+    expect(huge.scriptShas).toBeUndefined();
+  });
+
+  test('Cebab-6fax.42.1: the 64-argument ceiling refuses too, with reason=arg_count', () => {
+    // The OTHER ceiling. One real script plus 64 missing-path tokens is 65
+    // candidate tokens: none of the 64 consume bytes (they do not exist), so the
+    // BYTE budget is never reached — only `MAX_SCRIPT_CANDIDATES` catches it.
+    // Old code (`computeScriptShas`) returned null for >64 candidates, the
+    // resolver stored no pin and reported `pending_tofu`; this asserts the
+    // refusal and the `arg_count` reason instead. Fail closed on the argument
+    // ceiling: a 64+-argument declaration is refused by design even though it may
+    // name only one real file.
+    fs.mkdirSync(path.join(projectPath, 'big'), { recursive: true });
+    fs.writeFileSync(path.join(projectPath, 'big', 'server.mjs'), 'the script\n');
+    const args = ['big/server.mjs', ...Array.from({ length: 64 }, (_, i) => `missing-${i}.txt`)];
+    fs.writeFileSync(
+      path.join(projectPath, '.mcp.json'),
+      JSON.stringify({ mcpServers: { flooded: { command: 'node', args } } }),
+    );
+    const flooded = resolveProjectAuthority({ projectId, mode: 'cache' })!.mcpServers.find(
+      (s) => s.name === 'flooded',
+    )!;
+    expect(flooded.trust).toBe('pin_oversized');
+    expect(flooded.pinOversizedReason).toBe('arg_count');
+    expect(flooded.scriptShas).toBeUndefined();
+  });
+
+  test('Cebab-6fax.42.1: an oversized declaration refuses, but a standing denial outranks it', async () => {
+    // Two halves in one case on purpose. The FIRST reddens on old code (which
+    // has no `pin_oversized` and resolves this oversized declaration to
+    // `pending_tofu`), so it guards the SECOND — the denial-precedence half,
+    // which old code passes only incidentally (a denied server is `denied`
+    // there too, because old code has no oversized short-circuit to jump ahead
+    // of the ledger). Kept together so the precedence assertion is not a
+    // standalone always-green test.
+    fs.mkdirSync(path.join(projectPath, 'big'), { recursive: true });
+    const args: string[] = [];
+    for (let i = 0; i < 9; i += 1) {
+      fs.writeFileSync(path.join(projectPath, 'big', `s${i}.mjs`), `file ${i}\n`);
+      args.push(`big/s${i}.mjs`);
+    }
+    const originPath = path.join(projectPath, '.mcp.json');
+    fs.writeFileSync(
+      originPath,
+      JSON.stringify({ mcpServers: { huge: { command: 'node', args } } }),
+    );
+
+    // HALF ONE (reddens on old code): with no prior decision the oversized
+    // declaration is refused, not silently stored as a null pin.
+    const refused = resolveProjectAuthority({ projectId, mode: 'cache' })!.mcpServers.find(
+      (s) => s.name === 'huge',
+    )!;
+    expect(refused.trust).toBe('pin_oversized');
+    expect(refused.pinOversizedReason).toBe('script_bytes');
+
+    // HALF TWO: the operator denies it. A STANDING DENIAL WINS — the refusal
+    // must not launder the denial into a `pin_oversized` relabel that would
+    // audit it under the wrong reason and drop its `denied` chip.
+    const { recordTrustDecision } = await import('./mcp_trust.js');
+    recordTrustDecision({
+      serverName: 'huge',
+      originPath,
+      command: 'node',
+      args,
+      binarySha: null,
+      scriptShas: null,
+      decision: 'denied_remember',
+    });
+    const huge = resolveProjectAuthority({ projectId, mode: 'cache' })!.mcpServers.find(
+      (s) => s.name === 'huge',
+    )!;
+    expect(huge.trust).toBe('denied');
+    // Not relabelled, so no oversized reason rides along.
+    expect(huge.pinOversizedReason).toBeUndefined();
+    // The denial's history is still surfaced — the short-circuit used to skip it.
+    expect(huge.lastSeenAt).toBeTypeOf('number');
+    expect(huge.firstSeenAt).toBeTypeOf('number');
+  });
 });
 
 describe('resolveProjectAuthority — Phase 10 usage-diff enrichment', () => {

@@ -49,7 +49,7 @@ import { getProject } from './projects.js';
 import {
   checkTrust,
   computeBinarySha,
-  computeScriptShas,
+  computeScriptPin,
   firstDecisionTs,
   listForServer,
 } from './mcp_trust.js';
@@ -1047,6 +1047,17 @@ export function detectMcpServers(layers: SettingsLayer[]): McpServerView[] {
  *   - `script_changed`                   → `trust: 'script_changed'` (Cebab-1af)
  *   - `first_seen`                       → `trust: 'pending_tofu'`
  *
+ * `Cebab-6fax.42.1`: when the file pin comes back `oversized` — the declaration
+ * names more files (or more candidate tokens) than the budget can hash — the row
+ * is `trust: 'pin_oversized'` (carrying which ceiling it hit in
+ * `pinOversizedReason`). A pin cannot be built, so the only honest states are
+ * "refuse" or "store a null that silently stops protecting", and this module
+ * exists to never do the latter. The gate refuses a `pin_oversized` server; the
+ * panel tells the operator to shrink the declaration. But the trust LOOKUP still
+ * runs first, because a STANDING DENIAL outranks the oversized refusal: an
+ * operator who already denied this server keeps `trust: 'denied'` (audited under
+ * their own reason), not a `pin_oversized` relabel.
+ *
  * `projectPath` is the spawn cwd, and it is required rather than derived from
  * `originPath`: relative tokens in a declaration resolve against the directory
  * the CLI runs in, not against the file the declaration was read from — the two
@@ -1076,16 +1087,18 @@ export function enrichWithTrustState(views: McpServerView[], projectPath: string
     if (candidateSha !== null) view.binarySha = candidateSha;
     // Cebab-1af: and the files the declaration RUNS, which `binary_sha` never
     // covered — it hashes the command, and the command is `node`.
-    const scriptShas = computeScriptShas(
-      view.config?.command ?? '',
-      view.config?.args ?? [],
-      projectPath,
-    );
+    const pin = computeScriptPin(view.config?.command ?? '', view.config?.args ?? [], projectPath);
+    const scriptShas = pin.kind === 'pinned' ? pin.shas : null;
     if (scriptShas !== null) view.scriptShas = scriptShas;
     // Cebab-rxg: the DECLARATION is part of the lookup, not just the command's
     // hash. `computeBinarySha` returns null for every non-absolute command, so
     // `npx`, `node` and `bash` shared one identity and a rewritten `.mcp.json`
     // matched the row the operator had approved for a different program.
+    //
+    // `Cebab-6fax.42.1`: the lookup runs BEFORE the `pin_oversized` short-circuit
+    // on purpose. A STANDING DENIAL outranks the oversized refusal — the operator
+    // already decided this server does not run, and re-labelling it `pin_oversized`
+    // would audit their denial under the wrong reason and lose its `denied` chip.
     const lookup = checkTrust({
       serverName: view.name,
       originPath: view.originPath,
@@ -1099,34 +1112,46 @@ export function enrichWithTrustState(views: McpServerView[], projectPath: string
         ? { identityDigest: view.config.identityDigest }
         : {}),
     });
-    switch (lookup.decision) {
-      case 'trusted':
-      case 'trusted_pinned_hash':
-        view.trust = 'trusted';
-        break;
-      case 'denied_remember':
-        view.trust = 'denied';
-        break;
-      case 'declaration_changed':
-        view.trust = 'declaration_changed';
-        break;
-      case 'hash_changed':
-        view.trust = 'hash_changed';
-        break;
-      case 'script_changed':
-        view.trust = 'script_changed';
-        // The diff is computed once, here, and carried on the view. The gate
-        // renders it; recomputing it there would be a second read of the same
-        // files with a window in between.
-        view.scriptChanges = lookup.changedPaths.map((token) => ({
-          path: token,
-          previousSha: lookup.previousShas[token],
-          sha: lookup.candidateShas[token],
-        }));
-        break;
-      case 'first_seen':
-        view.trust = 'pending_tofu';
-        break;
+    if (lookup.decision === 'denied_remember') {
+      // A standing denial wins over everything, including an oversized pin.
+      view.trust = 'denied';
+    } else if (pin.kind === 'oversized') {
+      // `Cebab-6fax.42.1`: a declaration too large to pin degrades to a REFUSAL,
+      // not to a silent null. There is no pin to compare and no decision to
+      // offer; storing null here is the very bug (`no later spawn can report
+      // script_changed`) this state replaces. Carry which ceiling it hit so the
+      // panel can name the real trigger.
+      view.trust = 'pin_oversized';
+      view.pinOversizedReason = pin.reason;
+    } else {
+      switch (lookup.decision) {
+        case 'trusted':
+        case 'trusted_pinned_hash':
+          view.trust = 'trusted';
+          break;
+        // `denied_remember` is handled above the pin_oversized branch (a standing
+        // denial outranks the refusal), so it cannot reach here.
+        case 'declaration_changed':
+          view.trust = 'declaration_changed';
+          break;
+        case 'hash_changed':
+          view.trust = 'hash_changed';
+          break;
+        case 'script_changed':
+          view.trust = 'script_changed';
+          // The diff is computed once, here, and carried on the view. The gate
+          // renders it; recomputing it there would be a second read of the same
+          // files with a window in between.
+          view.scriptChanges = lookup.changedPaths.map((token) => ({
+            path: token,
+            previousSha: lookup.previousShas[token],
+            sha: lookup.candidateShas[token],
+          }));
+          break;
+        case 'first_seen':
+          view.trust = 'pending_tofu';
+          break;
+      }
     }
     // Decision history → first/last seen, from the two sources that actually
     // answer each question: the lookup for "most recent", the audit chain for

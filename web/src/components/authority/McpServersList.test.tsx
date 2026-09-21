@@ -201,6 +201,134 @@ describe('McpServersList — rendering', () => {
     expect(container.textContent).not.toMatch(/Bearer\s+[A-Za-z0-9]/);
   });
 
+  // Cebab-6fax.42.1: a server refused because its files cannot be fingerprinted.
+  // Reddens on old code, where `McpServerView['trust']` had no `pin_oversized`
+  // member — the chip label/class maps and the note branch did not exist, so the
+  // chip rendered blank and the note never appeared.
+  describe('pin_oversized refusal', () => {
+    test('chip reads "too large to pin" in the error tier, and the note names the byte trigger', () => {
+      act(() => {
+        root.render(
+          <McpServersList
+            servers={[
+              mk({
+                name: 'huge',
+                scope: 'mcp-json',
+                trust: 'pin_oversized',
+                pinOversizedReason: 'script_bytes',
+              }),
+            ]}
+          />,
+        );
+      });
+      const card = container.querySelector('.mcp-server-card')!;
+      expect(card.querySelector('.mcp-trust-err')).not.toBeNull();
+      expect(card.textContent).toContain('too large to pin');
+      const note = card.querySelector('.mcp-server-pin-oversized');
+      expect(note).not.toBeNull();
+      // Present tense, and the remedy.
+      expect(note!.textContent).toContain('Cebab will not start this server');
+      expect(note!.textContent).toContain('script files');
+      expect(note!.textContent).toContain('reopen the panel');
+    });
+
+    test('reason=arg_count words the note for the argument ceiling instead', () => {
+      act(() => {
+        root.render(
+          <McpServersList
+            servers={[
+              mk({
+                name: 'flooded',
+                scope: 'mcp-json',
+                trust: 'pin_oversized',
+                pinOversizedReason: 'arg_count',
+              }),
+            ]}
+          />,
+        );
+      });
+      const note = container.querySelector('.mcp-server-pin-oversized')!;
+      expect(note.textContent).toContain('Cebab will not start this server');
+      expect(note.textContent).toContain('64');
+      // Not the script-files wording — this ceiling is about argument count.
+      expect(note.textContent).not.toContain('script files');
+    });
+
+    test('the note shows for a loaded refusal but NOT for a denied server', () => {
+      // Reddening half FIRST (old code has no `pin_oversized` member, so no note
+      // renders and this fails), guarding the negative half — a standalone
+      // "denied shows no note" passes on old code and would measure nothing.
+      act(() => {
+        root.render(
+          <McpServersList
+            servers={[
+              mk({
+                name: 'huge',
+                scope: 'mcp-json',
+                trust: 'pin_oversized',
+                pinOversizedReason: 'script_bytes',
+              }),
+            ]}
+          />,
+        );
+      });
+      expect(container.querySelector('.mcp-server-pin-oversized')).not.toBeNull();
+      // Negative half: a denied server is refused for a different reason and gets
+      // no too-large note.
+      act(() => {
+        root.render(
+          <McpServersList servers={[mk({ name: 'bad', scope: 'mcp-json', trust: 'denied' })]} />,
+        );
+      });
+      expect(container.querySelector('.mcp-server-pin-oversized')).toBeNull();
+      expect(container.textContent).toContain('denied');
+    });
+
+    test('no note for a settings-layer declaration — it never loads, so the refusal note would mislead', () => {
+      act(() => {
+        root.render(
+          <McpServersList
+            servers={[
+              mk({
+                name: 'stray',
+                scope: 'project',
+                trust: 'pin_oversized',
+                pinOversizedReason: 'script_bytes',
+              }),
+            ]}
+          />,
+        );
+      });
+      // The chip still shows the state, but the "Cebab will not start this"
+      // sentence is false for a server the CLI never starts anyway.
+      expect(container.textContent).toContain('too large to pin');
+      expect(container.querySelector('.mcp-server-pin-oversized')).toBeNull();
+    });
+
+    test('the note shows for a loaded refusal but NOT for the same server in the unloaded list', () => {
+      const oversized = mk({
+        name: 'huge',
+        scope: 'mcp-json',
+        trust: 'pin_oversized',
+        pinOversizedReason: 'script_bytes',
+      });
+      // Reddening half FIRST (loaded → note present; fails on old code), so the
+      // negative half below is guarded rather than a standalone always-green.
+      act(() => {
+        root.render(<McpServersList servers={[oversized]} />);
+      });
+      expect(container.querySelector('.mcp-server-pin-oversized')).not.toBeNull();
+      // Negative half: the SAME server declared in an untrusted project's
+      // `.mcp.json` (the unloaded list) — Trust keeps it out, not the pin budget,
+      // so "Cebab will not start this" would mislead and the note is suppressed.
+      act(() => {
+        root.render(<McpServersList servers={[]} unloaded={[oversized]} />);
+      });
+      expect(container.textContent).toContain('huge');
+      expect(container.querySelector('.mcp-server-pin-oversized')).toBeNull();
+    });
+  });
+
   test('tool count chip pluralizes correctly', () => {
     act(() => {
       root.render(
