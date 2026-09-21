@@ -34,7 +34,7 @@ import path from 'node:path';
 import { config } from './config.js';
 import { DIR_MODE, FILE_MODE, ensureDataDir, secureMkdir } from './data_perms.js';
 import { pathLooksSensitive } from '@cebab/shared';
-import { canonical, isInside } from './path_containment.js';
+import { canonical, canonicalOrThrow, isInside } from './path_containment.js';
 import { slugifyAgentName } from './bus/paths.js';
 
 /** Where every managed agent lives. Mirrors `sessionsRoot()` in `bus/paths.ts`. */
@@ -375,6 +375,47 @@ export async function removeManagedDir(target: string): Promise<void> {
 
 // ---- the copy ----
 
+/**
+ * [security] The copy's containment invariant, checked against RESOLVED paths,
+ * and returning the resolved source so the caller reuses it as the walk root
+ * (Cebab-6fax.43.4, Cebab-ygu.16).
+ *
+ * Two independent refusals, one per containment hole the copy had:
+ *  - the target must be strictly inside `managedAgentsRoot()`, so a copy can
+ *    only ever write bytes into the space Cebab owns — the one sentence the
+ *    whole managed-agent design rests on;
+ *  - the source must be neither the target nor an ANCESTOR of it, or the walk
+ *    reads the directory it is filling and copies its own output one level
+ *    deeper on each pass. The reachable case is a data dir nested inside a
+ *    workspace project, a shape `workspace.ts` explicitly cannot refuse.
+ *
+ * ONE resolver for the whole copy. Every path here is resolved with
+ * `canonicalOrThrow` = the JS `fs.realpathSync` that `canonical` also uses, and
+ * the returned `sourceReal` becomes `copyTree`'s walk root — so containment,
+ * the walk root, and `walkTree`'s per-link comparisons all go through the same
+ * primitive. Mixing in the native realpath (as an earlier attempt did) makes
+ * them disagree on letter case and 8.3 short names and drops in-tree symlinks
+ * as escapes. Resolution failure is a refusal, never a raw-path fallback, which
+ * would defeat the check it is part of.
+ */
+function assertCopyContained(source: string, target: string): string {
+  const root = canonicalOrThrow(managedAgentsRoot(), 'the managed root');
+  const sourceReal = canonicalOrThrow(source, 'the copy source');
+  const targetReal = canonicalOrThrow(target, 'the copy target');
+  if (!isInside(root, targetReal)) {
+    throw new Error(
+      `managed_agent: refusing to copy into ${JSON.stringify(target)} — not inside ${root}`,
+    );
+  }
+  if (targetReal === sourceReal || isInside(sourceReal, targetReal)) {
+    throw new Error(
+      `managed_agent: refusing to copy — ${JSON.stringify(target)} is inside its own source ` +
+        `${JSON.stringify(source)}`,
+    );
+  }
+  return sourceReal;
+}
+
 export type CopyProgress = { files: number; bytes: number };
 
 export type CopyResult = {
@@ -456,13 +497,22 @@ export async function claimManagedDir(projectName: string): Promise<string> {
  * Never writes to `source`: every operation here reads from it and writes under
  * `target`. That is asserted rather than assumed — a test hashes the source
  * tree before and after.
+ *
+ * [security] CONTAINMENT and the CAP are enforced HERE, not only by the caller
+ * (Cebab-6fax.43.4). `assertCopyContained` refuses a target outside the managed
+ * root and a source that contains its target (the self-recursive copy of
+ * Cebab-ygu.16), and its resolved source is the walk root. `caps` bounds files
+ * and bytes from within, so a tree that GREW past the survey's estimate — the
+ * survey runs before the target even exists — cannot copy unbounded. The cap
+ * bounds files and bytes; the containment check is what prevents self-recursion.
  */
 export async function copyTree(
   source: string,
   target: string,
   onProgress?: (p: CopyProgress) => void,
+  caps: Caps = DEFAULT_CAPS,
 ): Promise<CopyResult> {
-  const rootReal = canonical(source);
+  const rootReal = assertCopyContained(source, target);
   const result: CopyResult = {
     target,
     files: 0,
@@ -500,6 +550,20 @@ export async function copyTree(
         result.dirs += 1;
         break;
       case 'file': {
+        // [security] The copy's own cap, checked BEFORE the write against the
+        // projected totals so a single oversized file never lands
+        // (Cebab-6fax.43.4). The survey enforces the same thresholds, but it
+        // runs before `claimManagedDir` creates the target, so it cannot see a
+        // tree that grew since the estimate or a walk that slipped into its own
+        // output. A throw here lands in `runManagedCopy`'s catch, which removes
+        // the partial target — a copy that outgrew its measured size is not the
+        // snapshot it claims to be.
+        if (result.files + 1 > caps.maxFiles || result.bytes + entry.size > caps.maxBytes) {
+          throw new Error(
+            `managed_agent: copy exceeded the cap — over ${caps.maxBytes} bytes ` +
+              `or ${caps.maxFiles} files. The tree grew past what the survey measured.`,
+          );
+        }
         try {
           await fsp.copyFile(entry.abs, dest);
         } catch {

@@ -35,6 +35,35 @@ export function canonical(p: string): string {
 }
 
 /**
+ * Like `canonical`, but a resolution failure is a REFUSAL, never a fallback to
+ * the raw input.
+ *
+ * For a containment check the fallback in `canonical` is the escape hatch
+ * `project_containment_fallback_is_an_escape_hatch` warns about: an unresolved
+ * path compared against a resolved root reads as inside-or-outside on the
+ * strength of a string that never touched the filesystem, defeating the check
+ * it is part of. So a caller doing containment resolves with THIS and lets a
+ * path that cannot be resolved be refused.
+ *
+ * Uses the SAME `fs.realpathSync` as `canonical` on purpose. That call follows
+ * symlinks but does NOT restore on-disk letter case (macOS) or 8.3 short names
+ * (Windows) — the native `fs.realpathSync.native` does — so a containment check
+ * and a walk that later resolves each link with `canonical` must both go
+ * through this one primitive, or they disagree about the same path and an
+ * in-tree link is wrongly judged an escape.
+ */
+export function canonicalOrThrow(p: string, what: string): string {
+  try {
+    return fs.realpathSync(p);
+  } catch (err: unknown) {
+    throw new Error(
+      `path_containment: cannot resolve ${what} ${JSON.stringify(p)} (${String(err)})`,
+      { cause: err },
+    );
+  }
+}
+
+/**
  * Is `child` strictly inside `parent`? Both must already be canonical.
  *
  * `path.relative`, never `startsWith` — this is the whole reason the helper
