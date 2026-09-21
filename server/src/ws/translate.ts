@@ -58,7 +58,7 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
       if (m.subtype === 'init') {
         // Cluster B Phase 2 (BE-B1): stop dropping the rich SDK init payload.
         // The SDK's SDKSystemMessage subtype 'init' carries cwd,
-        // permission_mode, apiKeySource, slash_commands, skills, agents,
+        // permissionMode, apiKeySource, slash_commands, skills, agents,
         // plugins, mcp_servers (with per-server status), output_style,
         // fast_mode_state, claude_code_version, memory_paths — all of which
         // Cebab silently dropped pre-Phase-2.
@@ -67,13 +67,23 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
         // Missing fields on the SDK side stay undefined on the wire (the
         // schema is fully-optional); old clients ignore the extras.
         //
-        // snake_case on the SDK → camelCase on the wire (Cebab convention
-        // across the rest of protocol.ts).
+        // Most SDK fields are snake_case → camelCase on the wire (Cebab
+        // convention across the rest of protocol.ts). Two are NOT: the SDK's
+        // `SDKSystemMessage` already spells `permissionMode` and `apiKeySource`
+        // in camelCase (verified against the shipped sdk.d.ts and the captured
+        // `fixtures/hello.jsonl`), so those two are read verbatim. `Cebab-pcu8`:
+        // this read used to be `permission_mode`, a spelling the SDK never
+        // emits, so the field silently never round-tripped — and every
+        // mock-mode `session_started` in the repo is built from that fixture,
+        // making "does Cebab report the session's permission mode?" answer a
+        // false NO. The consumer is real: `resolveProjectAuthority` copies it
+        // onto `ProjectAuthority.permissionMode`, which `ModelIdentityCard`
+        // renders.
         const init = m as AnyMsg & {
           model: string;
           tools: string[];
           cwd?: string;
-          permission_mode?: string;
+          permissionMode?: string;
           apiKeySource?: string;
           claude_code_version?: string;
           output_style?: string;
@@ -92,11 +102,11 @@ export function translate(msg: SDKMessage, projectId: number): ServerMsg | null 
           model: init.model,
           tools: init.tools ?? [],
           ...(init.cwd !== undefined && { cwd: init.cwd }),
-          ...(init.permission_mode !== undefined && {
+          ...(init.permissionMode !== undefined && {
             // PermissionMode union is enforced at the protocol type, but the
             // SDK may add new variants — we cast and forward, the client
             // gracefully ignores unknowns.
-            permissionMode: init.permission_mode as 'default' | 'acceptEdits' | 'bypassPermissions',
+            permissionMode: init.permissionMode as 'default' | 'acceptEdits' | 'bypassPermissions',
           }),
           // Cebab-ujth: the cast is gone. It used to narrow the SDK's string
           // into `'user' | 'project' | 'org' | 'temporary' | 'oauth'` — which
