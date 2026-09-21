@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, test } from 'vitest';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { config } from '../config.js';
@@ -32,15 +33,23 @@ afterAll(async () => {
 });
 
 // Cluster B Phase 2 (BE-B1): the SDK init payload (SDKSystemMessage subtype
-// 'init') ships cwd, permission_mode, apiKeySource, slash_commands, skills,
+// 'init') ships cwd, permissionMode, apiKeySource, slash_commands, skills,
 // agents, plugins, mcp_servers, output_style, fast_mode_state,
 // claude_code_version, memory_paths. Pre-Phase-2, Cebab forwarded only
 // model + tools and silently dropped the rest — the "data on wire, nothing
 // rendered" gap (critical/B-authority-transparency.md §1).
 //
-// These tests assert the verbatim pass-through (snake_case → camelCase per
-// Cebab convention) plus the additive-optional contract: every new field is
-// `?`, omitted when the SDK omits it, never invented.
+// These tests assert the verbatim pass-through (most fields snake_case →
+// camelCase per Cebab convention; `permissionMode` and `apiKeySource` are
+// ALREADY camelCase on the SDK, so those two are read verbatim) plus the
+// additive-optional contract: every new field is `?`, omitted when the SDK
+// omits it, never invented.
+//
+// `Cebab-pcu8`: these inputs used to spell the mode `permission_mode`
+// (snake_case), which matched a reader that itself read the wrong key — so the
+// suite passed while the field never round-tripped from a REAL init. The
+// inputs below now use the SDK's actual spelling, `permissionMode`; if the
+// reader ever regresses to snake_case, the `permissionMode` assertions redden.
 
 function initMsg(extra: Record<string, unknown>): SDKMessage {
   return {
@@ -56,7 +65,7 @@ function initMsg(extra: Record<string, unknown>): SDKMessage {
 describe('translate(system.init) — Cluster B Phase 2 extended payload', () => {
   test('minimal init (only model + tools) still works — back-compat with old SDK shapes', () => {
     // Phase 2 must NOT break the existing minimal-init behavior. Operator
-    // running a stale SDK build that omits cwd/permission_mode/etc. must
+    // running a stale SDK build that omits cwd/permissionMode/etc. must
     // still see a session_started with just model + tools (no undefined
     // junk on the wire).
     const out = translate(initMsg({}), 7);
@@ -79,7 +88,7 @@ describe('translate(system.init) — Cluster B Phase 2 extended payload', () => 
     const out = translate(
       initMsg({
         cwd: '/Users/op/projects/cebab',
-        permission_mode: 'acceptEdits',
+        permissionMode: 'acceptEdits',
         apiKeySource: 'oauth',
         claude_code_version: '2.1.0',
         output_style: 'default',
@@ -124,7 +133,7 @@ describe('translate(system.init) — Cluster B Phase 2 extended payload', () => 
     // Confirms additive-optional: SDK adding fields in stages doesn't force
     // operators to upgrade their UI in lockstep. Absent fields stay off the
     // wire entirely (vs. shipping as `undefined`).
-    const out = translate(initMsg({ cwd: '/tmp/proj', permission_mode: 'default' }), 42);
+    const out = translate(initMsg({ cwd: '/tmp/proj', permissionMode: 'default' }), 42);
     expect(out).toMatchObject({
       type: 'session_started',
       cwd: '/tmp/proj',
@@ -136,13 +145,13 @@ describe('translate(system.init) — Cluster B Phase 2 extended payload', () => 
     expect(json.agents).toBeUndefined();
   });
 
-  test('forward-compat: unknown permission_mode string is passed through as-is', () => {
+  test('forward-compat: unknown permissionMode string is passed through as-is', () => {
     // The protocol type narrows permissionMode to the six current SDK
     // variants. If the SDK adds a new one, the translator forwards bytes
     // rather than dropping them; the client gracefully ignores unknowns
     // (Cebab convention for SDK enum drift — see system_event fall-through
     // at translate.ts:49).
-    const out = translate(initMsg({ permission_mode: 'some_future_mode' }), 7);
+    const out = translate(initMsg({ permissionMode: 'some_future_mode' }), 7);
     expect((out as { permissionMode: string }).permissionMode).toBe('some_future_mode');
   });
 
@@ -176,5 +185,37 @@ describe('translate(system.init) — Cluster B Phase 2 extended payload', () => 
       { name: 'a', status: 'connected' },
       { name: 'b', status: 'some-future-status' },
     ]);
+  });
+
+  // `Cebab-pcu8` anti-vacuity guard, anchored to the SHIPPED fixture rather
+  // than a hand-built object. `fixtures/hello.jsonl` is a real captured run and
+  // the source every mock-mode `session_started` in the repo replays through;
+  // its init line writes `"permissionMode":"default"` (camelCase, matching the
+  // SDK's `SDKSystemMessage`). The reader read `permission_mode`, so this field
+  // — alone among the init payload — silently never round-tripped. This test
+  // fails if the reader regresses to snake_case OR the fixture's spelling is
+  // "fixed" to match a broken reader: either divergence drops the key and the
+  // present-and-equal assertion reddens (a bare `not absent` check would not).
+  test('the real hello.jsonl init round-trips permissionMode: default', () => {
+    const fixture = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      '..',
+      '..',
+      '..',
+      'fixtures',
+      'hello.jsonl',
+    );
+    const initLine = fs
+      .readFileSync(fixture, 'utf8')
+      .split('\n')
+      .find((l) => l.trim().length > 0)!;
+    const initMessage = JSON.parse(initLine) as SDKMessage & { subtype?: string };
+    expect(initMessage.type).toBe('system');
+    expect(initMessage.subtype).toBe('init');
+
+    const out = translate(initMessage, 7) as { type: string; permissionMode?: string };
+    expect(out.type).toBe('session_started');
+    // Present AND equal to the fixture's value — not merely "not absent".
+    expect(out.permissionMode).toBe('default');
   });
 });
