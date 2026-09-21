@@ -354,4 +354,4 @@ All three platforms are in scope for a change — CI runs `ubuntu-latest` and
   typically **by far the largest thing Cebab writes**; reclaim the space with
   the in-app Delete on the agent (which also clears its sessions, events and
   logs), or by deleting the individual `<slug>/` directories by hand.
-- Original Claude session transcripts (used by `--resume`): `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`
+- Original Claude session transcripts (used by `--resume`): `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl`. This tree belongs to the `claude` CLI, not Cebab — so **neither deleting a session in Cebab nor the 7-day purge removes this file.** It is a full, unredacted copy of the conversation and stays on disk until you delete it yourself. An operator deleting a session for privacy should remove the matching file here too; Cebab will not reach outside its own data dir to do it.

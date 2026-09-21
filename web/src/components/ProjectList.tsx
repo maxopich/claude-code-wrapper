@@ -462,6 +462,19 @@ function BulkActionBar(props: {
           Delete {props.count} session{props.count === 1 ? '' : 's'} from{' '}
           <strong>{props.projectName}</strong>? Type <code>{BULK_DELETE_TOKEN}</code> to confirm.
         </span>
+        {/* Cebab-6fax.44.1: name the copy Cebab does NOT delete, at the point
+         *  of deletion. An operator deleting for privacy would otherwise
+         *  believe the conversation is gone — but the CLI keeps its own
+         *  unredacted transcript under ~/.claude, a tree Cebab does not own
+         *  and will not reach into. The honest sentence is the fix, not a
+         *  cross-boundary delete. Do NOT soften to "some data may remain" —
+         *  the whole defect is a wrong belief about a specific file. */}
+        <span className="bulk-action-confirm-note">
+          This deletes Cebab's record only. Claude keeps its own unredacted transcript of the
+          conversation at{' '}
+          <code>~/.claude/projects/&lt;encoded-cwd&gt;/&lt;session-id&gt;.jsonl</code>; Cebab does
+          not delete it. Remove that file yourself if you need the conversation gone.
+        </span>
         <input
           ref={confirmInputRef}
           className="bulk-action-confirm-input"
