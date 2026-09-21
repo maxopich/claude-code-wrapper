@@ -19,9 +19,16 @@
  * connected while the session watched it fail. The status field this probe
  * recovers is the difference between "never loaded" and "loaded and broke".
  *
- * COST. We break at the first `system/init` and abort — that message is
- * emitted by the CLI at startup, before it contacts the API, so a probe is a
- * process spawn and no model turn. `canUseTool` denies everything as a
+ * COST. We break at the first `system/init` and abort. That message is emitted
+ * at startup, but it is NOT before the CLI contacts the API: measured
+ * (2026-09-10, SDK 0.3.251, `probe_no_model_turn_smoke.ts`), the CLI dispatches
+ * a request ~2 ms after init and aborting at init does not cancel it — the SDK
+ * waits ~2 s (its close grace) before SIGTERM, long enough for a short turn to
+ * complete and bill. So a probe sends a real, billed request (~16 output /
+ * ~10.7k cache-write / ~24k cache-read tokens); its reply is RECORDED in the
+ * transcript only if it completes inside that grace. Whether to avoid the
+ * request or accept the cost is the maintainer's decision (Cebab-lh24); the
+ * behaviour here is deliberately unchanged. `canUseTool` denies everything as a
  * belt-and-braces second stop, and the whole run is bounded by
  * `PROBE_TIMEOUT_MS` so a wedged CLI cannot park a WS handler forever.
  *
@@ -44,10 +51,11 @@
  * SIDE EFFECT, deliberate (Cebab-ws0.3): while the CLI is up and before the
  * abort, this also refreshes the account-wide model catalogue. The list rides
  * the initialize handshake, so it is already in hand — asking for it here costs
- * a measured ~0ms and no extra spawn, and it is the only moment Cebab holds a
- * live CLI without having paid for a model turn. `refreshModelCatalogue` cannot
- * throw and cannot extend this probe past its own budget; a failure there
- * leaves the previous catalogue alone and this function's contract unchanged.
+ * a measured ~0ms and no extra spawn. It rides the same spawn as the probe's
+ * own billed request (see COST) rather than adding a turn of its own.
+ * `refreshModelCatalogue` cannot throw and cannot extend this probe past its own
+ * budget; a failure there leaves the previous catalogue alone and this
+ * function's contract unchanged.
  */
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { ServerMsg } from '@cebab/shared/protocol';

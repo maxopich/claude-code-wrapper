@@ -9,8 +9,11 @@
  *
  * WHY THIS IS A SMOKE AND NOT A TEST. It spawns the real `claude` CLI, which
  * needs the operator's credentials; CI has none. It is the same reason
- * `live_smoke.ts` is a script. Costs no model turn — `probeSessionStarted`
- * breaks at `system/init`, before the CLI contacts the API.
+ * `live_smoke.ts` is a script. `probeSessionStarted` breaks at `system/init`,
+ * but that is NOT free: by then the CLI has already dispatched a small, billed
+ * request the SDK's close grace does not cancel (measured — see
+ * `runner/probe.ts` and `probe_no_model_turn_smoke.ts`), so each probe here
+ * costs one spawn plus that request.
  *
  * WHY IT EXISTS AT ALL. `repo/project_authority.ts` gates `.mcp.json` reads on
  * `scopes.includes('project')`, and cites a hand-run measurement against SDK

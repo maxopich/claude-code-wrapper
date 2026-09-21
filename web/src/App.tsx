@@ -1236,8 +1236,10 @@ function AppShell({
     wsRef.current?.send({ type: 'set_project_model', projectId, model });
   }
 
-  // A refresh SPAWNS the CLI (no model turn, but a real process), so the
-  // in-flight project id is held locally to disable the button and label it.
+  // A refresh SPAWNS the CLI (a real process, and a small billed request — the
+  // probe breaks at init but the CLI has already dispatched one; see probe.ts),
+  // so the in-flight project id is held locally to disable the button and label
+  // it.
   // Cleared on the reply rather than optimistically — the spawn is the slow
   // part, and clearing early would let a second click fan out into two.
   function refreshModelCatalogue(projectId: number) {
