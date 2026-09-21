@@ -2511,7 +2511,12 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       };
 
     case 'managed_delete_result':
-      // Ignore a result for a modal the operator has already closed or replaced.
+      // Ignore a result for a modal the operator has already closed or
+      // replaced. Cebab-4zkc: dropping it here is only safe because a FAILED
+      // result whose modal is gone is re-surfaced as a toast by
+      // `notifyFromServerMsg` (a success needs no surface — the agent vanishes
+      // from the sidebar). Without that, a mid-delete dismissal made a failure
+      // silent while the tree was already half torn down.
       if (!state.managedDelete || state.managedDelete.projectId !== msg.projectId) return state;
       return {
         ...state,

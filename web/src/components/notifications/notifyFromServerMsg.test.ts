@@ -322,4 +322,82 @@ describe('notifyFromServerMsg — Cluster D Phase 4c rate-limit dedup (UI-D6)', 
     });
     expect(r.pushed).toHaveLength(0);
   });
+
+  // Cebab-4zkc: a failed managed-agent delete whose modal was dismissed
+  // mid-flight would otherwise be silent — the reducer drops the late result
+  // and the tree is already partly gone.
+  describe('managed_delete_result', () => {
+    function failedDelete(projectId: number, error: string): ServerMsg {
+      return { type: 'managed_delete_result', projectId, result: { ok: false, error } };
+    }
+
+    test('failed delete with the modal gone becomes an error toast', () => {
+      const r = recorder();
+      const isManagedDeleteModalShowing = vi.fn(() => false);
+      notifyFromServerMsg(failedDelete(7, 'could not remove all of the files (EBUSY)'), {
+        push: r.push,
+        mintId: () => 'mock-id',
+        now: () => 42,
+        isManagedDeleteModalShowing,
+      });
+      expect(r.pushed).toHaveLength(1);
+      expect(r.pushed[0]).toMatchObject({
+        id: 'mock-id',
+        ts: 42,
+        severity: 'error',
+        class: 'operational',
+        dedupeKey: 'managed_delete:7',
+        message: 'could not remove all of the files (EBUSY)',
+        sticky: true,
+      });
+      expect(isManagedDeleteModalShowing).toHaveBeenCalledWith(7);
+    });
+
+    test('failed delete whose modal is still open is NOT toasted (modal shows it inline)', () => {
+      const r = recorder();
+      const isManagedDeleteModalShowing = vi.fn(() => true);
+      notifyFromServerMsg(failedDelete(7, 'EACCES'), {
+        push: r.push,
+        isManagedDeleteModalShowing,
+      });
+      expect(r.pushed).toHaveLength(0);
+      expect(isManagedDeleteModalShowing).toHaveBeenCalledWith(7);
+    });
+
+    test('failed delete for a project other than the open modal still toasts', () => {
+      const r = recorder();
+      // The modal was replaced with a delete for project 9; project 7's
+      // result would be dropped by the reducer, so it needs the toast.
+      const isManagedDeleteModalShowing = vi.fn((pid: number) => pid === 9);
+      notifyFromServerMsg(failedDelete(7, 'EBUSY'), {
+        push: r.push,
+        isManagedDeleteModalShowing,
+      });
+      expect(r.pushed).toHaveLength(1);
+      expect(r.pushed[0]).toMatchObject({ dedupeKey: 'managed_delete:7' });
+    });
+
+    test('a SUCCESSFUL delete never toasts, even with its modal gone — only the failure does', () => {
+      // Anti-vacuity: a lone "success does not toast" assertion passes on the
+      // unfixed code too (no case → no toast either way), so it is folded into
+      // a case that reddens. We fire a success AND a failure, both with the
+      // modal gone, and assert exactly ONE toast lands — the failure's. On a
+      // revert neither pushes, so `toHaveLength(1)` fails; the fix makes the
+      // success silent (self-evident: the agent leaves the sidebar) while the
+      // failure surfaces.
+      const r = recorder();
+      const isManagedDeleteModalShowing = vi.fn(() => false);
+      notifyFromServerMsg(
+        {
+          type: 'managed_delete_result',
+          projectId: 3,
+          result: { ok: true, name: 'scribe', sessionsRemoved: 3 },
+        },
+        { push: r.push, isManagedDeleteModalShowing },
+      );
+      notifyFromServerMsg(failedDelete(7, 'EBUSY'), { push: r.push, isManagedDeleteModalShowing });
+      expect(r.pushed).toHaveLength(1);
+      expect(r.pushed[0]).toMatchObject({ dedupeKey: 'managed_delete:7' });
+    });
+  });
 });

@@ -952,6 +952,14 @@ function AppShell({
                   const sv = stateRef.current.sessionsByProject[pid]?.[sessionId];
                   return !!sv?.rateLimit;
                 },
+                // Cebab-4zkc: `stateRef` still holds the pre-reduce snapshot
+                // here (it's refreshed in a post-render effect), so this reads
+                // whether the delete modal was open for this project WHEN the
+                // result arrived — i.e. whether the modal will render the
+                // error itself. If so, suppress the toast; if not, the reducer
+                // dropped the result and the toast is the only surface left.
+                isManagedDeleteModalShowing: (projectId) =>
+                  stateRef.current.managedDelete?.projectId === projectId,
               });
             }
           } catch (err) {
