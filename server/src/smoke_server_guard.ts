@@ -38,6 +38,8 @@
  */
 import net from 'node:net';
 
+import { parseIntEnv, readAliasedEnv } from './config.js';
+
 export type BindProbe = {
   /** True iff a listener could be opened on this port, and then closed again. */
   bindable: boolean;
@@ -65,10 +67,17 @@ export function probeBind(port: number, host = '127.0.0.1'): Promise<BindProbe> 
   });
 }
 
-/** The command that names the process holding a port, per platform. */
+/**
+ * The command that names the process holding a port, per platform.
+ *
+ * PowerShell rather than `netstat | findstr :<port>` on Windows: the substring
+ * form also matches `:<port>0`, `1<port>`, and remote ports, so it answers a
+ * different question than the one being asked at the moment someone is trying
+ * to find one specific listener.
+ */
 export function whoHoldsPortCommand(port: number, platform: string = process.platform): string {
   return platform === 'win32'
-    ? `netstat -ano | findstr :${port}`
+    ? `Get-NetTCPConnection -LocalPort ${port} -State Listen | Select-Object OwningProcess`
     : `lsof -nP -iTCP:${port} -sTCP:LISTEN`;
 }
 
@@ -171,7 +180,7 @@ export async function waitForHealthyServer(deps: HealthWaitDeps): Promise<Health
 }
 
 /** Where a smoke should point, and it is not always the default. */
-export type SmokeTarget = { port: string; wsUrl: string };
+export type SmokeTarget = { port: number; wsUrl: string };
 
 /**
  * Resolve the server a smoke is meant to talk to (`Cebab-c0n2`).
@@ -182,10 +191,28 @@ export type SmokeTarget = { port: string; wsUrl: string };
  * the same "talks to a server it did not start" defect the port guard above
  * closes from the other side, arriving by a different route.
  *
+ * IT DELEGATES TO `config.ts`'s OWN TWO HELPERS, and that is the point rather
+ * than tidiness. `CEBAB_PORT` is the canonical name and OUTRANKS the bare
+ * `PORT` the smokes were written around; `.env.example` sets `CEBAB_PORT` and
+ * the README tells operators to use it. A smoke that read only `PORT` would
+ * probe and dial one port while the server it spawned bound another — the very
+ * "talks to a server it did not start" failure, reintroduced by the guard
+ * meant to close it. Reusing `parseIntEnv` also inherits its rejection of the
+ * blank and non-integer values that `Number('')` silently turns into port 0.
+ *
  * `WS_URL` still wins outright: it is the escape hatch for pointing a smoke at
  * a server on another host, where no port arithmetic applies.
  */
-export function resolveSmokeTarget(env: NodeJS.ProcessEnv, defaultPort: number): SmokeTarget {
-  const port = env.PORT ?? String(defaultPort);
+export function resolveSmokeTarget(
+  env: NodeJS.ProcessEnv,
+  defaultPort: number,
+  warn: (msg: string) => void = console.warn,
+): SmokeTarget {
+  const port = parseIntEnv(
+    'CEBAB_PORT',
+    readAliasedEnv('CEBAB_PORT', env.CEBAB_PORT, 'PORT', env.PORT, warn),
+    { fallback: defaultPort, min: 1, max: 65535 },
+    warn,
+  );
   return { port, wsUrl: env.WS_URL ?? `ws://127.0.0.1:${port}` };
 }

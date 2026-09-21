@@ -24,12 +24,15 @@ import os from 'node:os';
 import path from 'node:path';
 import WebSocket from 'ws';
 import { DEFAULT_PORT } from '@cebab/shared/net';
+import { resolveSmokeTarget } from './smoke_server_guard.js';
 import { sawNonce } from './smoke_assertions.js';
 
 // F4: per-launch auth token. See ws_smoke.ts for the same setup.
 const tokenPath = process.env.CEBAB_AUTH_TOKEN_FILE ?? path.join(os.homedir(), '.cebab/auth-token');
 const token = process.env.CEBAB_AUTH_TOKEN ?? fs.readFileSync(tokenPath, 'utf8').trim();
-const base = process.env.WS_URL ?? `ws://127.0.0.1:${DEFAULT_PORT}`;
+// Resolved rather than assumed (`Cebab-c0n2`): reading only the compiled-in
+// default dialled whatever sat on it whenever the server was on another port.
+const base = resolveSmokeTarget(process.env, DEFAULT_PORT).wsUrl;
 const url = `${base}/?token=${encodeURIComponent(token)}`;
 const PROJECT_NAME = process.env.PROJECT ?? 'Cebab';
 

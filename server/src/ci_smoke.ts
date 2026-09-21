@@ -24,13 +24,20 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_PORT } from '@cebab/shared/net';
-import { checkPortAvailable, waitForHealthyServer } from './smoke_server_guard.js';
+import {
+  checkPortAvailable,
+  resolveSmokeTarget,
+  waitForHealthyServer,
+} from './smoke_server_guard.js';
 
 const require = createRequire(import.meta.url);
 const tsxCli = require.resolve('tsx/cli'); // node_modules/tsx/dist/cli.mjs
 const serverDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
-const PORT = process.env.PORT ?? String(DEFAULT_PORT);
+// One port decision for the whole smoke, resolved the way the SERVER resolves
+// it — `CEBAB_PORT` outranks the deprecated bare `PORT`, so reading only the
+// latter would probe one port while the child bound another.
+const PORT = String(resolveSmokeTarget(process.env, DEFAULT_PORT).port);
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-ci-home-'));
 const tmpWs = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-ci-ws-'));
 fs.mkdirSync(path.join(tmpWs, 'Cebab'), { recursive: true }); // ws_smoke needs a "Cebab" project
@@ -38,6 +45,10 @@ fs.mkdirSync(path.join(tmpWs, 'Cebab'), { recursive: true }); // ws_smoke needs 
 const childEnv: NodeJS.ProcessEnv = {
   ...process.env,
   MOCK: '1',
+  // Both names, same value: the canonical one is what config.ts reads first,
+  // and leaving a stale inherited `PORT` beside it would be the same
+  // disagreement this file now exists to prevent.
+  CEBAB_PORT: PORT,
   PORT,
   WORKSPACE_ROOT: tmpWs,
   HOME: tmpHome,

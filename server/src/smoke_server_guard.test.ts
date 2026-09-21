@@ -105,8 +105,10 @@ describe('portUnavailableMessage', () => {
   });
 
   test('the diagnostic command follows the platform', () => {
-    expect(whoHoldsPortCommand(DEFAULT_PORT, 'win32')).toContain('netstat');
+    expect(whoHoldsPortCommand(DEFAULT_PORT, 'win32')).toContain('Get-NetTCPConnection');
     expect(whoHoldsPortCommand(DEFAULT_PORT, 'linux')).toContain('lsof');
+    // Exact port, not a substring match that also finds :43190 and remote ports.
+    expect(whoHoldsPortCommand(DEFAULT_PORT, 'win32')).toContain(`-LocalPort ${DEFAULT_PORT}`);
   });
 });
 
@@ -206,22 +208,54 @@ describe('waitForHealthyServer', () => {
 });
 
 describe('resolveSmokeTarget', () => {
-  test('PORT wins over the compiled-in default', () => {
-    // The Cebab-c0n2 case: ci_smoke starts the server on PORT, so a smoke that
-    // reads only DEFAULT_PORT talks to whatever is on the default instead.
-    const t = resolveSmokeTarget({ PORT: '4400' }, DEFAULT_PORT);
-    expect(t.port).toBe('4400');
-    expect(t.wsUrl).toBe('ws://127.0.0.1:4400');
+  const quiet = () => {};
+
+  test('CEBAB_PORT outranks the bare PORT, because the SERVER resolves it that way', () => {
+    // The finding this case exists for. config.ts reads
+    // readAliasedEnv('CEBAB_PORT', …, 'PORT', …) and `.env.example` sets the
+    // prefixed name, so a smoke honouring only `PORT` probes and dials one
+    // port while the server it spawned binds another — a misattributed 30s
+    // timeout, which is the exact failure class this module exists to remove.
+    const t = resolveSmokeTarget({ PORT: '52431', CEBAB_PORT: '52432' }, DEFAULT_PORT, quiet);
+    expect(t.port).toBe(52432);
+    expect(t.wsUrl).toBe('ws://127.0.0.1:52432');
   });
 
-  test('with no PORT it falls back to the shared default', () => {
-    const t = resolveSmokeTarget({}, DEFAULT_PORT);
-    expect(t.port).toBe(String(DEFAULT_PORT));
-    expect(t.wsUrl).toContain(`:${DEFAULT_PORT}`);
+  test('the deprecated bare PORT still works, and warns', () => {
+    const warnings: string[] = [];
+    const t = resolveSmokeTarget({ PORT: '4400' }, DEFAULT_PORT, (m) => warnings.push(m));
+    expect(t.port).toBe(4400);
+    expect(warnings.join(' ')).toContain('PORT is deprecated');
+  });
+
+  test('with neither set it falls back to the shared default', () => {
+    expect(resolveSmokeTarget({}, DEFAULT_PORT, quiet).port).toBe(DEFAULT_PORT);
+  });
+
+  test('a BLANK port falls back instead of becoming port 0', () => {
+    // `Number('')` is 0, and port 0 means "any free port" — so a bind probe on
+    // it always succeeds and the guard silently tests nothing while the server
+    // falls back to the default. config.ts already carries parseIntEnv for
+    // exactly this shape; reusing it is what keeps the two from disagreeing.
+    expect(resolveSmokeTarget({ PORT: '' }, DEFAULT_PORT, quiet).port).toBe(DEFAULT_PORT);
+    expect(resolveSmokeTarget({ CEBAB_PORT: '   ' }, DEFAULT_PORT, quiet).port).toBe(DEFAULT_PORT);
+  });
+
+  test('a non-numeric or out-of-range port falls back and warns', () => {
+    for (const raw of ['abc', '0', '65536', '4319.5']) {
+      const warnings: string[] = [];
+      const t = resolveSmokeTarget({ CEBAB_PORT: raw }, DEFAULT_PORT, (m) => warnings.push(m));
+      expect(t.port, raw).toBe(DEFAULT_PORT);
+      expect(warnings.join(' '), raw).toContain('CEBAB_PORT');
+    }
   });
 
   test('WS_URL wins outright — the other-host escape hatch', () => {
-    const t = resolveSmokeTarget({ PORT: '4400', WS_URL: 'ws://elsewhere:9/' }, DEFAULT_PORT);
+    const t = resolveSmokeTarget(
+      { CEBAB_PORT: '4400', WS_URL: 'ws://elsewhere:9/' },
+      DEFAULT_PORT,
+      quiet,
+    );
     expect(t.wsUrl).toBe('ws://elsewhere:9/');
   });
 });
