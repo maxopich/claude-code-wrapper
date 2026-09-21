@@ -24,6 +24,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { DEFAULT_PORT } from '@cebab/shared/net';
+import { checkPortAvailable, waitForHealthyServer } from './smoke_server_guard.js';
 
 const require = createRequire(import.meta.url);
 const tsxCli = require.resolve('tsx/cli'); // node_modules/tsx/dist/cli.mjs
@@ -56,30 +57,35 @@ function runNode(script: string, opts: { wait: boolean }): Promise<number> | Chi
   return new Promise<number>((resolve) => child.on('exit', (code) => resolve(code ?? 1)));
 }
 
-async function waitForHealth(timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const r = await fetch(`http://127.0.0.1:${PORT}/health`);
-      if (r.ok) return true;
-    } catch {
-      /* not up yet */
-    }
-    await new Promise((r) => setTimeout(r, 300));
-  }
-  return false;
-}
-
 async function main(): Promise<number> {
+  // BEFORE the spawn, not after. Once something else holds the port, every
+  // signal downstream is about that process instead of ours, and the error it
+  // eventually produces names neither the port nor this file.
+  const portProblem = await checkPortAvailable(Number(PORT));
+  if (portProblem) {
+    console.error(`[ci-smoke] ${portProblem}`);
+    return 1;
+  }
+
   server = runNode('src/index.ts', { wait: false }) as ChildProcess;
   let serverExited = false;
-  server.on('exit', () => {
+  let exitCode: number | null = null;
+  server.on('exit', (code) => {
     serverExited = true;
+    exitCode = code;
   });
 
-  const healthy = await waitForHealth(30_000);
-  if (!healthy || serverExited) {
-    console.error('[ci-smoke] server did not become healthy within 30s');
+  const verdict = await waitForHealthyServer({
+    url: `http://127.0.0.1:${PORT}/health`,
+    timeoutMs: 30_000,
+    isDead: () => serverExited,
+  });
+  if (verdict !== 'healthy') {
+    console.error(
+      verdict === 'died'
+        ? `[ci-smoke] the server we started exited (code ${exitCode}) before becoming healthy`
+        : '[ci-smoke] server did not become healthy within 30s',
+    );
     return 1;
   }
   console.log('[ci-smoke] server healthy — running ws_smoke');
