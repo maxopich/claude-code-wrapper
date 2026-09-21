@@ -57,9 +57,14 @@ a human, so auto-approve is bypass in effect and a malicious transitive
 `postinstall` would be direct RCE), which means a plain `npm install`
 deliberately does **not** build
 `better-sqlite3`. The bootstrap script — pure Node, no shell, runnable on a
-fresh clone — does the three required steps in order: `npm install`, then the
-one re-enabled native build via `prebuild-install`, then git hooks. The older
-`npm install` && `npm run setup` two-step still works.
+fresh clone — does the required steps in order: `npm install`, the one
+re-enabled native build via `prebuild-install`, a hash check on the binary that
+build produced, then git hooks — and finally it checks that the hooks can
+actually run, aborting if they cannot. That last step is not ceremony: tests,
+lint and typecheck are all green on a checkout whose git hooks are installed but
+dead, so nothing else in the repo can tell you your pre-commit checks have
+stopped firing. The older `npm install` && `npm run setup` two-step still
+works, and skips both verifications.
 
 `prebuild-install` fetches a binary matching your platform and Node ABI, so no
 compiler toolchain is needed where one is published — verified on macOS arm64,

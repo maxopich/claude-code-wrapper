@@ -86,7 +86,24 @@ for (const step of steps) {
 console.log('\n[bootstrap] install git hooks (husky)…');
 const huskyCode = await run(['exec', '--no', '--', 'husky']);
 if (huskyCode !== 0) {
-  console.warn('[bootstrap] husky skipped (non-git or unavailable) — fine, hooks are dev-only.');
+  console.warn(
+    '[bootstrap] the husky step did not succeed — the check below decides whether that matters.',
+  );
+}
+
+// The installer's exit code is NOT the signal (`Cebab-o1to`). It has already
+// exited non-zero on a tarball checkout, where there is nothing to install and
+// nothing is wrong; and the state that cost a full unattended run — a helper
+// the installer could not copy, so every git hook fails — is invisible to
+// tests, lint and typecheck, all of which stay green on a checkout whose
+// pre-commit checks have silently stopped running. So ASK, rather than infer,
+// and abort: the whole point is that a broken hook install must not be
+// something you find out about later.
+console.log('\n[bootstrap] verify the git hooks…');
+const hooksCode = await run(['run', 'verify:hooks']);
+if (hooksCode !== 0) {
+  console.error('[bootstrap] "verify the git hooks" failed. Aborting.');
+  process.exit(hooksCode);
 }
 
 console.log('\n[bootstrap] done.  Run it with:      npm start   (one port, no dev server)');
