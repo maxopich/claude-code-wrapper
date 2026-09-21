@@ -1,4 +1,5 @@
 import type { McpServerView } from '@cebab/shared/protocol';
+import { mcpOriginLoads } from '@cebab/shared';
 import { useCopyFeedback } from '../../useCopyFeedback';
 
 // Cluster B Phase 6c (UI-B13 / B15 / spec §4.2 F1): MCP servers section of
@@ -19,8 +20,7 @@ import { useCopyFeedback } from '../../useCopyFeedback';
 //   - WHAT   — `command` + `args` from `config`
 //   - TRUST  — `trust` chip from the mcp_trust JOIN (Phase 4):
 //                trusted / pending_tofu / hash_changed / declaration_changed /
-//                script_changed /
-//                denied / unknown
+//                script_changed / pin_oversized / denied / unknown
 //   - STATUS — runtime status dot (gray "configured" by default — UI-B15:
 //              never reads "running" without server confirmation)
 //
@@ -54,6 +54,9 @@ const TRUST_CHIP_CLASS: Record<McpServerView['trust'], string> = {
   // unchanged declaration is the swap `declaration_changed` catches, done in
   // the one place a `git diff` of the config shows nothing.
   script_changed: 'mcp-trust-err',
+  // Cebab-6fax.42.1: error tier. Not a prompt-able warning — the server was
+  // REFUSED because its files cannot be pinned, so it is as blocked as `denied`.
+  pin_oversized: 'mcp-trust-err',
   denied: 'mcp-trust-err',
   unknown: 'mcp-trust-muted',
 };
@@ -64,6 +67,7 @@ const TRUST_LABEL: Record<McpServerView['trust'], string> = {
   hash_changed: 'hash changed',
   declaration_changed: 'declaration changed',
   script_changed: 'script changed',
+  pin_oversized: 'too large to pin',
   denied: 'denied',
   unknown: 'unknown',
 };
@@ -158,7 +162,7 @@ export function McpServersList(props: {
     <div className="mcp-servers-block">
       <ul className="mcp-servers-list" aria-label="Declared MCP servers">
         {sorted.map((s) => (
-          <McpServerCard key={`${s.scope}:${s.name}`} server={s} />
+          <McpServerCard key={`${s.scope}:${s.name}`} server={s} wouldLoad />
         ))}
       </ul>
       {unloaded.length > 0 && <UnloadedMcpServers unloaded={unloaded} />}
@@ -188,16 +192,24 @@ function UnloadedMcpServers(props: { unloaded: McpServerView[] }) {
         aria-label="Declared but unloaded MCP servers"
       >
         {sorted.map((s) => (
-          <McpServerCard key={`unloaded:${s.scope}:${s.name}`} server={s} />
+          <McpServerCard key={`unloaded:${s.scope}:${s.name}`} server={s} wouldLoad={false} />
         ))}
       </ul>
     </section>
   );
 }
 
-function McpServerCard(props: { server: McpServerView }) {
-  const { server } = props;
+function McpServerCard(props: { server: McpServerView; wouldLoad: boolean }) {
+  const { server, wouldLoad } = props;
   const { copied, copy } = useCopyFeedback();
+  // Cebab-6fax.42.1: the refusal note only helps where the server would actually
+  // load. A settings-layer `mcpServers` key (`mcpOriginLoads` false) never runs
+  // at any scope, and an untrusted project's `.mcp.json` (`wouldLoad` false, in
+  // the "declared but not loaded" list) does not run either — Trust is what
+  // keeps it out, not the pin budget. Telling the operator "Cebab will not start
+  // this" is only true, and only actionable, for a row that otherwise loads.
+  const showPinOversizedNote =
+    server.trust === 'pin_oversized' && wouldLoad && mcpOriginLoads(server.scope);
   async function onCopy() {
     if (!server.originPath) return;
     await copy(server.originPath);
@@ -219,6 +231,26 @@ function McpServerCard(props: { server: McpServerView }) {
           {server.tools.length} {server.tools.length === 1 ? 'tool' : 'tools'}
         </span>
       </header>
+      {showPinOversizedNote && (
+        <p className="mcp-server-pin-oversized" role="note">
+          <strong>Cebab will not start this server.</strong>{' '}
+          {server.pinOversizedReason === 'arg_count' ? (
+            <>
+              Its declaration passes more than 64 path-like arguments — too many for Cebab to
+              fingerprint — so it cannot tell if one of them is later swapped under the same config.
+              Rather than run it without that protection, Cebab refuses it. To use it, pass fewer
+              arguments and reopen the panel.
+            </>
+          ) : (
+            <>
+              Its declaration points at more script files than Cebab can fingerprint, so it cannot
+              tell if one of them is later rewritten under the same config. Rather than run it
+              without that protection, Cebab refuses it. To use it, point it at fewer files — or a
+              single consolidated script — and reopen the panel.
+            </>
+          )}
+        </p>
+      )}
       <dl className="mcp-server-facts">
         {server.originPath && (
           <div className="mcp-server-fact">

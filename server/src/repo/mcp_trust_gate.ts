@@ -27,6 +27,9 @@ import { appendSafetyAudit } from '../notifications/safety_audit.js';
 //   - trust='pending_tofu'       → emit `first_seen` pending + await decision
 //   - trust='hash_changed'       → emit `hash_changed` pending + await decision
 //   - trust='script_changed'     → emit `script_changed` pending + await decision
+//   - trust='pin_oversized'      → silent refusal + safety_audit row (Cebab-6fax.42.1);
+//                                  NOT a prompt — the declaration cannot be pinned, so
+//                                  approving would store a null that stops protecting
 //   - trust='unknown' (no path)  → silent (no anchor; same as cebab-injected)
 //
 // The "block" is structural: `awaitMcpTrustDecisions` returns a Promise that
@@ -196,6 +199,20 @@ export async function awaitMcpTrustDecisions(input: AwaitGateInput): Promise<Gat
       case 'denied':
         recordSilentRefusal(input.projectId, server.name, originPath, 'denied_remember');
         outcome.refused.push({ serverName: server.name, originPath, persisted: true });
+        continue;
+      case 'pin_oversized':
+        // `Cebab-6fax.42.1`: the declaration names more files than the pin
+        // budget can hash, so its files cannot be identified. Refuse rather than
+        // prompt — an "Allow" here would persist a NULL script pin, which is the
+        // silent no-protection state (`no later spawn can report script_changed`)
+        // this whole state exists to replace. `persisted: false` because no
+        // operator decision was made and nothing was written to `mcp_trust`; the
+        // audit row is its own reason code so a forensic reader tells it apart
+        // from a human's denial. The server does not load (it rides `refused`
+        // into `deniedMcpServers`, same enforcement as any refusal), and the
+        // authority panel shows the operator what to do about it.
+        recordSilentRefusal(input.projectId, server.name, originPath, 'pin_oversized');
+        outcome.refused.push({ serverName: server.name, originPath, persisted: false });
         continue;
       case 'pending_tofu':
       case 'hash_changed':
@@ -526,7 +543,12 @@ function recordSilentRefusal(
     // own code rather than a reused `deny_once` — the operator denied nothing,
     // they were never asked — matching what the bus install gate already does
     // with the same condition.
-    | 'gate_backlog',
+    | 'gate_backlog'
+    // `Cebab-6fax.42.1`: the declaration is too large to pin its files, so the
+    // server was refused rather than being offered an approval that would store
+    // a null pin. Its own code for the same reason as `gate_backlog`: no human
+    // decided anything, and a forensic reader must not read it as one.
+    | 'pin_oversized',
 ): void {
   appendSafetyAudit({
     ts: Date.now(),

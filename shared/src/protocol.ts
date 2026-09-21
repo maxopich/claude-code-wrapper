@@ -4407,6 +4407,20 @@ export type McpServerView = {
     | 'declaration_changed'
     /** Cebab-1af: declaration unchanged, a file it runs rewritten in place. */
     | 'script_changed'
+    /**
+     * `Cebab-6fax.42.1`: the declaration names more files than the script-pin
+     * budget can hash (`MAX_HASHED_SCRIPTS` / `MAX_SCRIPT_CANDIDATES` in
+     * `mcp_trust.ts`), so its files CANNOT be pinned. This is a REFUSAL, not a
+     * prompt: approving it would store a NULL `script_shas_json`, which is
+     * exactly the "silently stop protecting" state #577 half-fixed — a row that
+     * pinned nothing can never report `script_changed` again. So the gate treats
+     * it like `denied` (silent refusal, the server does not load) rather than
+     * offering a Trust button that would launder the null back in. It is NOT
+     * operator-decidable here; the remedy is to shrink the declaration (fewer
+     * path-like args, or a smaller/consolidated script) so it fits the budget.
+     * The panel says so.
+     */
+    | 'pin_oversized'
     | 'denied'
     | 'unknown';
   binarySha?: string;
@@ -4423,6 +4437,15 @@ export type McpServerView = {
    * asking the ledger a second question and risking a different answer.
    */
   scriptChanges?: Array<{ path: string; previousSha: string; sha: string }>;
+  /**
+   * `Cebab-6fax.42.1`: set only when `trust === 'pin_oversized'`. Which budget
+   * ceiling the declaration blew, so the panel's refusal note names the real
+   * trigger instead of guessing:
+   *   - `'script_bytes'` — more readable script files than can be fingerprinted.
+   *   - `'arg_count'`    — more than 64 path-like arguments.
+   * Both fail closed to the same refusal; the distinction is only copy.
+   */
+  pinOversizedReason?: 'script_bytes' | 'arg_count';
   firstSeenAt?: number;
   lastSeenAt?: number;
 };
