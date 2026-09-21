@@ -72,6 +72,17 @@ export type NotifyContext = {
    * [pid][sid].rateLimit !== undefined` for the rate-limit kind).
    */
   isBannerVisibleFor?: (sessionId: string, kind: 'rate_limit') => boolean;
+  /**
+   * Cebab-4zkc: the delete-confirm modal shows its own result inline, but
+   * only while it is still open FOR THAT PROJECT. If the operator dismissed
+   * it (or replaced it with another agent's delete) before the result
+   * landed, the reducer's late-answer guard drops the result and a FAILED
+   * delete reports nothing anywhere. This predicate answers "will the modal
+   * render this result itself?" — `true` ⇒ suppress the toast (the modal has
+   * it), `false`/`undefined` ⇒ toast the failure. Reads the modal state as
+   * it was when the result arrived (App.tsx's `stateRef`, pre-reduce).
+   */
+  isManagedDeleteModalShowing?: (projectId: number) => boolean;
 };
 
 /**
@@ -206,6 +217,31 @@ export function notifyFromServerMsg(msg: ServerMsg, ctx: NotifyContext): void {
               ? failTail.replace(/^ · /, '')
               : 'Hidden from the session list.',
         sticky: false,
+      });
+      return;
+    }
+
+    case 'managed_delete_result': {
+      // Cebab-4zkc: a failed delete whose modal is gone would otherwise be
+      // silent — the reducer's `managed_delete_result` case returns state
+      // unchanged when the modal was closed or replaced, and the tree is
+      // already half torn down by then. A SUCCESS is self-evident (the agent
+      // vanishes from the sidebar), so only the failure needs a surface.
+      //
+      // When the modal IS still open for this project it renders the error
+      // inline (status → 'done'); toasting too would double-show. So we defer
+      // to the modal exactly as the rate-limit case defers to its banner.
+      if (msg.result.ok) return;
+      if (ctx.isManagedDeleteModalShowing?.(msg.projectId)) return;
+      ctx.push({
+        id: mintId(),
+        ts: now,
+        severity: 'error',
+        class: 'operational',
+        dedupeKey: `managed_delete:${msg.projectId}`,
+        title: "Couldn't delete the managed agent",
+        message: msg.result.error,
+        sticky: true,
       });
       return;
     }
