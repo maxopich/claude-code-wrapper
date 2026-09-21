@@ -84,3 +84,12 @@ spawnFn(process.execPath, [tsxCli, script], {
   cwd: serverDir,
   stdio: 'inherit',
 });
+
+// A real executable by name. `git` is `git.exe` on Windows and no npm package
+// shims it, so a shell buys nothing and costs argument splitting on any path
+// containing a space.
+// ok: cebab-spawn-missing-win32-shell
+spawnFn('git', ['-C', repoRoot, 'rev-parse', '--is-inside-work-tree'], {
+  encoding: 'utf8',
+  stdio: ['ignore', 'pipe', 'ignore'],
+});
