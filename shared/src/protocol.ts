@@ -4813,6 +4813,23 @@ export type ProjectScan = {
   /** Env-var injections declared by settings files. NAMES only ever leave here, never values. */
   envInjections: ScannedTally;
   /**
+   * Cebab-ygu.44: `permissions.allow` / `.deny` entries declared by settings
+   * files, split declared vs loaded like the tallies above.
+   *
+   * The scan omitted these until now, so a project whose only declaration is a
+   * permission ruleset rendered as "declares nothing" — the exact understatement
+   * `Cebab-ws0.6` was created to remove, and worse here than the MCP case it
+   * fixed: an `allow` rule REMOVES the tool-approval card (`Cebab-ygu.19`), so
+   * "declares nothing" was shown for the one declaration that most changes what
+   * the operator will be asked. The Authority panel already renders these from
+   * `detectPermissionRules`; only this cheap tier omitted them.
+   *
+   * `allow` / `deny` break the DECLARED total down by effect — an allow rule
+   * (widens auto-approval) and a deny rule (narrows it) pull opposite ways, so a
+   * single count would hide which. They sum to `declared`.
+   */
+  permissionRules: ScannedTally & { allow: number; deny: number };
+  /**
    * True iff at least one settings file was present but could not be read or
    * parsed. The scan still returns whatever it did read; this says "part of
    * this answer is missing" rather than letting an empty result claim the

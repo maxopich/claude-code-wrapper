@@ -51,6 +51,7 @@ import {
   detectEnvInjections,
   detectHooks,
   detectMcpServers,
+  detectPermissionRules,
   loadSettingsLayers,
   mcpJsonIsUnreadable,
   readClaudeJsonServers,
@@ -128,6 +129,7 @@ export function scanProject(row: ProjectRow, scannedAt: number = Date.now()): Pr
     mcpServers: [],
     hooks: { declared: 0, loaded: 0, hasLocalScope: false },
     envInjections: { declared: 0, loaded: 0 },
+    permissionRules: { declared: 0, loaded: 0, allow: 0, deny: 0 },
     degraded: true,
   };
 
@@ -169,6 +171,12 @@ export function scanProject(row: ProjectRow, scannedAt: number = Date.now()): Pr
 
     const hooks = detectHooks(layers);
     const envInjections = detectEnvInjections(layers);
+    // Cebab-ygu.44: permission rules load from these same settings layers, so
+    // they take the scope-derived answer exactly as hooks and env injections do
+    // — an untrusted project reads no project/local rules. `detectMcpServers`
+    // above is the one that does NOT, because a settings-layer `mcpServers` key
+    // loads at no scope; `permissions` is not that special case.
+    const permissionRules = detectPermissionRules(layers);
 
     // A file we could not read is not a file that declares nothing. For the
     // settings layers this is exact and free: `readSettingsFile` returns a
@@ -192,6 +200,12 @@ export function scanProject(row: ProjectRow, scannedAt: number = Date.now()): Pr
       envInjections: {
         declared: envInjections.length,
         loaded: envInjections.filter((e) => scopeLoads(scopesLoaded, e.scope)).length,
+      },
+      permissionRules: {
+        declared: permissionRules.length,
+        loaded: permissionRules.filter((r) => scopeLoads(scopesLoaded, r.scope)).length,
+        allow: permissionRules.filter((r) => r.effect === 'allow').length,
+        deny: permissionRules.filter((r) => r.effect === 'deny').length,
       },
       degraded: unreadable || mcpJsonUnreadable,
     };
