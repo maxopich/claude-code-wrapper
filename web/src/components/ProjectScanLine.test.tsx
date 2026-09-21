@@ -36,6 +36,7 @@ function scan(overrides: Partial<ProjectScan> = {}): ProjectScan {
     mcpServers: [],
     hooks: { declared: 0, loaded: 0, hasLocalScope: false },
     envInjections: { declared: 0, loaded: 0 },
+    permissionRules: { declared: 0, loaded: 0, allow: 0, deny: 0 },
     degraded: false,
     ...overrides,
   };
@@ -159,6 +160,59 @@ describe('ProjectScanLine — declared vs loaded', () => {
       }),
     });
     expect(text()).toEqual(['2 MCP servers', '3 hooks', '⚠ 2 not loaded']);
+  });
+});
+
+describe('ProjectScanLine — permission rules (Cebab-ygu.44)', () => {
+  test('a project whose ONLY declaration is a permission ruleset does not say "declares nothing"', () => {
+    // The reported case: rules-lab ships .claude/settings.json with two allow
+    // and three deny entries and nothing else, and read "declares nothing" —
+    // the one declaration that most changes what the operator will be asked.
+    render({
+      scan: scan({
+        scopesLoaded: ['user', 'project', 'local'],
+        permissionRules: { declared: 5, loaded: 5, allow: 2, deny: 3 },
+      }),
+    });
+    expect(text()).toEqual(['5 permission rules']);
+    expect(text().join(' ')).not.toContain('declares nothing');
+  });
+
+  test('the tooltip breaks the count down by allow vs deny', () => {
+    // Allow and deny pull opposite ways — allow removes an approval card, deny
+    // blocks a tool — so the breakdown is the actionable half of the count.
+    render({
+      scan: scan({
+        scopesLoaded: ['user', 'project', 'local'],
+        permissionRules: { declared: 5, loaded: 5, allow: 2, deny: 3 },
+      }),
+    });
+    const chip = chips().find((c) => c.textContent?.includes('permission rule'));
+    const title = chip?.getAttribute('title') ?? '';
+    expect(title).toContain('2 allow rules');
+    expect(title).toContain('3 deny rules');
+  });
+
+  test('an untrusted project declaring project-scope rules shows them AND that they do not load', () => {
+    // Same declared-vs-loaded split as the other kinds: an untrusted project
+    // reads no project/local settings, so the rules sit inert on disk.
+    render({
+      scan: scan({
+        scopesLoaded: ['user'],
+        permissionRules: { declared: 5, loaded: 0, allow: 2, deny: 3 },
+      }),
+    });
+    expect(text()).toEqual(['5 permission rules', '⚠ 5 not loaded']);
+  });
+
+  test('the singular reads correctly', () => {
+    render({
+      scan: scan({
+        scopesLoaded: ['user', 'project', 'local'],
+        permissionRules: { declared: 1, loaded: 1, allow: 1, deny: 0 },
+      }),
+    });
+    expect(text()).toEqual(['1 permission rule']);
   });
 });
 

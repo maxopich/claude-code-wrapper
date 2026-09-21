@@ -541,6 +541,7 @@ describe('store / projects refresh (workspace switch)', () => {
       mcpServers: [{ name: 'reporter', loads }],
       hooks: { declared: 0, loaded: 0, hasLocalScope: false },
       envInjections: { declared: 0, loaded: 0 },
+      permissionRules: { declared: 0, loaded: 0, allow: 0, deny: 0 },
       degraded: false,
     });
 
@@ -587,6 +588,7 @@ describe('store / projects refresh (workspace switch)', () => {
             mcpServers: [],
             hooks: { declared: 0, loaded: 0, hasLocalScope: false },
             envInjections: { declared: 0, loaded: 0 },
+            permissionRules: { declared: 0, loaded: 0, allow: 0, deny: 0 },
             degraded: false,
           },
         ],

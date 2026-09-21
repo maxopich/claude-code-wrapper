@@ -233,6 +233,64 @@ describe('project_scan — declared vs loaded (Cebab-ws0.6)', () => {
   });
 });
 
+describe('project_scan — permission rules (Cebab-ygu.44)', () => {
+  test('the reported case: a ruleset-only project no longer scans as "declares nothing"', () => {
+    // rules-lab ships .claude/settings.json with two allow and three deny
+    // entries and nothing else, and read "declares nothing" — the one
+    // declaration that most changes what the operator will be asked.
+    const row = makeProject('rules-lab', true);
+    write(path.join(row.path, '.claude', 'settings.json'), {
+      permissions: {
+        allow: ['Read', 'Bash(git status:*)'],
+        deny: ['Bash(rm:*)', 'Write', 'Edit'],
+      },
+    });
+
+    const scan = scanProject(row);
+    expect(scan.permissionRules).toEqual({ declared: 5, loaded: 5, allow: 2, deny: 3 });
+    // The thing that made "declares nothing" render: total declarations was 0.
+    expect(
+      scan.mcpServers.length +
+        scan.hooks.declared +
+        scan.envInjections.declared +
+        scan.permissionRules.declared,
+    ).toBeGreaterThan(0);
+  });
+
+  test('an UNTRUSTED project counts its project-scope rules as declared-but-not-loaded', () => {
+    // Permission rules load from the same settings layers as hooks and env
+    // injections, so they take the same scope-derived answer: an untrusted
+    // project reads no project/local rules.
+    const row = makeProject('rules-untrusted');
+    write(path.join(row.path, '.claude', 'settings.json'), {
+      permissions: { allow: ['Read'], deny: ['Write'] },
+    });
+
+    const scan = scanProject(row);
+    expect(scan.scopesLoaded).toEqual(['user']);
+    expect(scan.permissionRules).toEqual({ declared: 2, loaded: 0, allow: 1, deny: 1 });
+  });
+
+  test('a local-scope allow rule is counted, and loads only when trusted', () => {
+    const row = makeProject('rules-local');
+    write(path.join(row.path, '.claude', 'settings.local.json'), {
+      permissions: { allow: ['Bash(echo:*)'] },
+    });
+
+    const untrusted = scanProject(row);
+    expect(untrusted.permissionRules).toEqual({ declared: 1, loaded: 0, allow: 1, deny: 0 });
+
+    setProjectTrusted(row.id, true);
+    const trusted = scanProject({ ...row, trusted: 1 });
+    expect(trusted.permissionRules).toEqual({ declared: 1, loaded: 1, allow: 1, deny: 0 });
+  });
+
+  test('a project with no permission rules reports a zeroed tally, not absence', () => {
+    const scan = scanProject(makeProject('no-rules'));
+    expect(scan.permissionRules).toEqual({ declared: 0, loaded: 0, allow: 0, deny: 0 });
+  });
+});
+
 describe('project_scan — degradation', () => {
   test('an unreadable settings file degrades that project and no other', () => {
     const broken = makeProject('broken');

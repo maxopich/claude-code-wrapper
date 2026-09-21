@@ -38,9 +38,14 @@ export type ProjectScanLineProps = {
   managed?: { sourcePath: string; copiedAt: number } | null;
 };
 
-/** Total declarations found on disk, across all three kinds. */
+/** Total declarations found on disk, across all four kinds. */
 export function declaredTotal(scan: ProjectScan): number {
-  return scan.mcpServers.length + scan.hooks.declared + scan.envInjections.declared;
+  return (
+    scan.mcpServers.length +
+    scan.hooks.declared +
+    scan.envInjections.declared +
+    scan.permissionRules.declared
+  );
 }
 
 /** How many of those this project's current scope set does NOT load. */
@@ -49,7 +54,8 @@ export function notLoadedTotal(scan: ProjectScan): number {
   return (
     mcp +
     (scan.hooks.declared - scan.hooks.loaded) +
-    (scan.envInjections.declared - scan.envInjections.loaded)
+    (scan.envInjections.declared - scan.envInjections.loaded) +
+    (scan.permissionRules.declared - scan.permissionRules.loaded)
   );
 }
 
@@ -103,6 +109,20 @@ export function ProjectScanLine({ scan, managed }: ProjectScanLineProps) {
           title="Environment variables this project’s settings files inject into a session. Names only — Cebab never reads the values."
         >
           {plural(scan.envInjections.declared, 'env override', 'env overrides')}
+        </span>
+      )}
+      {scan && scan.permissionRules.declared > 0 && (
+        <span
+          className="project-scan-chip"
+          title={
+            `${plural(scan.permissionRules.allow, 'allow rule', 'allow rules')}, ` +
+            `${plural(scan.permissionRules.deny, 'deny rule', 'deny rules')} in this ` +
+            'project’s settings files. An allow rule pre-approves a tool so its ' +
+            'approval card never appears; a deny rule blocks one. See the Authority ' +
+            'panel for the rules themselves.'
+          }
+        >
+          {plural(scan.permissionRules.declared, 'permission rule', 'permission rules')}
         </span>
       )}
       {notLoaded > 0 && (
