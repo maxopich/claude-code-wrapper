@@ -62,6 +62,7 @@ import { createSession } from '../repo/sessions.js';
 import { closeLogger } from '../runner/logger.js';
 import {
   buildSessionLogChunk,
+  parseLogCursor,
   buildSingleAgentSessionLogChunk,
   multiAgentEventToLogRow,
   multiAgentMutationToLogRow,
@@ -668,5 +669,97 @@ describe('S04 cost — a page must not read the whole session', () => {
     const { statements } = recordSql(() => oracleMultiAgent(SESSION, 0, 10));
     const sqls = statements.map((s) => s.sql.replace(/\s+/g, ' '));
     expect(sqls.filter(isUnboundedSessionRead).length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4. The two halves of the keyset fix that the cases above do not pin.
+//
+// Found by mutating the implementation rather than by reading it: reverting
+// `hasMore` to the echoed `offset`, and stripping a field check out of
+// `parseLogCursor`, both left the whole suite green. Neither was a defect —
+// the code is right — but a behaviour with no case under it is one edit away
+// from being wrong silently, which is the thing this file exists to stop.
+// ---------------------------------------------------------------------------
+
+describe('Cebab-6fax.44.2 — hasMore follows the RESUMED position, not the echoed offset', () => {
+  test('the last cursor page reports hasMore false even with offset pinned to 0', () => {
+    // `offset` is only a sequencing token once a cursor is supplied, so
+    // computing `hasMore` from it reports "there is more" forever on a client
+    // that pins it — the browser would keep asking for a page that is already
+    // empty. Pinning offset to 0 here is what makes the assertion depend on
+    // `startIdx`: with `offset + sliced.length < total` this reads 0 + 2 < 10.
+    seedEvents(10);
+    const page1 = buildSessionLogChunk({
+      sessionId: SESSION,
+      offset: 0,
+      limit: 8,
+      revealSensitive: false,
+    });
+    expect(page1.hasMore).toBe(true);
+
+    const page2 = buildSessionLogChunk({
+      sessionId: SESSION,
+      offset: 0, // pinned: only the cursor may locate this page
+      limit: 8,
+      revealSensitive: false,
+      cursor: cursorOf(page1.rows[page1.rows.length - 1]!),
+    });
+    expect(page2.rows).toHaveLength(2);
+    expect(page2.hasMore).toBe(false);
+  });
+});
+
+describe('Cebab-6fax.44.2 — parseLogCursor refuses a malformed wire value', () => {
+  const GOOD = { ts: 1_700_000_000_000, agent: 'alpha', stream: 'event', rowId: 7 };
+
+  test('a well-formed cursor survives, field for field', () => {
+    // The green control. Without it every rejection below is satisfied by a
+    // parser that returns undefined for everything.
+    expect(parseLogCursor(GOOD)).toEqual(GOOD);
+  });
+
+  test('every field is actually checked', () => {
+    // One mutation per field, each from the well-formed value above, so a
+    // dropped check cannot hide behind another field's.
+    const bad: unknown[] = [
+      { ...GOOD, ts: '1700000000000' },
+      { ...GOOD, ts: Number.NaN },
+      { ...GOOD, agent: 7 },
+      { ...GOOD, stream: 'events' },
+      { ...GOOD, stream: null },
+      { ...GOOD, rowId: '7' },
+      { ...GOOD, rowId: Number.POSITIVE_INFINITY },
+    ];
+    for (const value of bad) {
+      expect(parseLogCursor(value), JSON.stringify(value)).toBeUndefined();
+    }
+  });
+
+  test('absent, null and non-objects degrade rather than throw', () => {
+    for (const value of [undefined, null, 0, '', 'event:7', true]) {
+      expect(parseLogCursor(value), String(value)).toBeUndefined();
+    }
+  });
+
+  test('a malformed cursor falls back to the FIRST page, not an empty one', () => {
+    // The degrade path end to end. An empty page would look to the operator
+    // exactly like a log that had been purged.
+    seedEvents(6);
+    const first = buildSessionLogChunk({
+      sessionId: SESSION,
+      offset: 0,
+      limit: 3,
+      revealSensitive: false,
+    });
+    const degraded = buildSessionLogChunk({
+      sessionId: SESSION,
+      offset: 0,
+      limit: 3,
+      revealSensitive: false,
+      cursor: parseLogCursor({ ts: 'nope' }),
+    });
+    expect(degraded.rows.map((r) => r.id)).toEqual(first.rows.map((r) => r.id));
+    expect(degraded.rows.length).toBeGreaterThan(0);
   });
 });
