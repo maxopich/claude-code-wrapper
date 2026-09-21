@@ -146,7 +146,16 @@ export function NotificationStack({ onAction }: NotificationStackProps) {
       aria-label="Notifications"
       data-empty={state.visible.length === 0 ? 'true' : 'false'}
     >
-      {state.visible.map((n) => (
+      {/* Cebab-6wa1: render NEWEST-FIRST. `.notif-stack` is `flex-direction:
+          column-reverse` (styles.css), which pins the bounded, bottom-anchored
+          dock's scroll to its newest end so a burst of toasts can no longer
+          push a fresh danger alert below the fold. column-reverse places the
+          first DOM child at the visual bottom, so reversing here keeps the
+          on-screen order unchanged (oldest top, newest bottom) while making the
+          newest the pinned, always-visible card. The two sr-only live regions
+          below are `position: absolute`, so their DOM position among the flex
+          children does not affect the visual stack. */}
+      {[...state.visible].reverse().map((n) => (
         <Notification
           key={n.id}
           notification={n}

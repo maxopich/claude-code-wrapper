@@ -7526,7 +7526,17 @@ pre {
   max-width: calc(100vw - var(--s-4) * 2);
   z-index: var(--notif-stack-z);
   display: flex;
-  flex-direction: column;
+  /* Cebab-6wa1: `column-reverse`, NOT `column`. The dock is bottom-anchored and
+   * bounded (below), so once cards overflow the cap a plain `column` scroller
+   * rests at `scrollTop: 0` and shows the TOP — the OLDEST cards — while the
+   * newest arrival, appended at the bottom, is clipped below the fold. That
+   * trimmed the wrong end: a burst of operational toasts could push a freshly
+   * arrived danger alert out of view, the exact harm the bound existed to stop.
+   * `column-reverse` pins the scroll to the newest end instead (the chat-log
+   * idiom). NotificationStack renders `visible` newest-first to match, so the
+   * visual order is unchanged (oldest top, newest bottom) but the newest is now
+   * always in view; overflow scrolls the OLDEST off the top. */
+  flex-direction: column-reverse;
   gap: var(--s-2);
   pointer-events: none;
   /* Cebab-git: bound the dock and scroll it internally. Safety toasts default
