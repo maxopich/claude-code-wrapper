@@ -1,0 +1,24 @@
+{
+  // Emit config for `@cebab/shared`. `tsconfig.json` is what `npm run typecheck`
+  // uses (`tsc --noEmit -p shared`) and stays `noEmit`; this one produces the
+  // `dist/*.js` the COMPILED server resolves at runtime.
+  //
+  // Why shared has to emit at all: `shared/src/index.ts` is a barrel of
+  // `export * from './protocol.js'` lines, and plain Node resolving
+  // `@cebab/shared` under the `production` export condition needs those `.js`
+  // files to exist. With `noEmit` (the old state) Node type-strips `index.ts`
+  // but cannot find `./protocol.js`, so the compiled server threw
+  // ERR_MODULE_NOT_FOUND on boot. tsx and vitest still read `./src` (the
+  // `default`/`development` conditions) and never touch this output.
+  //
+  // Tests are excluded for the same reason `server/tsconfig.build.json` excludes
+  // them: emitting `*.test.ts` would ship vitest-importing modules into `dist/`.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true
+  },
+  "exclude": ["**/*.test.ts"]
+}
