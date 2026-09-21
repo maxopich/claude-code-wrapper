@@ -3319,6 +3319,40 @@ export function classifyHandlerFailure(err: unknown): WrapperErrorKind {
   return 'process_crashed';
 }
 
+/**
+ * `Cebab-2m7n` — a bus start cancelled by the operator is not a crash.
+ *
+ * Both `start_multi_agent` arms (orchestrator + chain) await
+ * `gateProjectsForSpawn` inside a try whose `finally` releases the start claim,
+ * and catch its rejection LOCALLY — so, unlike a single-agent turn, it never
+ * reaches the dispatch-level `classifyHandlerFailure` at the top of
+ * `onConnection`. An operator DECLINING a trust or env-injection prompt during
+ * a bus start rejects the parked gate with a `GateAbandonedError`
+ * (`name === 'AbortError'`); hard-coding `kind: 'process_crashed'` in those two
+ * catches turned that deliberate cancellation into a sticky red crash banner —
+ * the same defect `Cebab-6fax.17` fixed on the dispatch catch and the
+ * single-agent turn path, missed here because these catches short-circuit it.
+ *
+ * Mirrors the single-agent turn path: `aborted` gets a plain-language message,
+ * anything else keeps its raw error text and stays `process_crashed`, so a
+ * genuine start failure is still reported honestly and loudly.
+ */
+export function classifyBusStartFailure(err: unknown): {
+  kind: WrapperErrorKind;
+  message: string;
+} {
+  const kind = classifyHandlerFailure(err);
+  return {
+    kind,
+    message:
+      kind === 'aborted'
+        ? 'Multi-agent start cancelled: you declined a trust or environment prompt before it began.'
+        : err instanceof Error
+          ? err.message
+          : String(err),
+  };
+}
+
 function onConnection(ws: WebSocket): void {
   console.log('[ws] client connected');
   // H07: re-check the chain whenever a browser attaches, so tampering during a
@@ -6135,8 +6169,12 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
             ...(orchestratorRow?.mock === 1 ? { mock: true } : {}),
           });
         } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
+          // `Cebab-2m7n`: route through `classifyBusStartFailure` so an
+          // operator who DECLINED a trust/env prompt (a `GateAbandonedError`
+          // from the awaited `gateProjectsForSpawn` above) surfaces as
+          // `aborted`, not a crash. A genuine start throw stays
+          // `process_crashed` with its own message.
+          send(conn.ws, { type: 'wrapper_error', ...classifyBusStartFailure(err) });
         } finally {
           // Register B18: the claim covered the gap between the guard and
           // `registerLiveSession` (which runs inside `startOrchestratorSession`).
@@ -6250,8 +6288,10 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
           ...(chainRow?.mock === 1 ? { mock: true } : {}),
         });
       } catch (err) {
-        const message = err instanceof Error ? err.message : String(err);
-        send(conn.ws, { type: 'wrapper_error', kind: 'process_crashed', message });
+        // `Cebab-2m7n`: mirror of the orchestrator arm — a declined trust/env
+        // gate (`GateAbandonedError` from `gateProjectsForSpawn`) is `aborted`,
+        // not a crash; a genuine start throw stays `process_crashed`.
+        send(conn.ws, { type: 'wrapper_error', ...classifyBusStartFailure(err) });
       } finally {
         // Register B18: mirror of the orchestrator branch — see its comment.
         releaseSessionStart(startClaimId);

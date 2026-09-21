@@ -31,13 +31,21 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import WebSocket from 'ws';
 import { DEFAULT_PORT } from '@cebab/shared/net';
+import {
+  checkPortAvailable,
+  resolveSmokeTarget,
+  waitForHealthyServer,
+} from './smoke_server_guard.js';
 
 const require = createRequire(import.meta.url);
 const tsxCli = require.resolve('tsx/cli');
 const serverDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const repoRoot = path.resolve(serverDir, '..');
 
-const PORT = process.env.PORT ?? String(DEFAULT_PORT);
+// Resolved the way the SERVER resolves it, and guarded before the spawn — this
+// file had the identical defect `Cebab-j1dl` describes in ci_smoke, and it runs
+// as its own required CI step right after it.
+const PORT = String(resolveSmokeTarget(process.env, DEFAULT_PORT).port);
 const HOST = '127.0.0.1';
 
 const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-sp-home-'));
@@ -46,6 +54,7 @@ const tmpWs = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-sp-ws-'));
 const childEnv: NodeJS.ProcessEnv = {
   ...process.env,
   MOCK: '1',
+  CEBAB_PORT: PORT,
   PORT,
   WORKSPACE_ROOT: tmpWs,
   HOME: tmpHome,
@@ -81,20 +90,6 @@ function get(
   });
 }
 
-async function waitForHealth(timeoutMs: number): Promise<boolean> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      const r = await get('/health');
-      if (r.status === 200) return true;
-    } catch {
-      /* not up yet */
-    }
-    await new Promise((r) => setTimeout(r, 300));
-  }
-  return false;
-}
-
 function openWs(token: string): Promise<'open' | string> {
   return new Promise((resolve) => {
     const ws = new WebSocket(`ws://${HOST}:${PORT}/ws?token=${encodeURIComponent(token)}`);
@@ -118,6 +113,12 @@ async function main(): Promise<number> {
     return 2;
   }
 
+  const portProblem = await checkPortAvailable(Number(PORT));
+  if (portProblem) {
+    console.error(`[single-port] ${portProblem}`);
+    return 1;
+  }
+
   server = spawn(process.execPath, [tsxCli, 'src/index.ts'], {
     cwd: serverDir,
     env: childEnv,
@@ -128,8 +129,17 @@ async function main(): Promise<number> {
     exited = true;
   });
 
-  if (!(await waitForHealth(30_000)) || exited) {
-    console.error('[single-port] server did not become healthy within 30s');
+  const verdict = await waitForHealthyServer({
+    url: `http://${HOST}:${PORT}/health`,
+    timeoutMs: 30_000,
+    isDead: () => exited,
+  });
+  if (verdict !== 'healthy') {
+    console.error(
+      verdict === 'died'
+        ? '[single-port] the server we started exited before becoming healthy'
+        : '[single-port] server did not become healthy within 30s',
+    );
     return 1;
   }
 
