@@ -95,25 +95,27 @@ describe('the launcher actually uses the shared resolver', () => {
   });
 });
 
-describe('npm start does not need vite to serve a built bundle', () => {
-  // `tsx` was promoted to a RUNTIME dependency so single-port mode works on an
-  // install without dev tooling. `vite` is still a `web` devDependency, needed
-  // only to BUILD a bundle that is usually already there — so resolving it
-  // eagerly hands that promotion straight back. Measured before the fix: with
-  // `tsx` present, `web/dist/index.html` present and `vite` absent,
-  // `resolveDevBins` throws MODULE_NOT_FOUND and start.mjs exits 1 saying
-  // "could not locate the toolchain", on a tree that needed nothing built.
+describe('npm start does not need dev tooling to serve a built app', () => {
+  // `npm start` now runs the COMPILED server (`node dist/index.js`), not the
+  // TypeScript through `tsx` (Cebab-a3im). The build tools it may call —
+  // `tsc` (server + shared) and `vite` (web) — are devDependencies, needed only
+  // to PRODUCE artifacts that are usually already there. Resolving either
+  // eagerly would make `npm start` exit 1 on an `--omit=dev` install that has a
+  // prebuilt `dist/` and needs nothing built, so each is resolved lazily,
+  // inside the branch that would actually build. Measured before this pattern:
+  // with a prebuilt bundle and `vite` absent, an eager resolve threw
+  // MODULE_NOT_FOUND and start.mjs refused to start a tree that needed nothing.
   //
   // A source scan rather than a behavioural test because `start.mjs` spawns a
   // server at import time; there is no seam to drive it through, and an
-  // uninstall-vite-and-run test would have to mutate the shared node_modules.
+  // uninstall-a-devDep-and-run test would have to mutate the shared node_modules.
   const startScript = stripComments(
     fs.readFileSync(path.join(repoRoot, 'scripts', 'start.mjs'), 'utf8').replace(/\r\n/g, '\n'),
   );
 
-  /** The body of the `if (!fs.existsSync(webDistIndex))` block, braces matched. */
-  function buildBranch(src) {
-    const open = src.indexOf('if (!fs.existsSync(webDistIndex))');
+  /** The body of the `if (<marker>)` block, braces matched. */
+  function buildBranch(src, marker) {
+    const open = src.indexOf(marker);
     if (open === -1) return null;
     let i = src.indexOf('{', open);
     if (i === -1) return null;
@@ -125,27 +127,54 @@ describe('npm start does not need vite to serve a built bundle', () => {
     return null;
   }
 
-  test('the brace walk finds a real block — anti-vacuity', () => {
-    // Every assertion below is about what is inside or outside this slice. A
-    // null or empty slice satisfies "vite is not outside it" for free.
-    const branch = buildBranch(startScript);
-    expect(branch, 'no `if (!fs.existsSync(webDistIndex))` block found').toBeTruthy();
-    expect(branch.length).toBeGreaterThan(80);
-    expect(branch).toContain("'build'");
+  const WEB_MARKER = 'if (!fs.existsSync(webDistIndex))';
+  const SERVER_MARKER = 'if (!fs.existsSync(serverDistIndex)';
+
+  test('the brace walk finds real blocks — anti-vacuity', () => {
+    // Every assertion below is about what is inside or outside these slices. A
+    // null or empty slice satisfies "the resolve is not outside it" for free.
+    const web = buildBranch(startScript, WEB_MARKER);
+    const server = buildBranch(startScript, SERVER_MARKER);
+    expect(web, 'no web-build block found').toBeTruthy();
+    expect(server, 'no server-build block found').toBeTruthy();
+    expect(web.length).toBeGreaterThan(80);
+    expect(server.length).toBeGreaterThan(80);
+    expect(web).toContain("'build'");
   });
 
+  // Same invariant (and title) this file has always pinned — vite resolved
+  // exactly once, inside the web-build branch. Kept verbatim so it stays the
+  // pre-existing check it is, not a new one that would have to redden when the
+  // Cebab-a3im source is reverted (it holds on the old tsx start.mjs too).
   test('start.mjs resolves vite ONLY inside the build branch', () => {
-    const branch = buildBranch(startScript) ?? '';
+    const branch = buildBranch(startScript, WEB_MARKER) ?? '';
     const total = [...startScript.matchAll(/resolveViteBin\(/g)].length;
     const inside = [...branch.matchAll(/resolveViteBin\(/g)].length;
     expect(total, 'start.mjs should resolve vite exactly once').toBe(1);
-    expect(inside, 'the one resolveViteBin call must sit inside the build branch').toBe(1);
+    expect(inside, 'the one resolveViteBin call must sit inside the web-build branch').toBe(1);
   });
 
-  test('start.mjs never asks for both at once', () => {
-    // `resolveDevBins` is the eager pair. Using it here is the regression,
-    // and it reads as a tidy-up rather than as one.
+  test('start.mjs resolves tsc ONLY inside the server-build branch', () => {
+    const branch = buildBranch(startScript, SERVER_MARKER) ?? '';
+    // Count INVOCATIONS only: the `function resolveTscBin()` definition also
+    // contains `resolveTscBin(`, and it legitimately sits outside any branch.
+    const calls = (s) => [...s.matchAll(/(?<!function )resolveTscBin\(/g)].length;
+    expect(calls(startScript), 'start.mjs should call resolveTscBin exactly once').toBe(1);
+    expect(
+      calls(branch),
+      'the one resolveTscBin call must sit inside the server-build branch',
+    ).toBe(1);
+  });
+
+  test('start.mjs runs the compiled server, not tsx, and not the eager pair', () => {
+    // `resolveDevBins` is the eager pair — using it hands back the devDep-lazy
+    // win. And the compiled boot is what `Cebab-a3im` delivered: `tsx` is gone
+    // from this path entirely, and `--conditions=production` is what selects
+    // `@cebab/shared`'s compiled `dist` over its source.
     expect(startScript).not.toMatch(/resolveDevBins/);
-    expect(startScript).toMatch(/resolveTsxCli\(root\)/);
+    expect(startScript).not.toMatch(/resolveTsxCli/);
+    expect(startScript).not.toMatch(/\btsx\b/);
+    expect(startScript).toMatch(/--conditions=production/);
+    expect(startScript).toMatch(/dist\/index\.js/);
   });
 });
