@@ -220,6 +220,10 @@ const SHAPES: Table = {
     sessionId: 'string',
     scope: 'string?',
     offset: 'number',
+    // Cebab-6fax.44.2: keyset continuation cursor. Optional (absent on the
+    // first page); the handler validates its shape via `parseLogCursor` and
+    // degrades a malformed one to the first-page path.
+    cursor: 'object?',
     limit: 'number',
     revealSensitive: 'boolean?',
   },

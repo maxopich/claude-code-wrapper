@@ -51,7 +51,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import type { LogRow } from '@cebab/shared';
+import type { LogCursor, LogRow } from '@cebab/shared';
 import { config } from '../config.js';
 import { closeDb, getDb } from '../db.js';
 import { createMultiAgentSession, listMultiAgentEvents } from '../repo/multi_agent.js';
@@ -62,6 +62,7 @@ import { createSession } from '../repo/sessions.js';
 import { closeLogger } from '../runner/logger.js';
 import {
   buildSessionLogChunk,
+  parseLogCursor,
   buildSingleAgentSessionLogChunk,
   multiAgentEventToLogRow,
   multiAgentMutationToLogRow,
@@ -431,6 +432,182 @@ function isUnboundedSessionRead(sql: string): boolean {
   return /SELECT \* FROM \w+ WHERE session_id/.test(sql);
 }
 
+// ---------------------------------------------------------------------------
+// 3. Keyset continuation (Cebab-6fax.44.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * `Cebab-6fax.44.2`: the client's "load more" must resume at a POSITION IN THE
+ * ORDER, not at a row offset. Rows do vanish under a live reader — a session
+ * delete, the 7-day purge, a bulk op — and an offset shifts by one for every
+ * row that vanished before it, skipping or duplicating a row on the next page.
+ * A cursor keyed on the comparator's own key cannot.
+ *
+ * The cursor is derived here from the row's public shape, the same way the
+ * client (`cursorFromRow` in `useLogStream.ts`) does — independently of the
+ * projector's `parseLogCursor`, so the two remain separate implementations of
+ * the same contract.
+ */
+function cursorOf(row: LogRow): LogCursor {
+  const at = row.id.lastIndexOf(':');
+  return {
+    ts: row.ts,
+    agent: row.agent,
+    stream: row.id.slice(0, at) === 'mutation' ? 'mutation' : 'event',
+    rowId: Number(row.id.slice(at + 1)),
+  };
+}
+
+/** Seed `n` bus events, one per distinct ts, so order is insertion order. */
+function seedEvents(n: number): void {
+  const db = getDb();
+  createMultiAgentSession(SESSION, 'orchestrator');
+  const ins = db.prepare(
+    `INSERT INTO multi_agent_events (session_id, ts, source, destination, kind, text)
+     VALUES (?, ?, 'alpha', 'cebab', 'reply', ?)`,
+  );
+  db.transaction(() => {
+    for (let i = 0; i < n; i++) ins.run(SESSION, 1_700_000_000_000 + i, `hop ${i}`);
+  })();
+}
+
+const ids = (chunk: { rows: LogRow[] }): string[] => chunk.rows.map((r) => r.id);
+const rowDbId = (row: LogRow): number => Number(row.id.slice(row.id.lastIndexOf(':') + 1));
+
+describe('Cebab-6fax.44.2 — a vanished row does not shift the next keyset page', () => {
+  test('a row purged BEFORE the cursor: the next page neither skips nor duplicates', () => {
+    seedEvents(10);
+    const full = ids(
+      buildSessionLogChunk({ sessionId: SESSION, offset: 0, limit: 100, revealSensitive: false }),
+    );
+
+    const page1 = buildSessionLogChunk({
+      sessionId: SESSION,
+      offset: 0,
+      limit: 4,
+      revealSensitive: false,
+    });
+    expect(ids(page1)).toEqual(full.slice(0, 4));
+
+    // The client remembers where it left off — the last row's position.
+    const cursor = cursorOf(page1.rows[page1.rows.length - 1]!);
+
+    // A row the client already displayed (index 1, well before the cursor)
+    // vanishes: a purge racing the open Logs view.
+    getDb().prepare('DELETE FROM multi_agent_events WHERE id = ?').run(rowDbId(page1.rows[1]!));
+
+    const page2 = buildSessionLogChunk({
+      sessionId: SESSION,
+      // `offset` still travels as the page-sequencing token, but the cursor is
+      // what locates the page. If offset drove the slice this would skip a row.
+      offset: page1.rows.length,
+      limit: 4,
+      revealSensitive: false,
+      cursor,
+    });
+
+    // Resumes exactly where page 1 ended — the row after the cursor is the
+    // very next row of the original order, not one past it.
+    expect(ids(page2)).toEqual(full.slice(4, 8));
+
+    const seen = [...ids(page1), ...ids(page2)];
+    // No row appears twice, and every original row through index 7 is covered
+    // (the purged row was already shown on page 1 and is simply not re-fetched).
+    expect(new Set(seen).size).toBe(seen.length);
+    expect(seen).toEqual(full.slice(0, 8));
+
+    // Anti-vacuity, folded IN rather than a separate case: the SAME request
+    // WITHOUT the cursor — the old offset shape — skips a row after the purge
+    // (the scan shifted every later row down by one, so `offset = rows.length`
+    // lands one past where it should). This is the defect, and it is why the
+    // keyset assertion above is doing real work rather than agreeing with the
+    // offset path. It lives inside this case on purpose: on its own it would
+    // pass with the fix reverted (the offset path is unchanged), so the
+    // revert-check would rightly call a standalone version vacuous.
+    const offsetOnly = buildSessionLogChunk({
+      sessionId: SESSION,
+      offset: page1.rows.length,
+      limit: 4,
+      revealSensitive: false,
+      // deliberately NO cursor
+    });
+    expect(ids(offsetOnly)[0]).toBe(full[5]);
+    expect(ids(offsetOnly)).not.toEqual(ids(page2));
+  });
+
+  test('nothing purged: the cursor alone (offset pinned useless) walks every row exactly once', () => {
+    // The control the issue asks for — exact paging when nothing vanishes —
+    // made to DEPEND on the cursor rather than pass vacuously. Every
+    // continuation pins `offset: 0`, so the ONLY way to walk the whole stream
+    // without repeating page one is for the cursor to advance the position.
+    // Revert the fix (cursor ignored) and offset 0 returns page one forever, so
+    // `collected` never equals `full` — the case reddens, as the gate requires.
+    seedEvents(10);
+    const full = ids(
+      buildSessionLogChunk({ sessionId: SESSION, offset: 0, limit: 100, revealSensitive: false }),
+    );
+
+    const collected: LogRow[] = [];
+    let page = buildSessionLogChunk({
+      sessionId: SESSION,
+      offset: 0,
+      limit: 3,
+      revealSensitive: false,
+    });
+    collected.push(...page.rows);
+    let guard = 0;
+    // Bounded so a fix-reverted run terminates (with duplicates) instead of
+    // looping — the assertion, not a throw, is what reddens it.
+    while (page.hasMore && guard++ < 50) {
+      const cursor = cursorOf(collected[collected.length - 1]!);
+      page = buildSessionLogChunk({
+        sessionId: SESSION,
+        offset: 0, // pinned useless: the cursor must do the work
+        limit: 3,
+        revealSensitive: false,
+        cursor,
+      });
+      collected.push(...page.rows);
+    }
+    expect(collected.map((r) => r.id)).toEqual(full);
+    expect(new Set(collected.map((r) => r.id)).size).toBe(full.length);
+  });
+
+  test('single-agent keyset continuation resumes after a purged row too', () => {
+    // The single-agent projector shares `pageKeysFrom`; the file's own note
+    // calls it "the bigger one in practice" (a full SDK envelope per row).
+    seedSingleAgentCorpus({ tsBuckets: 4, perBucket: 3 });
+    const full = ids(
+      buildSingleAgentSessionLogChunk({
+        sessionId: SINGLE,
+        offset: 0,
+        limit: 100,
+        revealSensitive: false,
+      }),
+    );
+    const page1 = buildSingleAgentSessionLogChunk({
+      sessionId: SINGLE,
+      offset: 0,
+      limit: 5,
+      revealSensitive: false,
+    });
+    expect(ids(page1)).toEqual(full.slice(0, 5));
+    const cursor = cursorOf(page1.rows[page1.rows.length - 1]!);
+    getDb().prepare('DELETE FROM events WHERE id = ?').run(rowDbId(page1.rows[0]!));
+
+    const page2 = buildSingleAgentSessionLogChunk({
+      sessionId: SINGLE,
+      offset: page1.rows.length,
+      limit: 5,
+      revealSensitive: false,
+      cursor,
+    });
+    expect(ids(page2)[0]).toBe(full[5]);
+    const seen = [...ids(page1), ...ids(page2)];
+    expect(new Set(seen).size).toBe(seen.length);
+  });
+});
+
 describe('S04 cost — a page must not read the whole session', () => {
   test('the multi-agent projector never runs the unbounded row readers', () => {
     seedBusCorpus({ tsBuckets: 40, perBucket: 7 });
@@ -492,5 +669,97 @@ describe('S04 cost — a page must not read the whole session', () => {
     const { statements } = recordSql(() => oracleMultiAgent(SESSION, 0, 10));
     const sqls = statements.map((s) => s.sql.replace(/\s+/g, ' '));
     expect(sqls.filter(isUnboundedSessionRead).length).toBeGreaterThan(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4. The two halves of the keyset fix that the cases above do not pin.
+//
+// Found by mutating the implementation rather than by reading it: reverting
+// `hasMore` to the echoed `offset`, and stripping a field check out of
+// `parseLogCursor`, both left the whole suite green. Neither was a defect —
+// the code is right — but a behaviour with no case under it is one edit away
+// from being wrong silently, which is the thing this file exists to stop.
+// ---------------------------------------------------------------------------
+
+describe('Cebab-6fax.44.2 — hasMore follows the RESUMED position, not the echoed offset', () => {
+  test('the last cursor page reports hasMore false even with offset pinned to 0', () => {
+    // `offset` is only a sequencing token once a cursor is supplied, so
+    // computing `hasMore` from it reports "there is more" forever on a client
+    // that pins it — the browser would keep asking for a page that is already
+    // empty. Pinning offset to 0 here is what makes the assertion depend on
+    // `startIdx`: with `offset + sliced.length < total` this reads 0 + 2 < 10.
+    seedEvents(10);
+    const page1 = buildSessionLogChunk({
+      sessionId: SESSION,
+      offset: 0,
+      limit: 8,
+      revealSensitive: false,
+    });
+    expect(page1.hasMore).toBe(true);
+
+    const page2 = buildSessionLogChunk({
+      sessionId: SESSION,
+      offset: 0, // pinned: only the cursor may locate this page
+      limit: 8,
+      revealSensitive: false,
+      cursor: cursorOf(page1.rows[page1.rows.length - 1]!),
+    });
+    expect(page2.rows).toHaveLength(2);
+    expect(page2.hasMore).toBe(false);
+  });
+});
+
+describe('Cebab-6fax.44.2 — parseLogCursor refuses a malformed wire value', () => {
+  const GOOD = { ts: 1_700_000_000_000, agent: 'alpha', stream: 'event', rowId: 7 };
+
+  test('a well-formed cursor survives, field for field', () => {
+    // The green control. Without it every rejection below is satisfied by a
+    // parser that returns undefined for everything.
+    expect(parseLogCursor(GOOD)).toEqual(GOOD);
+  });
+
+  test('every field is actually checked', () => {
+    // One mutation per field, each from the well-formed value above, so a
+    // dropped check cannot hide behind another field's.
+    const bad: unknown[] = [
+      { ...GOOD, ts: '1700000000000' },
+      { ...GOOD, ts: Number.NaN },
+      { ...GOOD, agent: 7 },
+      { ...GOOD, stream: 'events' },
+      { ...GOOD, stream: null },
+      { ...GOOD, rowId: '7' },
+      { ...GOOD, rowId: Number.POSITIVE_INFINITY },
+    ];
+    for (const value of bad) {
+      expect(parseLogCursor(value), JSON.stringify(value)).toBeUndefined();
+    }
+  });
+
+  test('absent, null and non-objects degrade rather than throw', () => {
+    for (const value of [undefined, null, 0, '', 'event:7', true]) {
+      expect(parseLogCursor(value), String(value)).toBeUndefined();
+    }
+  });
+
+  test('a malformed cursor falls back to the FIRST page, not an empty one', () => {
+    // The degrade path end to end. An empty page would look to the operator
+    // exactly like a log that had been purged.
+    seedEvents(6);
+    const first = buildSessionLogChunk({
+      sessionId: SESSION,
+      offset: 0,
+      limit: 3,
+      revealSensitive: false,
+    });
+    const degraded = buildSessionLogChunk({
+      sessionId: SESSION,
+      offset: 0,
+      limit: 3,
+      revealSensitive: false,
+      cursor: parseLogCursor({ ts: 'nope' }),
+    });
+    expect(degraded.rows.map((r) => r.id)).toEqual(first.rows.map((r) => r.id));
+    expect(degraded.rows.length).toBeGreaterThan(0);
   });
 });
