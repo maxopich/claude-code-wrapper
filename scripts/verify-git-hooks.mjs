@@ -1,5 +1,12 @@
 /**
- * Verify that this checkout's git hooks can actually run.
+ * Verify that this checkout's git hook HELPER is installed and is a real file.
+ *
+ * The narrow claim is deliberate. This does not prove hooks "work": it does not
+ * run one, does not check the shims' exec bits, and a `.husky/_` holding only
+ * `h` with no shims still passes, as does an `h` whose shell is syntactically
+ * broken. What it does prove is that the helper every shim sources exists and
+ * has content — which is the state that was actually measured, and the one
+ * nothing else in the repo can see.
  *
  *   node scripts/verify-git-hooks.mjs
  *
@@ -82,7 +89,7 @@ export function describePath(target) {
  *
  * @returns {{ok: boolean, verdict: string, message: string}}
  */
-export function evaluate({ isGitCheckout, hooksPath, source, helper }) {
+export function evaluate({ isGitCheckout, hooksPath, hooksDir, source, helper }) {
   if (!isGitCheckout) {
     return {
       ok: true,
@@ -91,10 +98,42 @@ export function evaluate({ isGitCheckout, hooksPath, source, helper }) {
     };
   }
   if (hooksPath && hooksPath !== HUSKY_HOOKS_PATH) {
+    // Standing down is not the same as approving. `core.hooksPath` pointing at
+    // a directory that does not exist means git runs NO hooks at all and says
+    // nothing — the exact silent state this file exists for, reached by a
+    // different route. `bd init` repoints this at `.beads/hooks`, which is
+    // gitignored, so a `git clean -xdff` or a fresh clone with a stale local
+    // config lands here.
+    if (hooksDir?.kind !== 'directory') {
+      return {
+        ok: false,
+        verdict: 'hooks-path-missing',
+        message:
+          `core.hooksPath is "${hooksPath}", and that is not a directory in this ` +
+          'checkout. Git will find no hook for any event and run none of them, ' +
+          'silently. Point it somewhere real, or unset it and run `npm run bootstrap`.',
+      };
+    }
     return {
       ok: true,
       verdict: 'not-husky-managed',
       message: `core.hooksPath is "${hooksPath}", not "${HUSKY_HOOKS_PATH}" — hooks are managed by something other than husky, so this check stands down.`,
+    };
+  }
+  if (source.kind === null) {
+    // Husky is not installed AT ALL, which is not the same as installed-broken.
+    // `NODE_ENV=production`, `--omit=dev` or `npm_config_omit=dev` all skip
+    // devDependencies, so husky never arrives and no hooks were ever going to
+    // be set up. Aborting a bootstrap that otherwise succeeded would brick that
+    // install for no safety gain — the same call `verify:native` makes for a
+    // platform nobody recorded.
+    return {
+      ok: true,
+      verdict: 'installer-absent',
+      message:
+        `${SOURCE_REL} is not installed, so no git hooks were set up. If that is ` +
+        'unexpected, devDependencies were probably omitted (NODE_ENV=production ' +
+        'or --omit=dev). Hooks are dev-only, so this is a warning, not a failure.',
     };
   }
   if (!hooksPath) {
@@ -105,15 +144,6 @@ export function evaluate({ isGitCheckout, hooksPath, source, helper }) {
         'git core.hooksPath is unset after the hook installer ran, so git is ' +
         'using .git/hooks and none of this repo’s hooks will fire. Run ' +
         '`npm run bootstrap` again and read the husky step’s output.',
-    };
-  }
-  if (source.kind === null) {
-    return {
-      ok: false,
-      verdict: 'source-missing',
-      message:
-        `${SOURCE_REL} does not exist, so the hook helper cannot be installed. ` +
-        'Reinstall dependencies with `npm install --ignore-scripts`.',
     };
   }
   if (source.kind !== 'file') {
@@ -190,19 +220,40 @@ export function readGitState(repoRoot = REPO_ROOT) {
   return { isGitCheckout, hooksPath };
 }
 
+/**
+ * `core.hooksPath` may be written absolute, or with the platform's separators,
+ * and it is still husky's directory. Comparing the raw string would stand the
+ * check down on this repo's own hook tree just because the operator spelled the
+ * path differently.
+ */
+export function normaliseHooksPath(repoRoot, raw) {
+  if (!raw) return null;
+  return path.resolve(repoRoot, raw) === path.resolve(repoRoot, HUSKY_HOOKS_PATH)
+    ? HUSKY_HOOKS_PATH
+    : raw;
+}
+
 /** Read everything `evaluate` needs from a real checkout. */
 export function readHookState(repoRoot = REPO_ROOT) {
-  const { isGitCheckout, hooksPath } = readGitState(repoRoot);
+  const { isGitCheckout, hooksPath: raw } = readGitState(repoRoot);
+  const hooksPath = normaliseHooksPath(repoRoot, raw);
+  // `resolve`, not `join`: an absolute hooksPath must replace the root rather
+  // than be concatenated onto it.
+  const hooksAbs = path.resolve(repoRoot, hooksPath ?? HUSKY_HOOKS_PATH);
   return {
     isGitCheckout,
     hooksPath,
+    hooksDir: describePath(hooksAbs),
     source: describePath(path.join(repoRoot, SOURCE_REL)),
-    helper: describePath(path.join(repoRoot, hooksPath ?? HUSKY_HOOKS_PATH, HELPER_NAME)),
+    helper: describePath(path.resolve(hooksAbs, HELPER_NAME)),
   };
 }
 
 function main() {
-  const result = evaluate(readHookState());
+  // An explicit root makes the script runnable against another checkout, which
+  // is what lets a test exercise this exit code for real rather than asserting
+  // on the source text of the caller.
+  const result = evaluate(readHookState(process.argv[2] ?? REPO_ROOT));
   const label = result.ok ? 'ok  ' : 'FAIL';
   console[result.ok ? 'log' : 'error'](`[hooks-verify] ${label} ${result.message}`);
   if (!result.ok) {
