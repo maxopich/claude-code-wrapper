@@ -75,6 +75,46 @@ export type ProbeStreamSignals = {
   streamReadPastInit: boolean;
 };
 
+/**
+ * The raw booleans an observing spawn can honestly report about ITS OWN
+ * reading. Kept separate from `ProbeStreamSignals` because `streamReadPastInit`
+ * is a CONCLUSION drawn from two of these, and it is the single signal the
+ * `no-request` verdict rests on.
+ */
+export type RawStreamObservation = {
+  /** A `system/init` was seen. */
+  initArrived: boolean;
+  /** A `system/status` `'requesting'` was seen after init. */
+  requestingObserved: boolean;
+  /** The bounded observation window elapsed — we stopped reading because we
+   *  chose to, having watched the whole window. */
+  windowElapsed: boolean;
+  /** The message iteration finished WITHOUT throwing — the stream ended on its
+   *  own terms, so there was nothing left to see. */
+  naturalEnd: boolean;
+};
+
+/**
+ * `streamReadPastInit` asserts that the ABSENCE of `'requesting'` is evidence,
+ * so only a run that watched the whole window or saw the stream end may claim
+ * it. Aliasing it to `initArrived` is the tempting shortcut — the window timer
+ * is armed at init, so "init arrived" feels like "we then watched" — and it is
+ * this module's own vacuity wearing a different hat: a probe that THROWS a
+ * millisecond after init would report that it looked, saw no `'requesting'`,
+ * and thereby positively proved the claim (exit 0), having read nothing at all.
+ * A missing transcript does not rescue that, because the `no-request` branch
+ * asks only for `errorAssistant === 0`, which a missing transcript satisfies.
+ * That is PR #594's failure re-entering through the one input the fixture
+ * tests cannot police, since they supply this struct rather than compute it.
+ */
+export function resolveStreamSignals(raw: RawStreamObservation): ProbeStreamSignals {
+  return {
+    initArrived: raw.initArrived,
+    requestingObserved: raw.requestingObserved,
+    streamReadPastInit: raw.initArrived && (raw.windowElapsed || raw.naturalEnd),
+  };
+}
+
 export type ProbeTurnVerdict =
   | 'control-failed'
   | 'probe-no-init'

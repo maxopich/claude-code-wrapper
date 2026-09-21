@@ -15,6 +15,7 @@ import { describe, expect, test } from 'vitest';
 import {
   classifyProbeTurn,
   parseTranscript,
+  resolveStreamSignals,
   type ProbeStreamSignals,
   type TranscriptCounts,
 } from './probe_turn_classify.js';
@@ -182,5 +183,50 @@ describe('classifyProbeTurn', () => {
     expect(r.verdict).toBe('no-request');
     expect(r.requestSent).toBe(false);
     expect(r.exitCode).toBe(0);
+  });
+});
+
+describe('resolveStreamSignals', () => {
+  const raw = (o: Partial<Parameters<typeof resolveStreamSignals>[0]> = {}) => ({
+    initArrived: true,
+    requestingObserved: false,
+    windowElapsed: false,
+    naturalEnd: false,
+    ...o,
+  });
+
+  test('watching the whole window earns streamReadPastInit', () => {
+    expect(resolveStreamSignals(raw({ windowElapsed: true })).streamReadPastInit).toBe(true);
+  });
+
+  test('the stream ending on its own earns streamReadPastInit', () => {
+    expect(resolveStreamSignals(raw({ naturalEnd: true })).streamReadPastInit).toBe(true);
+  });
+
+  test('init alone does NOT earn it — the alias is the vacuity', () => {
+    // Reverting `resolveStreamSignals` to `streamReadPastInit: raw.initArrived`
+    // reddens exactly this case.
+    expect(resolveStreamSignals(raw()).streamReadPastInit).toBe(false);
+  });
+
+  test('no init earns nothing even if the window elapsed', () => {
+    expect(
+      resolveStreamSignals(raw({ initArrived: false, windowElapsed: true })).streamReadPastInit,
+    ).toBe(false);
+  });
+
+  test('a probe that throws just after init scores INCONCLUSIVE, never a pass', () => {
+    // THE REGRESSION. With `streamReadPastInit` aliased to `initArrived`, this
+    // exact observation — init seen, nothing else read, no transcript written —
+    // classified as `no-request` / exit 0: positive proof of the very claim the
+    // smoke exists to disprove, from a measurement that read nothing.
+    const crashed = resolveStreamSignals(raw());
+    const verdict = classifyProbeTurn({
+      control: GOOD_CONTROL,
+      probe: parseTranscript(null),
+      stream: crashed,
+    });
+    expect(verdict.verdict).toBe('inconclusive');
+    expect(verdict.exitCode).toBe(2);
   });
 });

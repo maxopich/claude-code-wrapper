@@ -66,7 +66,8 @@ process.env.CEBAB_DATA_DIR = path.join(tmpRoot, '.cebab');
 const { runClaude } = await import('./runner/claude.js');
 const { pickRunner } = await import('./runner/index.js');
 const { registerQuery } = await import('./runner/lifecycle.js');
-const { parseTranscript, classifyProbeTurn } = await import('./runner/probe_turn_classify.js');
+const { parseTranscript, classifyProbeTurn, resolveStreamSignals } =
+  await import('./runner/probe_turn_classify.js');
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 
 /** A prompt the model answers in one word with no tools — it spends a real
@@ -169,6 +170,12 @@ async function observeProbeSpawn(cwd: string): Promise<ProbeObservation> {
   const unregister = registerQuery(runner);
   let initArrived = false;
   let requestingObserved = false;
+  // The two signals that make "we read past init" a CLAIM rather than a
+  // restatement of `initArrived`: either we watched the whole window, or the
+  // stream ended on its own. A throw after init sets neither, which is the
+  // point — see `resolveStreamSignals`.
+  let windowElapsed = false;
+  let naturalEnd = false;
   let sessionId: string | null = null;
   let stopTimer: NodeJS.Timeout | undefined;
   try {
@@ -184,12 +191,17 @@ async function observeProbeSpawn(cwd: string): Promise<ProbeObservation> {
         initArrived = true;
         // Read a bounded window past init, then stop — mirrors the probe's
         // abort, just later, so `'requesting'` (and any reply) can be seen.
-        stopTimer = setTimeout(() => ac.abort(), PROBE_OBSERVE_MS);
+        stopTimer = setTimeout(() => {
+          windowElapsed = true;
+          ac.abort();
+        }, PROBE_OBSERVE_MS);
       }
       if (m.type === 'system' && m.subtype === 'status' && m.status === 'requesting') {
         requestingObserved = true;
       }
     }
+    // Reached only when the iteration ends WITHOUT throwing.
+    naturalEnd = true;
   } catch {
     // An aborted iteration lands here; we still read past init if init arrived.
   } finally {
@@ -202,9 +214,14 @@ async function observeProbeSpawn(cwd: string): Promise<ProbeObservation> {
     }
     unregister();
   }
-  // We read to the stream's natural end or to our bounded window: the absence
-  // of `'requesting'` is now meaningful rather than "we stopped looking".
-  return { initArrived, requestingObserved, streamReadPastInit: initArrived, sessionId };
+  // `resolveStreamSignals` decides whether the absence of `'requesting'` is
+  // meaningful or whether we merely stopped looking. It is deliberately NOT
+  // `initArrived`: a throw a millisecond after init would otherwise score as
+  // positive proof that no request was sent.
+  return {
+    ...resolveStreamSignals({ initArrived, requestingObserved, windowElapsed, naturalEnd }),
+    sessionId,
+  };
 }
 
 function wait(ms: number): Promise<void> {
