@@ -28,6 +28,7 @@ threat model and has never carried these two.
 - [Credentials, and why they are copied in the clear](#credentials-and-why-they-are-copied-in-the-clear)
 - [The symlink rule](#the-symlink-rule)
 - [When an incomplete copy refuses to register](#when-an-incomplete-copy-refuses-to-register)
+- [Where the copy is allowed to write](#where-the-copy-is-allowed-to-write)
 - [The supported Node floor](#the-supported-node-floor)
 - [Deleting a managed agent](#deleting-a-managed-agent)
 
@@ -124,6 +125,17 @@ elsewhere in the tree). A benign non-sensitive `copy_failed` among healthy files
 still registers with the skip reported, which is the `Cebab-ygu.14` behaviour the
 refusal must not undo — pinned by an anti-vacuity control in
 `managed_copy.test.ts`.
+
+## Where the copy is allowed to write
+
+**`copyTree` enforces its own containment and cap, not just the caller's** (`Cebab-6fax.43.4`, `Cebab-ygu.16`). The survey's caps run _before_ `claimManagedDir` creates the target, so they cannot see two hazards: a tree that grew between the estimate and the copy, and a target that lies inside its own source. So `copyTree` refuses two things itself, against paths resolved with `realpath` first — a resolution failure is a **refusal**, never a fallback to the raw path, which would defeat the check it is part of:
+
+- **A target not strictly inside `managedAgentsRoot()`.** A copy can only ever write bytes into the space Cebab owns; that is the one sentence the whole design rests on.
+- **A source that is the target or an ANCESTOR of it.** This is the self-recursive copy of `Cebab-ygu.16`: a data dir nested inside a workspace project (a shape `workspace.ts` cannot refuse) makes the managed target a descendant of the source, and the walk would then read the directory it is filling and re-copy its own output one level deeper each pass.
+
+**One resolver for the whole copy, and it must be.** Containment, `copyTree`'s walk root, and `walkTree`'s per-link "does this symlink escape?" comparison all resolve through the same `canonical` = JS `fs.realpathSync`. That call follows symlinks but does **not** restore on-disk letter case (macOS) or 8.3 short names (Windows) — the native `fs.realpathSync.native` / `fsp.realpath` do. An earlier attempt (PR #599) took the walk root from the native realpath while the per-link check used `canonical`; the two then disagreed about the same path, and every in-tree symlink under a mixed-case source was dropped as `symlink_escapes` while the preflight promised to recreate it — a red on exactly the two symlink-control tests on Windows CI. `assertCopyContained` returns its resolved source so the walk reuses it, so there is one resolution and no second function to drift.
+
+**And the cap is re-checked BEFORE each write** (`result.files + 1`, `result.bytes + entry.size`), so one oversized file never lands. A copy that outgrows the survey's measurement throws from within; the caller's catch removes the partial target, because a copy larger than what was measured is not the snapshot it claims to be.
 
 ## The supported Node floor
 

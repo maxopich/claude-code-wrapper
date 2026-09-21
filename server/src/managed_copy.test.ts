@@ -13,6 +13,7 @@ import { describe, expect, test, vi } from 'vitest';
 import type { ServerMsg } from '@cebab/shared/protocol';
 import { config } from './config.js';
 import { getDb } from './db.js';
+import * as managedAgent from './managed_agent.js';
 import { managedAgentsRoot } from './managed_agent.js';
 import { preflightManagedCopy, runManagedCopy } from './managed_copy.js';
 import * as safetyAudit from './notifications/safety_audit.js';
@@ -512,6 +513,61 @@ describe('[security] runManagedCopy refuses an incomplete copy (Cebab-6z6a)', ()
 
     expect(majorityOut.registered).toBe(true);
     expect(managedDirs()).toContain('majority');
+  });
+});
+
+describe('[security] runManagedCopy re-enforces the cap through copyTree (Cebab-6fax.43.4)', () => {
+  const tmp = withTempDataDir('managed-copy-cap-passthrough');
+
+  test('[security] a tree that grew past the survey is refused mid-copy, and nothing is registered', async () => {
+    // The survey runs before `claimManagedDir` creates the target, so it cannot
+    // see a tree that grows before the copy reaches it. Here the growth is
+    // simulated by making the survey UNDER-report (overCap:false, a tiny count)
+    // while the real tree on disk exceeds the caps `runManagedCopy` forwards to
+    // `copyTree`. If those caps were NOT passed through, the copy would run
+    // unbounded and register — which is what this reddens against.
+    const dir = path.join(tmp.root(), 'grew');
+    for (let i = 0; i < 20; i++) write(path.join(dir, `f${i}.txt`), 'x'.repeat(100));
+    const id = upsertProject('grew', dir).id;
+
+    const spy = vi.spyOn(managedAgent, 'surveyTree').mockResolvedValue({
+      bytes: 100,
+      files: 1,
+      dirs: 1,
+      symlinks: 0,
+      skips: [],
+      credentialFiles: [],
+      largest: [],
+      overCap: false,
+    });
+
+    const baseline = auditRows().length;
+    const sent: ServerMsg[] = [];
+    let outcome;
+    try {
+      // Tight caps the real 2,000-byte tree blows past, but the mocked survey
+      // does not — so the survey's own cap check passes and the copy's does not.
+      outcome = await runManagedCopy(id, (m) => sent.push(m), { maxBytes: 250, maxFiles: 100_000 });
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(outcome.registered).toBe(false);
+    // The partial tree was removed, so nothing squats on the slug or the disk.
+    expect(managedDirs()).toEqual([]);
+    expect(listProjects().filter((p) => p.managed_source_path !== null)).toEqual([]);
+    const result = sent.find((m) => m.type === 'managed_copy_result');
+    expect(result?.result.ok).toBe(false);
+    if (result?.type === 'managed_copy_result' && !result.result.ok) {
+      expect(result.result.error).toContain('exceeded the cap');
+    }
+
+    // The copy got as far as the audit-before-write row (that is by design — the
+    // directory has to be NAMEABLE before the copy starts), so exactly the
+    // `managed_copy_started` row lands and there is no separate refusal row.
+    const rows = auditRowsSince(baseline);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].kind).toBe('project.managed_copy_started');
   });
 });
 

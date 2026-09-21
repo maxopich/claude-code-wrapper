@@ -468,6 +468,152 @@ describe('managed_agent — removeManagedDir', () => {
   });
 });
 
+describe('managed_agent — copy containment and cap (Cebab-6fax.43.4, Cebab-ygu.16)', () => {
+  const tmp = withTempDataDir('managed-containment');
+
+  test('[security] refuses a target outside the managed root, but an in-root copy (incl. a mixed-case source) still succeeds', async () => {
+    // THREE things live in ONE case on purpose, and the reason is the
+    // revert-check: it requires every added case to redden without the fix, and
+    // an assertion that passes either way by construction cannot stand as its
+    // own case. So the anti-vacuity control AND the mixed-case regression guard
+    // both ride INSIDE the case whose out-of-root refusal (last) reddens.
+    //
+    // (1) Positive control: an ordinary in-root copy writes the tree. Without
+    // it, a copyTree that refused everything would pass the refusal below and
+    // ship an engine that never copies anything. It also makes
+    // managedAgentsRoot() exist, so the refusal exercises the containment
+    // branch rather than the resolve-failure one.
+    //
+    // (2) Mixed-case regression for the #599 Windows red, folded in here rather
+    // than as its own case. `copyTree`'s walk root and `walkTree`'s per-link
+    // "does this symlink escape?" comparison must resolve through the SAME
+    // function; #599 took the walk root from the native realpath while the
+    // per-link check used `canonical` (JS `fs.realpathSync`), and the two
+    // disagreed on letter case (macOS) and 8.3 short names (Windows), so an
+    // in-tree link under a mixed-case source was dropped as `symlink_escapes`.
+    // We copy the source via a case-FLIPPED path carrying an in-tree symlink and
+    // assert the link is recreated. This cannot be a standalone case: on a full
+    // revert the baseline still resolves the walk root with `canonical(source)`
+    // — the one-resolver behaviour — so a standalone mixed-case success test
+    // passes without the fix and the revert-check flags it (attempt 1 did
+    // exactly that). Riding inside a reddening case keeps the guard without that
+    // false green: reintroduce the two-resolver bug and this assertion fails.
+    const okSrc = path.join(tmp.root(), 'ok-src');
+    write(path.join(okSrc, 'CLAUDE.md'), '# agent\n');
+    write(path.join(okSrc, 'nested', 'f.txt'), 'x');
+
+    // Case-insensitivity is what makes the flip meaningful (macOS default,
+    // Windows). On a case-sensitive filesystem (Linux) `OK-SRC` names nothing,
+    // so the plain lower-case source is copied and the symlink assertions are
+    // skipped — there is no case disagreement to regress there.
+    const mixedCase = symlinksWork(tmp.root()) && fs.existsSync(path.join(tmp.root(), 'OK-SRC'));
+    if (mixedCase) fs.symlinkSync('CLAUDE.md', path.join(okSrc, 'alias'));
+    const okSource = mixedCase ? path.join(tmp.root(), 'OK-SRC') : okSrc;
+
+    const ok = await copyTree(okSource, await claimManagedDir('ok'));
+    expect(ok.files).toBe(2); // a symlink is not a file, so the count is unchanged
+    expect(fs.existsSync(path.join(ok.target, 'CLAUDE.md'))).toBe(true);
+    if (mixedCase) {
+      // The in-tree link survived the mixed-case source rather than being
+      // dropped as an escape — the property #599 broke on Windows.
+      expect(ok.skips).toEqual([]);
+      expect(ok.symlinks).toBe(1);
+      expect(fs.readlinkSync(path.join(ok.target, 'alias'))).toBe('CLAUDE.md');
+    }
+
+    // (3) The refusal, and the assertion the whole case reddens on: a target
+    // that EXISTS but is a sibling of `.cebab`, not inside the managed root — so
+    // it exercises the containment refusal, not the resolve-failure one.
+    const src = path.join(tmp.root(), 'src');
+    write(path.join(src, 'CLAUDE.md'), '# agent\n');
+    const outside = path.join(tmp.root(), 'not-managed');
+    fs.mkdirSync(outside, { recursive: true });
+
+    await expect(copyTree(src, outside)).rejects.toThrow(/not inside/);
+    // Nothing was written into the out-of-root target.
+    expect(fs.readdirSync(outside)).toEqual([]);
+  });
+
+  test('[security] refuses a source that is an ANCESTOR of the target (self-recursive copy)', async () => {
+    // Cebab-ygu.16: a data dir nested inside a workspace project, a shape
+    // `workspace.ts` cannot refuse, makes the managed target a descendant of
+    // the source; the walk would then read the directory it is filling and
+    // re-copy its own output one level deeper each pass. `tmp.root()` is the
+    // parent of `.cebab`, so a claimed managed dir sits inside it.
+    const target = await claimManagedDir('recursive');
+    await expect(copyTree(tmp.root(), target)).rejects.toThrow(/inside its own source/);
+  });
+
+  test('[security] refuses a source EQUAL to the target', async () => {
+    // The degenerate ancestor case: copying a directory onto itself. Refused by
+    // the `targetReal === sourceReal` clause before any byte is read or written.
+    const dir = await claimManagedDir('self');
+    write(path.join(dir, 'f.txt'), 'x');
+    await expect(copyTree(dir, dir)).rejects.toThrow(/inside its own source/);
+  });
+
+  test('[security] refuses a target that cannot be resolved (no raw-path fallback)', async () => {
+    // A failure to resolve is a refusal, not a fallback to the unresolved path
+    // — `project_containment_fallback_is_an_escape_hatch`. The managed root is
+    // made to exist by the claim; the target beneath it is never created.
+    const src = path.join(tmp.root(), 'src');
+    write(path.join(src, 'CLAUDE.md'), '# agent\n');
+    await claimManagedDir('anchor'); // makes managedAgentsRoot() exist
+    const ghost = path.join(managedAgentsRoot(), 'never-created');
+
+    await expect(copyTree(src, ghost)).rejects.toThrow(/cannot resolve the copy target/);
+  });
+
+  test('[security] the FILE cap trips on its own, and a generous cap copies fully', async () => {
+    // Control FIRST, folded in for the same revert-check reason as above: the
+    // 20-file tree under a generous cap copies whole. This assertion passes with
+    // or without the cap, so it rides inside the case whose tight-cap refusal
+    // reddens rather than standing alone.
+    const roomySrc = path.join(tmp.root(), 'roomy');
+    for (let i = 0; i < 20; i++) write(path.join(roomySrc, `f${i}.txt`), 'x'.repeat(100));
+    const roomy = await copyTree(roomySrc, await claimManagedDir('roomy'), undefined, {
+      maxBytes: 1024 * 1024,
+      maxFiles: 1000,
+    });
+    expect(roomy.files).toBe(20);
+
+    // The refusal, FILE cap only: bytes are given all the room they need, so the
+    // only bound that can trip is `maxFiles`. Reddens when the cap is reverted —
+    // without it all 20 files copy and nothing throws.
+    const src = path.join(tmp.root(), 'many-files');
+    for (let i = 0; i < 20; i++) write(path.join(src, `f${i}.txt`), 'x'.repeat(10));
+    await expect(
+      copyTree(src, await claimManagedDir('many-files'), undefined, {
+        maxBytes: 1024 * 1024,
+        maxFiles: 2,
+      }),
+    ).rejects.toThrow(/exceeded the cap/);
+  });
+
+  test('[security] the BYTE cap trips on its own, and a generous cap copies fully', async () => {
+    // Control FIRST: the same tree under a generous byte cap copies whole.
+    const roomySrc = path.join(tmp.root(), 'roomy-bytes');
+    for (let i = 0; i < 20; i++) write(path.join(roomySrc, `f${i}.txt`), 'x'.repeat(100));
+    const roomy = await copyTree(roomySrc, await claimManagedDir('roomy-bytes'), undefined, {
+      maxBytes: 1024 * 1024,
+      maxFiles: 1000,
+    });
+    expect(roomy.files).toBe(20);
+
+    // The refusal, BYTE cap only: the file count is given all the room it needs,
+    // so the only bound that can trip is `maxBytes`. Each file is 100 bytes and
+    // the cap is 250, so the third projected write (300 > 250) refuses.
+    const src = path.join(tmp.root(), 'many-bytes');
+    for (let i = 0; i < 20; i++) write(path.join(src, `f${i}.txt`), 'x'.repeat(100));
+    await expect(
+      copyTree(src, await claimManagedDir('many-bytes'), undefined, {
+        maxBytes: 250,
+        maxFiles: 100_000,
+      }),
+    ).rejects.toThrow(/exceeded the cap/);
+  });
+});
+
 describe('managed_agent — .git is never copied (Cebab-ws0.11)', () => {
   const tmp = withTempDataDir('managed-vcs');
 
