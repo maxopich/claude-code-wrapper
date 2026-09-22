@@ -178,7 +178,8 @@ describe('the edit-config affordance', () => {
     expect(deleteBtn).toBeDefined();
     const title = deleteBtn!.getAttribute('title') ?? '';
     expect(title).toContain('~/.claude/projects/');
-    expect(title).not.toMatch(/\bits files, conversations and logs\b/);
+    expect(title).toContain('Cebab-side conversation records');
+    expect(title).not.toMatch(/\bits (files, )?(its )?conversations\b/);
   });
 
   test('clicking it names the project so the modal can title itself', () => {

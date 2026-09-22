@@ -59,8 +59,10 @@ describe('ManagedDeleteModal — what survives the delete', () => {
     // honest note can sit under an unchanged overclaim.
     render(state({ status: 'confirming' }));
     const text = container.textContent ?? '';
-    expect(text).not.toMatch(/its files, its conversations and its logs/);
-    expect(text).not.toMatch(/\bits conversations\b/);
+    expect(text).toContain('Cebab-side conversation records');
+    // Either site's old phrasing, so a copy pasted from the tooltip (or back)
+    // cannot slip through a check tuned to one wording.
+    expect(text).not.toMatch(/\bits (files, )?(its )?conversations\b/);
   });
 
   test('the note is present in every status, not only while confirming', () => {

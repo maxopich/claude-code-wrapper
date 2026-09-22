@@ -152,7 +152,7 @@ Three questions the design had to settle:
 
 - **Sessions and events go.** A managed agent is an ordinary `projects` row and
   `sessions.project_id REFERENCES projects(id) ON DELETE CASCADE`, so removing the row
-  already destroys its conversations. "Mark it missing" would leave a row pointing at a
+  already destroys its Cebab-side conversation records. "Mark it missing" would leave a row pointing at a
   directory that is gone — a dead agent in the sidebar forever. An explicit operator
   delete is not the ambiguous case (a directory that vanished from under Cebab); it is
   the operator saying they are done with this agent.
