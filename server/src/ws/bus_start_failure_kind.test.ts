@@ -69,8 +69,9 @@ describe('classifyBusStartFailure — the mapping', () => {
   // Error is identical before and after this change (the raw-error path never
   // touches `cancelledMessage`), so on its own it passes with OR without the
   // change and guards nothing, which is exactly what the revert-check flags.
-  // Here it still does its job: it is the only assertion that reddens if
-  // `classifyBusStartFailure` ever returns `cancelledMessage` unconditionally.
+  // Here it still does its job: it reddens if `classifyBusStartFailure` ever
+  // returns `cancelledMessage` unconditionally (as do the existing genuine-throw
+  // cases above, through the default).
   const RESUME_OVERRIDE =
     'Resume cancelled: you declined a trust or environment prompt, so the session was not re-attached.';
 
@@ -265,6 +266,11 @@ describe('the resume_multi_agent catch routes through classifyBusStartFailure [r
         '`aborted`, not a crash. Route it through `classifyBusStartFailure(...)`.',
     ).not.toMatch(/kind:\s*'/);
     expect(bodies[0]).toContain('classifyBusStartFailure(');
+    // The resume wording must be passed AT THIS SITE; the one-arg form would
+    // tell the operator a re-attach "never began". Comment-stripped region, so
+    // only the real argument satisfies it. The outcome itself is pinned end to
+    // end in resume_gate_cancel.test.ts.
+    expect(bodies[0]).toContain("'Resume cancelled:");
     // Pins the sticky-toast regression: a sessionless bus `wrapper_error` is
     // toasted as a crash regardless of `kind`, so the sessionId must stay.
     expect(bodies[0]).toContain('sessionId: msg.sessionId');

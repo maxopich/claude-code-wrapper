@@ -3322,17 +3322,26 @@ export function classifyHandlerFailure(err: unknown): WrapperErrorKind {
 /**
  * `Cebab-2m7n` — a bus start cancelled by the operator is not a crash.
  *
- * All three sites — both `start_multi_agent` arms (orchestrator + chain) and
- * the `resume_multi_agent` catch (`Cebab-2ros`) — await `gateProjectsForSpawn`
- * inside a try whose `finally` releases the start claim, and catch its
+ * Three sites use it — both `start_multi_agent` arms (orchestrator + chain),
+ * which await `gateProjectsForSpawn` inside a try whose `finally` releases the
+ * start claim, and the `resume_multi_agent` catch (`Cebab-2ros`), whose
+ * `resumeMultiAgentTarget` awaits the same gate via `reconstructForMode` when
+ * it rebuilds a session that is not live (after a restart). Each catches the
  * rejection LOCALLY — so, unlike a single-agent turn, it never reaches the
  * dispatch-level `classifyHandlerFailure` at the top of `onConnection`. An
- * operator DECLINING a trust or env-injection prompt during a bus start rejects
- * the parked gate with a `GateAbandonedError` (`name === 'AbortError'`);
- * hard-coding `kind: 'process_crashed'` in those catches turned that deliberate
- * cancellation into a sticky red crash banner — the same defect `Cebab-6fax.17`
- * fixed on the dispatch catch and the single-agent turn path, missed here
- * because these catches short-circuit it.
+ * operator DECLINING a trust or env-injection prompt rejects the parked gate
+ * with a `GateAbandonedError` (`name === 'AbortError'`); hard-coding
+ * `kind: 'process_crashed'` in those catches reported that deliberate
+ * cancellation as a crash — on the SESSIONLESS start arms a sticky red
+ * "Server error" toast; on the session-scoped resume catch, a crash label and
+ * the uninformative "Failed to resume this session." (the red styling of a
+ * session-scoped error is separate, whatever its kind). The same defect
+ * `Cebab-6fax.17` fixed on the dispatch catch and the single-agent turn path,
+ * missed here because these catches short-circuit it.
+ *
+ * NOT YET COVERED, same shape: the `continue_multi_agent`, mid-run
+ * add-participant and reopen catches also await the gate and still report a
+ * cancel as a failure.
  *
  * Mirrors the single-agent turn path: `aborted` gets a plain-language message,
  * anything else keeps its raw error text and stays `process_crashed`, so a
