@@ -38,9 +38,11 @@ export const COMPOSER_CLEARANCE_VAR = '--composer-clearance';
  * `Cebab-xqad`: extracted from `InputBox` into a shared hook so the multi-agent
  * and chain composers publish the same clearance as the single-agent one — the
  * bug was exactly a second composer that forgot to. Pass the ref of the
- * composer's wrapping element. There is at most one composer on screen (the
- * chat view and the multi-agent tab are mutually exclusive), so a single
- * document-level property is unambiguous.
+ * composer's wrapping element. One document-level property is only
+ * unambiguous while at most ONE caller of this hook is mounted at a time: two
+ * would clobber each other (last write wins, and either unmount removes the
+ * value). The chat view and the multi-agent draft are mutually exclusive
+ * today; a new caller has to keep it that way.
  */
 export function useComposerClearance(ref: RefObject<HTMLElement | null>): void {
   useEffect(() => {
