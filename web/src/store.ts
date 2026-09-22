@@ -368,9 +368,10 @@ export type MultiAgentActivity = {
   phase: Exclude<AgentActivityPhase, 'idle'>;
   currentTool?: string;
   /** `Cebab-ygu.48`: the operator-readable "what is it working on" summary for
-   *  the trailing tool call (`read src/foo.ts`, `grep "x" in src`, a Bash
-   *  command). Undefined on a reasoning tick. Server-classified, safe to
-   *  render as-is. */
+   *  the trailing tool call (`reading src/foo.ts`, `searching for x`, `calling
+   *  search_issues (linear)`). Undefined on a reasoning tick. Derived from
+   *  MODEL-WRITTEN tool input, flattened and clipped server-side by the shared
+   *  `toolActivity` — render as text, never as markup. */
   currentSummary?: string;
   lastActivityTs: number;
   turnStartedAt: number;

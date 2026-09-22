@@ -8,3 +8,4 @@ export * from './topology.js';
 export * from './bus_tail.js';
 export * from './export_filename.js';
 export * from './net.js';
+export * from './toolActivity.js';

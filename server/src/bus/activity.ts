@@ -21,7 +21,7 @@
  * `dispose()` clears everything on session teardown.
  */
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import { classifyToolCall } from '@cebab/shared';
+import { toolActivity, toolActivityText } from '@cebab/shared';
 import type { AgentActivityPhase } from '@cebab/shared/protocol';
 
 /** Default stall window. 25s + sub-second emit latency lands a stall label
@@ -36,12 +36,13 @@ export type ActivitySnapshot = {
   agentName: string;
   phase: AgentActivityPhase;
   currentTool?: string;
-  /** `Cebab-ygu.48`: the operator-readable one-line summary `classifyToolCall`
-   *  computes for the trailing `tool_use` block's (name, input) — e.g.
-   *  `read src/module_07.js` or `grep "refundCharge" in src`. This is the
-   *  "what is it working on" line: it distinguishes a 15-file Read loop tick by
-   *  tick where `currentTool` (`Read`) stays constant. Undefined when the agent
-   *  is reasoning with no tool in flight, or (with the tool name) on `idle`. */
+  /** `Cebab-ygu.48`: the operator-readable one-line summary for the trailing
+   *  `tool_use` block's (name, input) — e.g. `reading src/module_07.js` or
+   *  `searching for refundCharge`. This is the "what is it working on" line: it
+   *  distinguishes a 15-file Read loop tick by tick where `currentTool`
+   *  (`Read`) stays constant. Undefined when the agent is reasoning with no
+   *  tool in flight, or (with the tool name) on `idle`. Derived from
+   *  model-written input, flattened and clipped by `toolActivity`. */
   currentSummary?: string;
   lastActivityTs: number;
   turnStartedAt: number;
@@ -86,10 +87,21 @@ type Slot = {
  * `message`.
  *
  * `Cebab-ygu.48`: alongside the tool NAME, derive the operator-readable
- * `summary` `classifyToolCall` already computes from the same (name, input)
- * the block carries — the runner throws it away for `read`-class calls, but it
- * is exactly the "what is it working on" line. Computed here (not at emit) so
- * it tracks the trailing block; `tool` and `summary` always move together.
+ * summary from the same (name, input) the block carries — the "what is it
+ * working on" line. Computed here (not at emit) so it tracks the trailing
+ * block; `tool` and `summary` always move together.
+ *
+ * The formatter is `toolActivity`, the SAME one the single-agent chat renders,
+ * and deliberately NOT `classifyToolCall(...).summary`. That one answers a
+ * different question — how risky is this call — and its summary is evidence
+ * for an approval decision, so it is verbose by design: absolute paths, byte
+ * counts, up to 200 characters of shell command, and a raw JSON peek of the
+ * input for every `mcp__*` tool. Measured, it renders
+ * `mcp__linear__search_issues: {"query":"…` in the one place `calling
+ * search_issues (linear)` was wanted, and it flattens `\n` only — so U+2028
+ * and the bidi override U+202E reach the DOM text node unaltered.
+ * `toolActivity` clips to column width, keeps a path's TAIL (its head is the
+ * same for every file in the repo), and runs `flatten` over every subject.
  */
 type ToolInfo = { tool: string | undefined; summary: string | undefined };
 
@@ -103,7 +115,7 @@ function toolInfoFromMessage(msg: SDKMessage, prev: ToolInfo): ToolInfo {
   if (!Array.isArray(blocks) || blocks.length === 0) return prev;
   const last = blocks[blocks.length - 1];
   if (last?.type === 'tool_use' && typeof last.name === 'string') {
-    return { tool: last.name, summary: classifyToolCall(last.name, last.input).summary };
+    return { tool: last.name, summary: toolActivityText(toolActivity(last.name, last.input)) };
   }
   // Trailing text/thinking (or a malformed tool_use) → reasoning, no tool.
   return { tool: undefined, summary: undefined };

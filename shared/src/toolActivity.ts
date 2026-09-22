@@ -8,6 +8,17 @@
  * difference between a spinner and a status line, and it is what makes hiding
  * the finished steps survivable.
  *
+ * `Cebab-ygu.48` MOVED THIS FROM `web/` INTO `shared/`, because there are now
+ * two callers asking the same question about the same tool call and they must
+ * not answer it differently. The single-agent chat renders it client-side
+ * (`ThinkingIndicator`); the multi-agent activity observer renders it
+ * SERVER-side (`server/src/bus/activity.ts`) and ships the finished string on
+ * `agent_activity.currentSummary`, because the alternative — putting the raw
+ * tool `input` on the wire and formatting in the browser — would push
+ * unbounded model-written JSON to every attached socket once a second per
+ * agent. Two hand-maintained copies would eventually disagree about what an
+ * agent is doing, with nothing to say which was right.
+ *
  * WHY THIS IS NOT `classifyToolCall`, which switches over the same tool names
  * in `shared/src/mutation.ts`. That function answers a different question — how
  * risky is this call, and which file does it write — and its `summary` is
@@ -57,9 +68,16 @@ const MAX_SUBJECT = 52;
  * for a DOM text node and clips at column width. Sharing them would mean one
  * caller stripping quotes off the other's answer. What they genuinely share is
  * the character class, and that is one line — `Cebab-1mdl` tracks giving it a
- * single home in `shared/`.
+ * single home.
+ *
+ * EXPORTED since `Cebab-ygu.48`. This is the step a second caller is most
+ * likely to skip: `classifyToolCall`'s summaries escape `\n` and nothing else,
+ * so anything built from them needs this run over it before it reaches a DOM
+ * text node. Measured on the unflattened path: a `file_path` carrying U+2028
+ * rendered an apparent second clause the input never had, and a `pattern`
+ * carrying U+202E reversed the reading order of the rest of the line.
  */
-function flatten(raw: string): string {
+export function flatten(raw: string): string {
   return raw.replace(/[\s\p{Cc}\p{Cf}]+/gu, ' ').trim();
 }
 

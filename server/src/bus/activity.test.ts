@@ -195,17 +195,19 @@ describe('createAgentActivityObserver', () => {
     expect(emits.at(-1)!).toMatchObject({ phase: 'stalled', model: 'claude-sonnet-4-5-20250929' });
   });
 
-  // `Cebab-ygu.48`: the observer carries the operator-readable summary
-  // `classifyToolCall` computes for the trailing tool call — the "what is it
-  // working on" line — not just the bare tool name.
-  test('carries the classifyToolCall summary for the trailing tool call', () => {
+  // `Cebab-ygu.48`: the observer carries the operator-readable summary for the
+  // trailing tool call — the "what is it working on" line — not just the bare
+  // tool name. The formatter is the SHARED `toolActivity`, the same one the
+  // single-agent chat renders, so the two surfaces cannot describe the same
+  // tool call differently.
+  test('carries the shared toolActivity summary for the trailing tool call', () => {
     const emits: ActivitySnapshot[] = [];
     const obs = createAgentActivityObserver((s) => emits.push(s));
     obs.onMessage('coder', asstTool('Read', { file_path: '/repo/src/module_07.js' }));
     expect(emits.at(-1)).toMatchObject({
       phase: 'working',
       currentTool: 'Read',
-      currentSummary: 'read /repo/src/module_07.js',
+      currentSummary: 'reading repo/src/module_07.js',
     });
   });
 
@@ -218,14 +220,14 @@ describe('createAgentActivityObserver', () => {
     obs.onMessage('coder', asstTool('Read', { file_path: '/a.ts' }));
     obs.onMessage('coder', asstTool('Read', { file_path: '/b.ts' })); // <1s, same tool
     const summaries = emits.filter((e) => e.phase === 'working').map((e) => e.currentSummary);
-    expect(summaries).toEqual(['read /a.ts', 'read /b.ts']);
+    expect(summaries).toEqual(['reading a.ts', 'reading b.ts']);
   });
 
   test('a reasoning tick clears the summary along with the tool', () => {
     const emits: ActivitySnapshot[] = [];
     const obs = createAgentActivityObserver((s) => emits.push(s));
     obs.onMessage('coder', asstTool('Grep', { pattern: 'refundCharge', path: 'src' }));
-    expect(emits.at(-1)!.currentSummary).toBe('grep "refundCharge" in src');
+    expect(emits.at(-1)!.currentSummary).toBe('searching for refundCharge');
     obs.onMessage('coder', asstText('now reasoning')); // trailing text → no tool
     expect(emits.at(-1)).toMatchObject({ currentTool: undefined, currentSummary: undefined });
   });
@@ -236,6 +238,73 @@ describe('createAgentActivityObserver', () => {
     obs.onMessage('coder', asstTool('Read', { file_path: '/x.ts' }));
     obs.onTurnEnd('coder');
     expect(emits.at(-1)).toMatchObject({ phase: 'idle', currentSummary: undefined });
+  });
+
+  // `Cebab-ygu.48`: the summary is built from MODEL-WRITTEN tool input and is
+  // rendered into a DOM text node, so the three cases below are the reason the
+  // formatter is `toolActivity` and not `classifyToolCall(...).summary`. Each
+  // one was MEASURED against the latter and failed: it escapes `\n` only, and
+  // its `mcp__*` arm returns a raw JSON peek of the input. Swapping the
+  // formatter back reddens all three.
+  //
+  // Assembled from char codes so this source file carries no literal control
+  // characters — some of the tooling that reads it refuses them outright.
+  const LINE_SEP = String.fromCharCode(0x2028);
+  const BIDI_OVERRIDE = String.fromCharCode(0x202e);
+  const CTRL_OR_FORMAT = new RegExp('[\\p{Cc}\\p{Cf}\\u2028\\u2029]', 'u');
+
+  test('a line separator in a model-written path cannot forge a second clause', () => {
+    const emits: ActivitySnapshot[] = [];
+    const obs = createAgentActivityObserver((s) => emits.push(s));
+    obs.onMessage(
+      'coder',
+      asstTool('Read', { file_path: `/repo/a.ts${LINE_SEP}WORKING ON SOMETHING ELSE` }),
+    );
+    const summary = emits.at(-1)!.currentSummary!;
+    expect(CTRL_OR_FORMAT.test(summary)).toBe(false);
+    // Anti-vacuity: the injected words must not survive as their own clause.
+    // Asserting only "no control chars" would pass on an implementation that
+    // dropped the whole subject.
+    expect(summary).toContain('a.ts');
+  });
+
+  test('a bidi override in a search pattern never reaches the wire', () => {
+    const emits: ActivitySnapshot[] = [];
+    const obs = createAgentActivityObserver((s) => emits.push(s));
+    obs.onMessage('coder', asstTool('Grep', { pattern: `x${BIDI_OVERRIDE}gnihtemos` }));
+    const summary = emits.at(-1)!.currentSummary!;
+    expect(CTRL_OR_FORMAT.test(summary)).toBe(false);
+    expect(summary).toContain('searching for');
+  });
+
+  test('an MCP tool is NAMED, not dumped as its raw JSON input', () => {
+    const emits: ActivitySnapshot[] = [];
+    const obs = createAgentActivityObserver((s) => emits.push(s));
+    obs.onMessage(
+      'coder',
+      asstTool('mcp__linear__search_issues', { query: 'auth bug', teamId: 'abc-123' }),
+    );
+    const summary = emits.at(-1)!.currentSummary!;
+    // The flattened one-string form the wire carries; the chat weights the two
+    // halves differently and renders the server as a parenthetical. Same
+    // formatter either way — that is the point of sharing it.
+    expect(summary).toBe('calling search_issues linear');
+    // The operator's own workload is MCP-heavy, so this is the common case and
+    // not an edge one. A JSON peek here would put the tool's arguments — and
+    // whatever the model wrote into them — on the status line.
+    expect(summary).not.toContain('{');
+    expect(summary).not.toContain('auth bug');
+  });
+
+  test('a long shell command is clipped, not shipped whole to every socket', () => {
+    const emits: ActivitySnapshot[] = [];
+    const obs = createAgentActivityObserver((s) => emits.push(s));
+    const command = `find . -type f -name '*.ts' ${'-not -path ./node_modules/* '.repeat(8)}| wc -l`;
+    obs.onMessage('coder', asstTool('Bash', { command }));
+    const summary = emits.at(-1)!.currentSummary!;
+    expect(command.length).toBeGreaterThan(200); // the input really is long
+    expect(summary.length).toBeLessThanOrEqual(64);
+    expect(summary.startsWith('running find . -type f')).toBe(true);
   });
 
   test('a malformed / empty init model never overwrites a real one, and idle carries it', () => {

@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ClaudeMark } from './ClaudeMark';
 import { formatElapsed } from '../format';
-import { toolActivity, toolActivityText } from '../toolActivity';
+import { toolActivity, toolActivityText } from '@cebab/shared';
 
 /**
  * Animated "the agent is computing" indicator. One component, two shapes:

@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'vitest';
-import { toolActivity, toolActivityText } from './toolActivity';
+import { toolActivity, toolActivityText } from './toolActivity.js';
 
 /**
  * `Cebab-ibb4`: the live status line's label.
