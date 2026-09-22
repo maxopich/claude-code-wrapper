@@ -34,7 +34,12 @@ import path from 'node:path';
 import { config } from './config.js';
 import { DIR_MODE, FILE_MODE, ensureDataDir, secureMkdir } from './data_perms.js';
 import { pathLooksSensitive } from '@cebab/shared';
-import { canonical, canonicalOrThrow, isInside } from './path_containment.js';
+import {
+  canonical,
+  canonicalAllowingMissing,
+  canonicalOrThrow,
+  isInside,
+} from './path_containment.js';
 import { slugifyAgentName } from './bus/paths.js';
 
 /** Where every managed agent lives. Mirrors `sessionsRoot()` in `bus/paths.ts`. */
@@ -353,21 +358,35 @@ export async function surveyTree(source: string, caps: Caps = DEFAULT_CAPS): Pro
  * Remove a managed agent's directory tree, refusing anything that is not
  * strictly inside the managed root.
  *
- * Used to clean up after a copy that failed partway. A recursive delete is the
- * most dangerous thing in this file, so the containment check is not a
- * formality: `isInside` is `path.relative`-based (a prefix test would accept a
- * sibling `agents-old/`), the path is canonicalised first, and equality with
- * the root itself is refused separately by `isInside`'s strictness — deleting
- * `<dataDir>/agents` would take every OTHER managed agent with it.
+ * Used to clean up after a copy that failed partway, and to delete a managed
+ * agent from the UI. A recursive delete is the most dangerous thing in this
+ * file, so the containment check is not a formality: `isInside` is
+ * `path.relative`-based (a prefix test would accept a sibling `agents-old/`),
+ * and equality with the root itself is refused separately by `isInside`'s
+ * strictness — deleting `<dataDir>/agents` would take every OTHER managed agent
+ * with it.
+ *
+ * BOTH sides go through the missing-tolerant resolver rather than `canonical`,
+ * because a target whose directory has ALREADY vanished is a legitimate delete:
+ * `canonical` falls back to its raw input when realpath fails, so on an install
+ * whose data dir sits under a symlinked ancestor the resolved root and the
+ * unresolved-because-gone target no longer share a prefix and the delete is
+ * wrongly refused. A resolution failure (`null`) is itself a REFUSAL, never a
+ * lexical fallback — a fallback would accept a path that resolves out of the
+ * root, defeating the check it is part of.
  *
  * `fsp.rm` unlinks symlinks rather than following them, so a copied intra-tree
- * link cannot be used to reach outside.
+ * link cannot be used to reach outside. It is given the ORIGINAL `target`, not
+ * the resolved one: resolution decides containment only.
  */
 export async function removeManagedDir(target: string): Promise<void> {
-  const root = canonical(managedAgentsRoot());
-  if (!isInside(root, canonical(target))) {
+  const root = canonicalAllowingMissing(managedAgentsRoot());
+  const child = canonicalAllowingMissing(target);
+  if (root === null || child === null || !isInside(root, child)) {
     throw new Error(
-      `managed_agent: refusing to remove ${JSON.stringify(target)} — not inside ${root}`,
+      `managed_agent: refusing to remove ${JSON.stringify(target)} — not inside ${
+        root ?? managedAgentsRoot()
+      }`,
     );
   }
   await fsp.rm(target, { recursive: true, force: true });

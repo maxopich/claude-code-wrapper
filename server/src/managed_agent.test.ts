@@ -1,8 +1,9 @@
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import { promises as fsp } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, test } from 'vitest';
+import { afterEach, describe, expect, test } from 'vitest';
 
 import {
   claimManagedDir,
@@ -465,6 +466,131 @@ describe('managed_agent — removeManagedDir', () => {
     fs.mkdirSync(sibling, { recursive: true });
     await expect(removeManagedDir(sibling)).rejects.toThrow(/not inside/);
     expect(fs.existsSync(sibling)).toBe(true);
+  });
+
+  // --- Cebab-jkya: a vanished managed agent under a symlinked ancestor ---
+  //
+  // Every case here builds its OWN symlinked data-dir ancestor rather than
+  // borrowing os.tmpdir(). THE PLATFORM SUPPLIES THE BUG'S INPUT AND CI DOES
+  // NOT HAVE IT: on macOS os.tmpdir() realpaths through /private, so a naive
+  // "rm the dir then delete it" test reddens on the author's machine — but on
+  // ubuntu-latest os.tmpdir() is /tmp, a real directory, so canonical(target)
+  // equals the raw path, the single form returns true, and the case PASSES ON
+  // THE UNFIXED CODE. A self-made symlink reproduces the symlinked-ancestor
+  // install on every platform, and each case asserts the fixture actually took
+  // (`fs.realpathSync(config.dataDir) !== config.dataDir`) so it fails loudly
+  // rather than green-vacuously if the symlink did not.
+  let cleanup: string[] = [];
+  let restoreDataDir: string | null = null;
+
+  afterEach(() => {
+    if (restoreDataDir !== null) {
+      config.dataDir = restoreDataDir;
+      restoreDataDir = null;
+    }
+    for (const d of cleanup) fs.rmSync(d, { recursive: true, force: true });
+    cleanup = [];
+  });
+
+  /** Point config.dataDir under a freshly-created symlink and return it. */
+  function symlinkedDataDir(): string {
+    const realBase = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-jkya-real-')));
+    const linkBase = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-jkya-link-'));
+    const linkRoot = path.join(linkBase, 'via-link');
+    fs.symlinkSync(realBase, linkRoot);
+    cleanup.push(realBase, linkBase);
+    restoreDataDir = config.dataDir;
+    config.dataDir = path.join(linkRoot, '.cebab');
+    fs.mkdirSync(config.dataDir, { recursive: true });
+    return config.dataDir;
+  }
+
+  /** symlinksWork(), but REPORTS on a platform that lacks the privilege. */
+  function symlinksOrReport(): boolean {
+    if (symlinksWork(tmp.root())) return true;
+    console.warn(
+      '[managed_agent.test] symlinks unavailable — removeManagedDir vanished-dir cases skipped',
+    );
+    return false;
+  }
+
+  test('[security] removes a managed agent whose directory has already vanished, leaving siblings untouched', async () => {
+    if (!symlinksOrReport()) return;
+    symlinkedDataDir();
+    // Anti-vacuity control: if the symlink did not take (e.g. a plain tmpdir on
+    // Linux), this case would be green-vacuous, so assert the fixture directly
+    // rather than deciding containment by comparing canonical()s.
+    expect(fs.realpathSync(config.dataDir) !== config.dataDir).toBe(true);
+
+    const dir = await claimManagedDir('gone');
+    const sibling = await claimManagedDir('present');
+    write(path.join(sibling, 'keep.txt'), 'still here');
+
+    // The directory vanishes out from under the row, then the operator deletes.
+    fs.rmSync(dir, { recursive: true, force: true });
+    await expect(removeManagedDir(dir)).resolves.toBeUndefined();
+
+    // The still-present sibling is not touched by the vanished delete.
+    expect(fs.existsSync(path.join(sibling, 'keep.txt'))).toBe(true);
+  });
+
+  test('[security] refuses the MISSING variants of every outside path, not only the existing ones', async () => {
+    if (!symlinksOrReport()) return;
+    symlinkedDataDir();
+    expect(fs.realpathSync(config.dataDir) !== config.dataDir).toBe(true);
+    await claimManagedDir('anchor'); // makes managedAgentsRoot() exist
+
+    // The reddening assertion this case rides on. The three refusals below hold
+    // under the single form AND the fix alike (an existing-or-missing OUTSIDE
+    // path is refused either way), so on their own the revert-check cannot tell
+    // the sound fix from the broken baseline and flags them as passing without
+    // it. A vanished managed agent INSIDE the root, deleted cleanly, is the
+    // assertion that reddens on revert — under the single form the symlinked
+    // ancestor makes canonical(root) and the fallen-back-to-raw target
+    // incomparable and the delete is wrongly refused.
+    const gone = await claimManagedDir('gone');
+    fs.rmSync(gone, { recursive: true, force: true });
+    await expect(removeManagedDir(gone)).resolves.toBeUndefined();
+
+    // A path inside `<root>-old` that does not exist.
+    const oldSibling = path.join(`${managedAgentsRoot()}-old`, 'ghost');
+    await expect(removeManagedDir(oldSibling)).rejects.toThrow(/not inside/);
+
+    // A path outside the data dir that does not exist.
+    const outside = path.join(config.dataDir, '..', 'never-created');
+    await expect(removeManagedDir(outside)).rejects.toThrow(/not inside/);
+
+    // The root itself.
+    await expect(removeManagedDir(managedAgentsRoot())).rejects.toThrow(/not inside/);
+  });
+
+  test('[security] refuses a path that escapes the root through a symlinked parent, and the outside file survives', async () => {
+    if (!symlinksOrReport()) return;
+    symlinkedDataDir();
+    expect(fs.realpathSync(config.dataDir) !== config.dataDir).toBe(true);
+    await claimManagedDir('anchor'); // makes managedAgentsRoot() exist
+
+    // The reddening assertion this case rides on, for the same reason as the
+    // case above: the escape refusal below holds under the single form too (the
+    // symlinked ancestor already refuses it), so it distinguishes only the
+    // DOUBLE form from the fix, not the single-form baseline the revert-check
+    // restores. A cleanly-deleted vanished agent is what reddens on revert.
+    const gone = await claimManagedDir('gone');
+    fs.rmSync(gone, { recursive: true, force: true });
+    await expect(removeManagedDir(gone)).resolves.toBeUndefined();
+
+    // A directory OUTSIDE the root with a file in it...
+    const outsideDir = path.join(config.dataDir, 'outside-target');
+    write(path.join(outsideDir, 'precious.txt'), 'do not delete');
+    // ...symlinked in as `<root>/link`. A path THROUGH it resolves outside the
+    // root and must be refused. This is the assertion that reddens if someone
+    // later swaps in isManagedProjectPath's double form, whose raw-pair clause
+    // accepts the lexically-inside `<root>/link/inner`.
+    const link = path.join(managedAgentsRoot(), 'link');
+    fs.symlinkSync(outsideDir, link);
+
+    await expect(removeManagedDir(path.join(link, 'inner'))).rejects.toThrow(/not inside/);
+    expect(fs.existsSync(path.join(outsideDir, 'precious.txt'))).toBe(true);
   });
 });
 
