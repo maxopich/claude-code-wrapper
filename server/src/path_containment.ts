@@ -84,20 +84,22 @@ export function canonicalOrThrow(p: string, what: string): string {
  * BOUNDED, and the bound is not decoration. It is what makes a symlink CYCLE
  * safe: `realpathSync` throws ELOOP, the dangling-link branch below then
  * readlinks it, and the two hops would ping-pong forever. The cap stops that
- * at `MAX_ANCESTOR_WALK` iterations and returns `null`, i.e. "fall back to
- * lexical" — the same conservative answer as any other failure. It also caps
- * the syscalls one classification can issue on the turn path.
+ * at `MAX_ANCESTOR_WALK` iterations and returns `null` — the same answer as
+ * any other failure. What `null` MEANS is the caller's decision: the bus
+ * guardrail, which only reports, falls back to the lexical answer (see its
+ * call site); a containment check that GATES something — `removeManagedDir` —
+ * refuses, per the rule above. The cap also bounds the syscalls one call can
+ * issue.
  *
- * WHAT THIS DOES NOT BUY, stated plainly because the header used to argue
- * it was not worth buying at all:
- *   - It is NOT a sandbox. The link can be swapped between this call and
- *     the write (TOCTOU). This module reports; it does not gate.
- *   - It does not help `Bash`, which reaches this function with
- *     `filePath: undefined` and returns in-scope before any of this runs.
- *   - It does not address case-insensitive filesystems, where
- *     `/Users/x/proj` and `/users/x/proj` are the same directory and
- *     `startsWith` says otherwise. That hole predates this change and is
- *     untouched by it.
+ * `..` IS COLLAPSED AS TEXT, BEFORE ANY LINK IS FOLLOWED. `fs.realpathSync`
+ * (the JS one) resolves `p` lexically first, so `<dir>/link/../x` is judged as
+ * `<dir>/x` even when `link` points somewhere else — while the kernel, given
+ * the raw string, follows `link` and THEN applies `..`. A caller that acts on
+ * a path must therefore act on the lexically-normalised string it checked
+ * (`path.resolve(p)`), never on the raw one.
+ *
+ * NOT A SANDBOX: the link can be swapped between this call and whatever the
+ * caller does next (TOCTOU).
  */
 const MAX_ANCESTOR_WALK = 64;
 

@@ -114,6 +114,16 @@ export function classifyMutationScope(opts: {
   // the old answer. This change can therefore only ever ADD detections or
   // remove a false positive — it cannot invent one, which is what makes it
   // safe to turn on for every mutation with no opt-in.
+  //
+  // WHAT THIS DOES NOT BUY, stated plainly because the header used to argue
+  // it was not worth buying at all:
+  //   - It is NOT a sandbox. The link can be swapped between this call and
+  //     the write (TOCTOU). This check reports; it does not gate.
+  //   - It does not help `Bash`, which reaches this function with
+  //     `filePath: undefined` and returns in-scope before any of this runs.
+  //   - It does not address case-insensitive filesystems, where
+  //     `/Users/x/proj` and `/users/x/proj` are the same directory and
+  //     `startsWith` says otherwise. That hole predates the symlink handling.
   const realTarget = canonicalAllowingMissing(lexicalTarget);
   const realCwd = canonicalAllowingMissing(lexicalCwd);
   const usingLinks = realTarget !== null && realCwd !== null;

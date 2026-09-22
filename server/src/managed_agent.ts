@@ -375,13 +375,21 @@ export async function surveyTree(source: string, caps: Caps = DEFAULT_CAPS): Pro
  * lexical fallback — a fallback would accept a path that resolves out of the
  * root, defeating the check it is part of.
  *
- * `fsp.rm` unlinks symlinks rather than following them, so a copied intra-tree
- * link cannot be used to reach outside. It is given the ORIGINAL `target`, not
- * the resolved one: resolution decides containment only.
+ * `fsp.rm` unlinks a symlink LEAF rather than following it. It is given the
+ * LEXICALLY-NORMALISED target (`path.resolve`), not the symlink-resolved one:
+ * resolution decides containment only, and deleting through a link would
+ * delete the link's target. Normalised rather than raw because the resolver
+ * collapses `..` as text before following any link, while the kernel follows
+ * the link first — so the raw string `<root>/a/link/../victim` is CHECKED as
+ * `<root>/a/victim` but would DELETE `<link's target>/../victim`, outside the
+ * root. Acting on the string that was checked closes that. For every path a
+ * production caller builds (`claimManagedDir`'s `path.join`), the two strings
+ * are identical.
  */
 export async function removeManagedDir(target: string): Promise<void> {
+  const normalised = path.resolve(target);
   const root = canonicalAllowingMissing(managedAgentsRoot());
-  const child = canonicalAllowingMissing(target);
+  const child = canonicalAllowingMissing(normalised);
   if (root === null || child === null || !isInside(root, child)) {
     throw new Error(
       `managed_agent: refusing to remove ${JSON.stringify(target)} — not inside ${
@@ -389,7 +397,7 @@ export async function removeManagedDir(target: string): Promise<void> {
       }`,
     );
   }
-  await fsp.rm(target, { recursive: true, force: true });
+  await fsp.rm(normalised, { recursive: true, force: true });
 }
 
 // ---- the copy ----

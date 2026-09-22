@@ -590,7 +590,68 @@ describe('managed_agent — removeManagedDir', () => {
     fs.symlinkSync(outsideDir, link);
 
     await expect(removeManagedDir(path.join(link, 'inner'))).rejects.toThrow(/not inside/);
+    // An EXISTING file reached through the link. `inner` above does not exist,
+    // so a predicate that wrongly accepted it would hand `rm` a missing path and
+    // `force: true` would do nothing — the survival check below could never
+    // fail on that input alone. This one is real: accept it and the file goes.
+    await expect(removeManagedDir(path.join(link, 'precious.txt'))).rejects.toThrow(/not inside/);
     expect(fs.existsSync(path.join(outsideDir, 'precious.txt'))).toBe(true);
+  });
+
+  test('removes a managed agent after the WHOLE managed root was deleted by hand', async () => {
+    // The root side of the comparison. Every case above keeps
+    // managedAgentsRoot() on disk, where the two resolvers agree; they differ
+    // only when the root itself is gone. On a symlinked-ancestor install, a
+    // root resolved with `canonical` falls back to its raw string while the
+    // target walks up to the resolved ancestor, so every remaining row would
+    // be undeletable — the same dead end as the vanished-leaf case, one level
+    // up.
+    if (!symlinksOrReport()) return;
+    symlinkedDataDir();
+    expect(fs.realpathSync(config.dataDir) !== config.dataDir).toBe(true);
+    const dir = await claimManagedDir('gone');
+    fs.rmSync(managedAgentsRoot(), { recursive: true, force: true });
+    expect(fs.existsSync(managedAgentsRoot())).toBe(false);
+    await expect(removeManagedDir(dir)).resolves.toBeUndefined();
+  });
+
+  test('[security] a `link/..` path is deleted as the path that was CHECKED, never through the link', async () => {
+    // The resolver collapses `..` as text before following any link, while the
+    // kernel follows the link first. Hand `rm` the raw string and
+    // `<slug>/link/../victim` is checked as `<slug>/victim` (inside) but
+    // deletes `<link target>/../victim` — outside the root.
+    if (!symlinksOrReport()) return;
+    const slugDir = await claimManagedDir('slug');
+    const out = path.join(tmp.root(), 'outside-dotdot');
+    fs.mkdirSync(path.join(out, 'sub'), { recursive: true });
+    write(path.join(out, 'victim', 'precious.txt'), 'do not delete');
+    fs.symlinkSync(path.join(out, 'sub'), path.join(slugDir, 'link'));
+
+    // Built by concatenation: path.join would collapse the `..` itself.
+    const crafted = [slugDir, 'link', '..', 'victim'].join(path.sep);
+    // Refusing it or deleting only the in-root `<slug>/victim` are both
+    // correct; what must never happen is the outside file going.
+    await removeManagedDir(crafted).catch(() => {});
+    expect(fs.existsSync(path.join(out, 'victim', 'precious.txt'))).toBe(true);
+  });
+
+  test('[security] a path the resolver cannot resolve is REFUSED, never judged lexically', async () => {
+    // `canonicalAllowingMissing` returns null past its 64-step walk cap. The
+    // rule is that null refuses; a lexical fallback would accept this path,
+    // which is textually inside the root. Needs a data dir with NO symlink in
+    // its path: under a symlinked one, the raw string is already outside the
+    // resolved root and a fallback would be refused anyway — this case would
+    // then pass on the broken rule.
+    const real = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-jkya-plain-')));
+    cleanup.push(real);
+    restoreDataDir = config.dataDir;
+    config.dataDir = path.join(real, '.cebab');
+    fs.mkdirSync(config.dataDir, { recursive: true });
+    expect(fs.realpathSync(config.dataDir)).toBe(config.dataDir);
+    await claimManagedDir('anchor'); // the root exists; only the tail is missing
+
+    const deep = path.join(managedAgentsRoot(), ...Array.from({ length: 80 }, () => 'd'));
+    await expect(removeManagedDir(deep)).rejects.toThrow(/not inside/);
   });
 });
 
