@@ -6300,14 +6300,26 @@ pre {
 .multi-agent-input-section {
   /* Push the composer to the bottom of the pane when the content is SHORTER
    * than the viewport — an `auto` margin in a flex column absorbs the free
-   * space. Once the scrollback overflows there is no free space left, so this
-   * does nothing and the composer simply follows the last event; scrolling to
-   * the bottom is how you reach it. (The comment here used to claim the
-   * composer sticks to the bottom "as the scrollback grows", i.e. exactly the
-   * case where an auto margin has no effect. It is not sticky. The blocking
-   * banners, which must be reachable without scrolling, are handled by DOM
-   * order instead — see the banner group in `ActiveRunView`.) */
+   * space. Once the scrollback overflows there is no free space left, so the
+   * margin does nothing and the composer would otherwise follow the last event.
+   * The blocking banners, which must be reachable without scrolling, are handled
+   * by DOM order instead — see the banner group in `ActiveRunView`. */
   margin-top: auto;
+  /* Cebab-ame0: pin to the viewport bottom. This section used to scroll with the
+   * content, so the notification dock (fixed bottom-right) sat on the Send button
+   * and swallowed the click — the same hazard `Cebab-aids` fixed for the
+   * single-agent composer, but the clearance mechanism could not apply while the
+   * composer's screen position depended on scroll. `sticky; bottom: 0` keeps it
+   * at the scrollport bottom at every scroll position, so the height it publishes
+   * on `--composer-clearance` (see UserPromptInput) is always a correct offset and
+   * the dock reliably clears above it. The fade-to-opaque background (the same
+   * idiom as `.input-box`) hides scrollback passing behind it; the composer is
+   * only mounted when no blocking banner is up, so nothing reachable-only-by-
+   * scroll is ever covered. */
+  position: sticky;
+  bottom: 0;
+  background: linear-gradient(180deg, transparent, var(--bg) var(--s-4));
+  padding-top: var(--s-4);
 }
 .multi-agent-input {
   display: flex;
@@ -7536,8 +7548,9 @@ pre {
   right: var(--s-4);
   /* Cebab-aids: clear the composer. `--composer-clearance` is published by
    * `useComposerClearance` from the mounted composer's measured height (it
-   * grows with the draft) — InputBox, and the multi-agent/chain draft
-   * composer (Cebab-xqad); the `0px` fallback is the no-composer case.
+   * grows with the draft) — InputBox, the multi-agent/chain draft composer
+   * (Cebab-xqad) and the active-run prompt (Cebab-ame0); the `0px` fallback
+   * is the no-composer case.
    * Without this the dock and the Send button share the bottom-right corner
    * and a toast card swallows the click — measured, three real Sends lost. */
   bottom: calc(var(--composer-clearance, 0px) + var(--s-4));

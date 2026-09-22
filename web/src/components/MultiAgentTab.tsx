@@ -2654,6 +2654,7 @@ function AddParticipantPicker(props: {
 /** Exported for `MultiAgentTab.userPrompt.test.tsx` (Cebab-u0s). */
 export function UserPromptInput(props: { onSend: (text: string) => boolean }) {
   const [text, setText] = useState('');
+  const wrapRef = useRef<HTMLElement | null>(null);
   function submit() {
     const trimmed = text.trim();
     if (!trimmed) return;
@@ -2663,8 +2664,19 @@ export function UserPromptInput(props: { onSend: (text: string) => boolean }) {
     if (!props.onSend(trimmed)) return;
     setText('');
   }
+
+  // Cebab-ame0: publish the composer's height on `--composer-clearance` so the
+  // notification dock clears the Send button instead of swallowing the click —
+  // the same hazard `Cebab-aids` / `Cebab-xqad` fixed for the other composers.
+  // It was left out of those because it "scrolls with content"; the CSS now
+  // pins it to the viewport bottom (`position: sticky`, see
+  // `.multi-agent-input-section`), so its measured height is a correct offset
+  // at every scroll position. The shared hook, not a copy: ActiveRunView and
+  // DraftView never mount together, so there is still one caller at a time.
+  useComposerClearance(wrapRef);
+
   return (
-    <section className="multi-agent-section multi-agent-input-section">
+    <section className="multi-agent-section multi-agent-input-section" ref={wrapRef}>
       <h3>Send a prompt</h3>
       <div className="multi-agent-input">
         <GrowTextarea
