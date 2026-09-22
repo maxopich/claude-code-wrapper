@@ -1,4 +1,4 @@
-import type { NotificationEnvelope, ServerMsg } from '@cebab/shared/protocol';
+import type { NotificationEnvelope, ServerMsg, WrapperErrorKind } from '@cebab/shared/protocol';
 
 /**
  * Cluster A Phase 2: ServerMsg → notification dispatch table.
@@ -254,12 +254,39 @@ export function notifyFromServerMsg(msg: ServerMsg, ctx: NotifyContext): void {
       // toasted those too. (`Cebab-6fax.8`: the citation used to be
       // "store.ts:1290+", which by 2026-09 pointed at unrelated code —
       // `project_register_line_numbers_stale`: locate by content, not by line
-      // number.) Phase 3 introduces a `kind` discriminant on the
-      // wire and the dispatch becomes more precise; for Phase 2 we only
-      // intervene when there's no sessionId.
-      const m = msg as { sessionId?: string; message?: string };
+      // number.)
+      const m = msg as { sessionId?: string; kind?: WrapperErrorKind; message?: string };
       if (m.sessionId) return;
       const messageText = typeof m.message === 'string' ? m.message : 'Wrapper error';
+
+      // Cebab-osfq: a sessionless `aborted` is a deliberate cancellation, not a
+      // crash — the operator declining a trust/env prompt during a bus start
+      // (which never gets a session, so this toast is its only surface). The
+      // server already sets `kind: 'aborted'` for exactly this (see
+      // `classifyHandlerFailure` / `classifyBusStartFailure` in
+      // `ws/server.ts`); nothing on the client read it. Show it as a transient
+      // info toast so a cancel reads as a cancel. This fixes the SESSIONLESS
+      // toast only: a session-scoped error of any kind, `aborted` included,
+      // still renders as a red error row in its chat.
+      //
+      // Its OWN dedupeKey on purpose. The dock coalesces a push into the entry
+      // already showing under the same key, keeping that entry's severity and
+      // stickiness — so on the crash key, a real crash arriving while this
+      // notice is up would be folded into a 5 s info toast and lost.
+      if (m.kind === 'aborted') {
+        ctx.push({
+          id: mintId(),
+          ts: now,
+          severity: 'info',
+          class: 'operational',
+          dedupeKey: `${PHASE_2_WRAPPER_DEDUPE_KEY_PREFIX}:global:aborted`,
+          title: 'Cancelled',
+          message: messageText,
+          sticky: false,
+        });
+        return;
+      }
+
       ctx.push({
         id: mintId(),
         ts: now,

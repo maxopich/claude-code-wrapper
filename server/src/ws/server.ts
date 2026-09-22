@@ -6427,9 +6427,11 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
         // A genuine resume throw stays `process_crashed` and now carries its
         // own message instead of being swallowed behind a fixed sentence.
         //
-        // `sessionId` STAYS. A sessionless `wrapper_error` is toasted by
-        // `notifyFromServerMsg` as a sticky red "Server error" regardless of
-        // `kind`, which would put the crash styling back on a cancel.
+        // `sessionId` STAYS, for now. A sessionless `wrapper_error` is a toast
+        // and nothing else: a sticky red "Server error" for every kind except
+        // `aborted`, which is a transient "Cancelled" (`Cebab-osfq`). Whether
+        // a resume failure should instead be sessionless — which would also
+        // clear the stuck "Resuming…" spinner — is `Cebab-7vl4`'s decision.
         send(conn.ws, {
           type: 'wrapper_error',
           sessionId: msg.sessionId,

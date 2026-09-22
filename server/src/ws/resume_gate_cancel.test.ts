@@ -105,8 +105,8 @@ describe('resume_multi_agent — a declined gate is a cancel (Cebab-2ros)', () =
     await p.catch(() => {});
     const errs = of(sent, 'wrapper_error');
     expect(errs).toHaveLength(1);
-    // Session-scoped: a sessionless wrapper_error is toasted as a sticky red
-    // "Server error" whatever its kind.
+    // Session-scoped, as shipped (see the resume catch's comment and
+    // Cebab-7vl4 for whether it should stay so).
     expect(errs[0]!.sessionId).toBe(SID);
     expect(errs[0]!.kind).toBe('aborted');
     // The resume wording, not the start one ("… before it began").
