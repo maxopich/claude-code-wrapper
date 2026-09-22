@@ -271,8 +271,10 @@ describe('the resume_multi_agent catch routes through classifyBusStartFailure [r
     // only the real argument satisfies it. The outcome itself is pinned end to
     // end in resume_gate_cancel.test.ts.
     expect(bodies[0]).toContain("'Resume cancelled:");
-    // Pins the sticky-toast regression: a sessionless bus `wrapper_error` is
-    // toasted as a crash regardless of `kind`, so the sessionId must stay.
+    // Pins the session scope the resume catch shipped with. A sessionless
+    // `wrapper_error` is only a toast (a transient "Cancelled" for `aborted`
+    // since Cebab-osfq); moving this site off `sessionId` is Cebab-7vl4's call,
+    // and should change this assertion deliberately rather than by accident.
     expect(bodies[0]).toContain('sessionId: msg.sessionId');
   });
 });

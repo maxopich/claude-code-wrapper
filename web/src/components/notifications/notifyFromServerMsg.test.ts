@@ -54,6 +54,61 @@ describe('notifyFromServerMsg', () => {
     });
   });
 
+  test('Cebab-osfq: sessionless wrapper_error{kind:aborted} is a transient info toast, not a sticky crash', () => {
+    const r = recorder();
+    const mintId = vi.fn(() => 'mock-id');
+    notifyFromServerMsg(
+      {
+        type: 'wrapper_error',
+        kind: 'aborted',
+        message: 'Multi-agent start cancelled: you declined a prompt.',
+      } as ServerMsg,
+      { push: r.push, mintId, now: () => 999 },
+    );
+    expect(r.pushed).toHaveLength(1);
+    expect(r.pushed[0]).toMatchObject({
+      severity: 'info',
+      title: 'Cancelled',
+      sticky: false,
+      message: 'Multi-agent start cancelled: you declined a prompt.',
+      // Its own key: on the crash key the dock would fold a later real crash
+      // into this transient notice (see the source comment).
+      dedupeKey: 'wrap:global:aborted',
+    });
+    // A cancellation must never read as a server crash.
+    expect(r.pushed[0]?.severity).not.toBe('error');
+    expect(r.pushed[0]?.title).not.toBe('Server error');
+    expect(r.pushed[0]?.sticky).not.toBe(true);
+  });
+
+  test('Cebab-osfq regression guard: every OTHER sessionless kind stays a sticky Server error', () => {
+    // Deliberately green before and after the change: it guards the branch
+    // from being widened (e.g. to process_crashed, which carries refusals such
+    // as "another multi-agent session is already running" that must stay loud).
+    for (const kind of ['process_crashed', 'claude_not_found', 'auth_expired'] as const) {
+      const r = recorder();
+      notifyFromServerMsg({ type: 'wrapper_error', kind, message: 'boom' } as ServerMsg, r);
+      expect(r.pushed, kind).toHaveLength(1);
+      expect(r.pushed[0], kind).toMatchObject({
+        severity: 'error',
+        title: 'Server error',
+        sticky: true,
+        dedupeKey: 'wrap:global',
+      });
+    }
+  });
+
+  test('Cebab-osfq: a SESSION-SCOPED aborted does not toast either', () => {
+    // Every Stop of a turn sends one. The aborted branch must stay behind the
+    // session guard, or each Stop would pop a "Cancelled" toast.
+    const r = recorder();
+    notifyFromServerMsg(
+      { type: 'wrapper_error', kind: 'aborted', message: 'x', sessionId: 's1' } as ServerMsg,
+      r,
+    );
+    expect(r.pushed).toHaveLength(0);
+  });
+
   test('session-scoped wrapper_error does NOT toast (rendered as session banner upstream)', () => {
     const r = recorder();
     notifyFromServerMsg(

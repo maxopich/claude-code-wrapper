@@ -22,8 +22,9 @@ import { activeSession, initialState, reduce, sessionPhase, type AppState } from
  * statement about the chat that happens to be open.
  *
  * The operator's surface for a sessionless error already exists:
- * `notifyFromServerMsg` pushes a sticky "Server error" toast for exactly the
- * `!msg.sessionId` case. Nothing had to replace either fallback.
+ * `notifyFromServerMsg` pushes a toast for exactly the `!msg.sessionId` case —
+ * a sticky "Server error", or a transient "Cancelled" for kind `aborted`.
+ * Nothing had to replace either fallback.
  *
  * The shape of the guard is copied from the bus-scoped one directly above it
  * in the same case: return early, but still bump `failureSeq` so pending

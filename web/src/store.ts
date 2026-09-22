@@ -4264,8 +4264,9 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // Nothing is left spinning by refusing to guess: the single-agent turn
       // loop binds `sessionId = msg.sessionId ?? randomUUID()` and its catch
       // sends that id, so a run that dies always says which one it was. The
-      // operator's surface for a sessionless error is the sticky "Server
-      // error" toast `notifyFromServerMsg` pushes for exactly this case —
+      // operator's surface for a sessionless error is the toast
+      // `notifyFromServerMsg` pushes for exactly this case (a sticky "Server
+      // error", or a transient "Cancelled" for kind `aborted`) —
       // W16's own comment already said so unconditionally, while the guard it
       // justified only covered the half where no session was active.
       //
