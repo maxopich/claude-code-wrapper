@@ -21,6 +21,7 @@
  * `dispose()` clears everything on session teardown.
  */
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import { classifyToolCall } from '@cebab/shared';
 import type { AgentActivityPhase } from '@cebab/shared/protocol';
 
 /** Default stall window. 25s + sub-second emit latency lands a stall label
@@ -35,6 +36,13 @@ export type ActivitySnapshot = {
   agentName: string;
   phase: AgentActivityPhase;
   currentTool?: string;
+  /** `Cebab-ygu.48`: the operator-readable one-line summary `classifyToolCall`
+   *  computes for the trailing `tool_use` block's (name, input) — e.g.
+   *  `read src/module_07.js` or `grep "refundCharge" in src`. This is the
+   *  "what is it working on" line: it distinguishes a 15-file Read loop tick by
+   *  tick where `currentTool` (`Read`) stays constant. Undefined when the agent
+   *  is reasoning with no tool in flight, or (with the tool name) on `idle`. */
+  currentSummary?: string;
   lastActivityTs: number;
   turnStartedAt: number;
   /** `Cebab-ut7`: the SDK-reported model id for this turn, read from the
@@ -58,33 +66,47 @@ type Slot = {
   startedAt: number;
   lastTs: number;
   tool: string | undefined;
+  summary: string | undefined;
   model: string | undefined;
   timer: ReturnType<typeof setTimeout> | null;
   lastEmittedPhase: AgentActivityPhase;
   lastEmittedTool: string | undefined;
+  lastEmittedSummary: string | undefined;
   lastEmittedAt: number;
 };
 
 /**
- * Derive the tool the agent is currently in, mirroring web `pendingToolName`
+ * Derive what the agent is currently doing, mirroring web `pendingToolName`
  * / ws `translate` exactly: only an `assistant` SDKMessage carries content
- * blocks; a trailing `tool_use` block's `name` is the running tool, a
- * trailing text/thinking block means "reasoning, no tool". Every other
- * SDKMessage member (`stream_event`, `result`, `system`, `user`, …) is a
- * liveness tick that does not change the tool — so carry `prev` forward.
- * Defensive optional-chaining: the SDKMessage union has ~30 members, most
- * without a `message`.
+ * blocks; a trailing `tool_use` block is the running tool, a trailing
+ * text/thinking block means "reasoning, no tool". Every other SDKMessage
+ * member (`stream_event`, `result`, `system`, `user`, …) is a liveness tick
+ * that does not change the tool — so carry `prev` forward. Defensive
+ * optional-chaining: the SDKMessage union has ~30 members, most without a
+ * `message`.
+ *
+ * `Cebab-ygu.48`: alongside the tool NAME, derive the operator-readable
+ * `summary` `classifyToolCall` already computes from the same (name, input)
+ * the block carries — the runner throws it away for `read`-class calls, but it
+ * is exactly the "what is it working on" line. Computed here (not at emit) so
+ * it tracks the trailing block; `tool` and `summary` always move together.
  */
-function toolFromMessage(msg: SDKMessage, prev: string | undefined): string | undefined {
+type ToolInfo = { tool: string | undefined; summary: string | undefined };
+
+function toolInfoFromMessage(msg: SDKMessage, prev: ToolInfo): ToolInfo {
   const any = msg as {
     type?: string;
-    message?: { content?: Array<{ type?: string; name?: string }> };
+    message?: { content?: Array<{ type?: string; name?: string; input?: unknown }> };
   };
   if (any.type !== 'assistant') return prev;
   const blocks = any.message?.content;
   if (!Array.isArray(blocks) || blocks.length === 0) return prev;
   const last = blocks[blocks.length - 1];
-  return last?.type === 'tool_use' ? last.name : undefined;
+  if (last?.type === 'tool_use' && typeof last.name === 'string') {
+    return { tool: last.name, summary: classifyToolCall(last.name, last.input).summary };
+  }
+  // Trailing text/thinking (or a malformed tool_use) → reasoning, no tool.
+  return { tool: undefined, summary: undefined };
 }
 
 /**
@@ -117,11 +139,13 @@ export function createAgentActivityObserver(
   const fire = (agentName: string, slot: Slot, phase: AgentActivityPhase) => {
     slot.lastEmittedPhase = phase;
     slot.lastEmittedTool = slot.tool;
+    slot.lastEmittedSummary = slot.summary;
     slot.lastEmittedAt = Date.now();
     emit({
       agentName,
       phase,
       currentTool: slot.tool,
+      currentSummary: slot.summary,
       lastActivityTs: slot.lastTs,
       turnStartedAt: slot.startedAt,
       model: slot.model,
@@ -151,27 +175,34 @@ export function createAgentActivityObserver(
         startedAt: now,
         lastTs: now,
         tool: undefined,
+        summary: undefined,
         model: undefined,
         timer: null,
         lastEmittedPhase: 'idle',
         lastEmittedTool: undefined,
+        lastEmittedSummary: undefined,
         lastEmittedAt: 0,
       };
       slots.set(agentName, slot);
     }
     slot.lastTs = now;
-    slot.tool = toolFromMessage(msg, slot.tool);
+    const info = toolInfoFromMessage(msg, { tool: slot.tool, summary: slot.summary });
+    slot.tool = info.tool;
+    slot.summary = info.summary;
     slot.model = modelFromMessage(msg, slot.model);
     armStall(agentName, slot);
 
-    // Debounce: emit only on a state edge (was not `working`, or the tool
-    // changed) or once the throttle window has elapsed. Without this the
-    // per-token `stream_event` stream would emit hundreds of identical
-    // ticks per turn.
+    // Debounce: emit only on a state edge (was not `working`, the tool changed,
+    // or the summary changed) or once the throttle window has elapsed. Without
+    // this the per-token `stream_event` stream would emit hundreds of identical
+    // ticks per turn. `summaryEdge` is what surfaces a same-tool progress step
+    // promptly — a 15-file Read loop keeps `currentTool: 'Read'` throughout, so
+    // without it each new file would wait out the throttle window.
     const phaseEdge = slot.lastEmittedPhase !== 'working';
     const toolEdge = slot.lastEmittedTool !== slot.tool;
+    const summaryEdge = slot.lastEmittedSummary !== slot.summary;
     const throttled = now - slot.lastEmittedAt >= EMIT_THROTTLE_MS;
-    if (phaseEdge || toolEdge || throttled) {
+    if (phaseEdge || toolEdge || summaryEdge || throttled) {
       fire(agentName, slot, 'working');
     }
   };
@@ -185,6 +216,7 @@ export function createAgentActivityObserver(
       agentName,
       phase: 'idle',
       currentTool: undefined,
+      currentSummary: undefined,
       lastActivityTs: slot.lastTs,
       turnStartedAt: slot.startedAt,
       model: slot.model,

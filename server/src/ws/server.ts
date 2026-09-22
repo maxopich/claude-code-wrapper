@@ -5925,6 +5925,10 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
           agentName: snap.agentName,
           phase: snap.phase,
           currentTool: snap.currentTool,
+          // `Cebab-ygu.48`: the operator-readable summary for the trailing tool
+          // call. Spread-omit so a reasoning tick (undefined) matches the
+          // additive-optional wire contract, same idiom as `model` below.
+          ...(snap.currentSummary !== undefined ? { currentSummary: snap.currentSummary } : {}),
           lastActivityTs: snap.lastActivityTs,
           turnStartedAt: snap.turnStartedAt,
           // `Cebab-ut7`: the participant's model, harvested by the observer

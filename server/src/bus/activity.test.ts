@@ -8,13 +8,13 @@ import {
 
 // SDKMessage shape builders — mirror the union members the observer cares
 // about (assistant content blocks; everything else is just a liveness tick).
-function asstTool(name: string): SDKMessage {
+function asstTool(name: string, input?: unknown): SDKMessage {
   return {
     type: 'assistant',
     message: {
       content: [
         { type: 'text', text: 'thinking' },
-        { type: 'tool_use', name },
+        { type: 'tool_use', name, input },
       ],
     },
   } as unknown as SDKMessage;
@@ -193,6 +193,49 @@ describe('createAgentActivityObserver', () => {
     // The stall edge keeps it too — it's the same turn.
     vi.advanceTimersByTime(DEFAULT_STALL_MS + 50);
     expect(emits.at(-1)!).toMatchObject({ phase: 'stalled', model: 'claude-sonnet-4-5-20250929' });
+  });
+
+  // `Cebab-ygu.48`: the observer carries the operator-readable summary
+  // `classifyToolCall` computes for the trailing tool call — the "what is it
+  // working on" line — not just the bare tool name.
+  test('carries the classifyToolCall summary for the trailing tool call', () => {
+    const emits: ActivitySnapshot[] = [];
+    const obs = createAgentActivityObserver((s) => emits.push(s));
+    obs.onMessage('coder', asstTool('Read', { file_path: '/repo/src/module_07.js' }));
+    expect(emits.at(-1)).toMatchObject({
+      phase: 'working',
+      currentTool: 'Read',
+      currentSummary: 'read /repo/src/module_07.js',
+    });
+  });
+
+  test('a same-tool step to a new file emits promptly (summary edge, within throttle)', () => {
+    const emits: ActivitySnapshot[] = [];
+    const obs = createAgentActivityObserver((s) => emits.push(s));
+    // A 15-file Read loop: the tool NAME never changes, so without a summary
+    // edge each new file would wait out the 1s throttle. The summary must move
+    // the line immediately even though `currentTool` stays `Read`.
+    obs.onMessage('coder', asstTool('Read', { file_path: '/a.ts' }));
+    obs.onMessage('coder', asstTool('Read', { file_path: '/b.ts' })); // <1s, same tool
+    const summaries = emits.filter((e) => e.phase === 'working').map((e) => e.currentSummary);
+    expect(summaries).toEqual(['read /a.ts', 'read /b.ts']);
+  });
+
+  test('a reasoning tick clears the summary along with the tool', () => {
+    const emits: ActivitySnapshot[] = [];
+    const obs = createAgentActivityObserver((s) => emits.push(s));
+    obs.onMessage('coder', asstTool('Grep', { pattern: 'refundCharge', path: 'src' }));
+    expect(emits.at(-1)!.currentSummary).toBe('grep "refundCharge" in src');
+    obs.onMessage('coder', asstText('now reasoning')); // trailing text → no tool
+    expect(emits.at(-1)).toMatchObject({ currentTool: undefined, currentSummary: undefined });
+  });
+
+  test('onTurnEnd idle clears the summary', () => {
+    const emits: ActivitySnapshot[] = [];
+    const obs = createAgentActivityObserver((s) => emits.push(s));
+    obs.onMessage('coder', asstTool('Read', { file_path: '/x.ts' }));
+    obs.onTurnEnd('coder');
+    expect(emits.at(-1)).toMatchObject({ phase: 'idle', currentSummary: undefined });
   });
 
   test('a malformed / empty init model never overwrites a real one, and idle carries it', () => {

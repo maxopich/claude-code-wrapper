@@ -2961,6 +2961,19 @@ export type ServerMsg =
       agentName: string;
       phase: AgentActivityPhase;
       currentTool?: string;
+      /**
+       * `Cebab-ygu.48`: the operator-readable one-line summary the server's
+       * `classifyToolCall` computes for the trailing `tool_use` block's
+       * (name, input) — e.g. `read src/module_07.js`, `grep "refundCharge" in
+       * src`, or a `Bash` command's own `description`. This is the "what is it
+       * working on" line: where `currentTool` alone reads `Read` for every tick
+       * of a 15-file read loop, `currentSummary` names the file and changes as
+       * the agent moves through them. Undefined when the agent is reasoning with
+       * no tool in flight, and (like `currentTool`) on the `idle` clear tick.
+       * Server-classified, so it is safe to render as-is — it never echoes raw
+       * tool input verbatim. Optional/additive: a pre-`ygu.48` server omits it.
+       */
+      currentSummary?: string;
       lastActivityTs: number;
       turnStartedAt: number;
       model?: string;

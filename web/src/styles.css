@@ -3179,6 +3179,17 @@ pre {
   font-family: var(--font-mono);
   color: var(--fg-1);
 }
+/* `Cebab-ygu.48`: the "what is it working on" summary can be a long Bash
+ * command; cap it so one grinding worker's line can't blow out the bar. The
+ * common consultant case (`read src/foo.ts`, `grep …`) is already short. */
+.ma-activity-summary {
+  display: inline-block;
+  max-width: 46ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
 /* Stalled: a hung turn must read differently from a working one at a
  * glance — warn-toned frame + word + static glyph, never the orb. State is
  * carried by icon+word+border, not color alone. */

@@ -367,6 +367,11 @@ export type MultiAgentActivity = {
    *  absent from `activityByAgent`. */
   phase: Exclude<AgentActivityPhase, 'idle'>;
   currentTool?: string;
+  /** `Cebab-ygu.48`: the operator-readable "what is it working on" summary for
+   *  the trailing tool call (`read src/foo.ts`, `grep "x" in src`, a Bash
+   *  command). Undefined on a reasoning tick. Server-classified, safe to
+   *  render as-is. */
+  currentSummary?: string;
   lastActivityTs: number;
   turnStartedAt: number;
 };
@@ -2833,6 +2838,7 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             agentName: msg.agentName,
             phase: msg.phase,
             currentTool: msg.currentTool,
+            currentSummary: msg.currentSummary,
             lastActivityTs: msg.lastActivityTs,
             turnStartedAt: msg.turnStartedAt,
           },
