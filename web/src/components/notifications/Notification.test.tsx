@@ -85,7 +85,10 @@ describe('Notification — UI-12 keyboard dismiss', () => {
     expect(onDismiss).toHaveBeenCalledWith('n1');
   });
 
-  test('toast without actions has tabindex=-1 (UI-11 — not in natural tab order)', () => {
+  // The HOST is not a tab stop; the card still is, via its unconditional
+  // .notif-close button. This renders WITHOUT onMute, which the real dock never
+  // does — there an info toast's host is tabIndex={0} as well (Cebab-nlgl).
+  test('toast without actions has a non-tabbable HOST (UI-11) — the card is still a tab stop via .notif-close', () => {
     act(() => {
       root.render(<Notification notification={makeNotification()} onDismiss={() => {}} />);
     });

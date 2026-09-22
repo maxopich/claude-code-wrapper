@@ -403,3 +403,63 @@ describe('NotificationStack — reducer integration via context', () => {
     expect(stateCapture.state?.visible).toHaveLength(1);
   });
 });
+
+describe('[a11y] NotificationStack — keyboard tab order in the dock (Cebab-nlgl)', () => {
+  // This PINS an accepted tradeoff; it does not defend a bug. The dock renders
+  // newest-first so the newest card sits at the pinned end of the bounded
+  // scroller (Cebab-6wa1), which makes the TAB order run newest → oldest — the
+  // reverse of the visual order, a knowing WCAG 2.4.3 tradeoff (Cebab-nlgl).
+  //
+  // Only DOCUMENT order is observable here. jsdom runs no layout, so the visual
+  // order this is the reverse of is asserted as CSS instead, in
+  // web/src/notifStackBounded.test.ts ("the dock pins its scroll to the newest
+  // end"). Anyone changing either side must revisit Cebab-nlgl.
+  //
+  // The selector must include bare `button`: native buttons carry no tabindex
+  // attribute, so `[tabindex="0"]` alone would see only the hosts and miss the
+  // close/Mute buttons — the tab stops the "no tab stops" premise got wrong.
+
+  test('a toast whose host is not tabbable still contributes exactly one tab stop', () => {
+    const actions: { push?: (n: NotificationEnvelope) => void } = {};
+    act(() => {
+      root.render(<Harness actionsRef={actions} />);
+    });
+    act(() => {
+      // Danger, no action: mute is disallowed for danger, so the host is -1.
+      actions.push?.(env({ id: 'd', severity: 'danger', title: 'Danger' }));
+    });
+    const card = container.querySelector('.notif') as HTMLElement;
+    expect(card.getAttribute('tabindex')).toBe('-1');
+    const stops = [...card.querySelectorAll('[tabindex="0"], button')];
+    expect(stops).toHaveLength(1);
+    expect(stops[0]?.className).toContain('notif-close');
+  });
+
+  test('dock tab stops run newest -> oldest, the reverse of the visual order', () => {
+    const actions: { push?: (n: NotificationEnvelope) => void } = {};
+    act(() => {
+      root.render(<Harness actionsRef={actions} />);
+    });
+    act(() => {
+      actions.push?.(env({ id: 'oldest', title: 'Oldest' }));
+    });
+    act(() => {
+      actions.push?.(env({ id: 'middle', title: 'Middle' }));
+    });
+    act(() => {
+      actions.push?.(env({ id: 'newest', severity: 'danger', title: 'Newest' }));
+    });
+    const stops = [...container.querySelectorAll('.notif[tabindex="0"], .notif button')];
+    // Anti-vacuity floor: 3 (info host + Mute + close) + 3 (same) + 1 (danger:
+    // close only). An empty dock or a mistyped selector cannot reach it.
+    expect(stops.length).toBe(7);
+    const distinctTitles: string[] = [];
+    for (const stop of stops) {
+      const title = stop.closest('.notif')?.querySelector('.notif-title')?.textContent ?? '';
+      if (!distinctTitles.includes(title)) distinctTitles.push(title);
+    }
+    expect(distinctTitles).toEqual(['Newest', 'Middle', 'Oldest']);
+    // The visual order is the answer this must NOT produce.
+    expect(distinctTitles).not.toEqual(['Oldest', 'Middle', 'Newest']);
+  });
+});
