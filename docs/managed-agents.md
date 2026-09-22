@@ -152,7 +152,7 @@ Three questions the design had to settle:
 
 - **Sessions and events go.** A managed agent is an ordinary `projects` row and
   `sessions.project_id REFERENCES projects(id) ON DELETE CASCADE`, so removing the row
-  already destroys its conversations. "Mark it missing" would leave a row pointing at a
+  already destroys its Cebab-side conversation records. "Mark it missing" would leave a row pointing at a
   directory that is gone — a dead agent in the sidebar forever. An explicit operator
   delete is not the ambiguous case (a directory that vanished from under Cebab); it is
   the operator saying they are done with this agent.
@@ -162,6 +162,17 @@ Three questions the design had to settle:
   still exist to name them. Best-effort, exactly as the session purge treats them: a
   stray unlink failure must not strand the database delete that is the real state.
 - **The audit comes first**, per BE-1.
+
+**What the delete does NOT remove.** The CLI's own transcripts of this agent's sessions,
+at `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` — a full, unredacted copy of every
+conversation, keyed by the agent's cwd under `<dataDir>/agents/<slug>/`. That tree belongs
+to the `claude` CLI and sits outside `managedAgentsRoot()`, so `runManagedDelete` leaves it
+alone on purpose: the boundary that makes "Cebab owns every byte under
+`managedAgentsRoot()` and none outside it" true is the same boundary that keeps a delete
+out of `~/.claude`. `Cebab-6fax.44.1` settled this for session delete and the 7-day purge;
+`Cebab-0dv9` applied the same answer here. The remedy is the accurate sentence at the point
+of deletion, not a cross-boundary delete — so the modal and the sidebar tooltip name the
+location and say Cebab does not touch it, and the operator can remove it themselves.
 
 **The tree comes out before any DB write, and the order is deliberate.**
 `removeManagedDir` is idempotent (`force: true`) and by far the most likely step to

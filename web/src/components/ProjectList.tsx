@@ -319,7 +319,7 @@ export function ProjectList(props: {
                           e.stopPropagation();
                           props.onDeleteManagedAgent(p.id, p.name);
                         }}
-                        title={`Delete Cebab's copy of ${p.name} — its files, conversations and logs. Your own workspace is not touched.`}
+                        title={`Delete Cebab's copy of ${p.name} — its files, its Cebab-side conversation records and its logs. Your own workspace is not touched, and Claude's own transcripts under ~/.claude/projects/ are not removed either.`}
                       >
                         delete agent
                       </button>

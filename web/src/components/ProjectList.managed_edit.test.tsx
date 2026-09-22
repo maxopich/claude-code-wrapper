@@ -166,6 +166,22 @@ describe('the edit-config affordance', () => {
     expect(copyRows()).toHaveLength(0);
   });
 
+  test('the delete-agent tooltip names the CLI transcripts it leaves and drops the overclaim (Cebab-0dv9)', () => {
+    // The tooltip is a `title=` attribute, invisible to textContent and to the
+    // source-scanning copy gate (jsxTextNodes drops prop values), so it must be
+    // read explicitly — the overclaim could otherwise be left here with a green
+    // run.
+    render(MANAGED_ID);
+    const deleteBtn = [...container.querySelectorAll<HTMLButtonElement>('button')].find(
+      (b) => b.textContent === 'delete agent',
+    );
+    expect(deleteBtn).toBeDefined();
+    const title = deleteBtn!.getAttribute('title') ?? '';
+    expect(title).toContain('~/.claude/projects/');
+    expect(title).toContain('Cebab-side conversation records');
+    expect(title).not.toMatch(/\bits (files, )?(its )?conversations\b/);
+  });
+
   test('clicking it names the project so the modal can title itself', () => {
     const { onEditManagedConfig } = render(MANAGED_ID);
     const btn = editRows()[0]!.querySelector('button')!;

@@ -7,7 +7,7 @@ import { useModalSurface } from '../useModalSurface';
  *
  * The mirror of `ManagedCopyModal`, and deliberately blunter. The copy shows a
  * measured size before a reversible act; this destroys the agent's files, its
- * conversations and its logs, and none of that comes back. So it opens straight
+ * Cebab-side conversation records and its logs, and none of that comes back. So it opens straight
  * on a confirm — no preflight to soften it — and the primary button is not the
  * one that gets focus.
  */
@@ -52,8 +52,23 @@ export function ManagedDeleteModal({ state, onConfirm, onClose }: ManagedDeleteM
           </h3>
         </header>
         <p className="gate-modal-help">
-          This removes Cebab's copy of the agent — its files, its conversations and its logs. It
-          cannot be undone, and only affects this copy: nothing in your own workspace is touched.
+          This removes Cebab's copy of the agent — its files, its Cebab-side conversation records
+          and its logs. It cannot be undone, and only affects this copy: nothing in your own
+          workspace is touched.
+        </p>
+        {/* Cebab-0dv9: the same honest note Cebab-6fax.44.1 put at the point of a
+         *  session delete. Cebab created this agent's cwd, so the CLI keeps a whole
+         *  transcript directory for it — and does not remove it when the agent goes.
+         *  Say it by location. Do NOT soften to "some data may remain", and do NOT
+         *  "fix" this by deleting under ~/.claude: that tree is the CLI's, and the
+         *  decision to stay out of it is Cebab-6fax.44.1's, already shipped. */}
+        <p
+          className="gate-modal-help gate-modal-help-secondary"
+          data-testid="managed-delete-cli-transcript-note"
+        >
+          Claude keeps its own unredacted transcripts of this agent's conversations under{' '}
+          <code>~/.claude/projects/&lt;encoded-cwd&gt;/</code>; Cebab does not delete them. Remove
+          that directory yourself if you need the conversations gone.
         </p>
 
         {state.status === 'deleting' && (
