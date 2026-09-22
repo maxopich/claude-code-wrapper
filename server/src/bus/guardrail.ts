@@ -30,15 +30,16 @@
  * (`MultiAgentMutationView.guardrailViolation`) carries the settled verdict and
  * the client only renders the badge.
  *
- * The symlink handling below (`resolveThroughLinks`, `Cebab-2t9.3`) — what it
- * buys, why BOTH sides must resolve or neither, and the 0.87 µs vs 31.85 µs
- * measurement that settled the cost question: `docs/safety-and-security.md`,
- * "The consultant constraint, and its two limits".
+ * The symlink handling (`canonicalAllowingMissing` in `../path_containment.ts`,
+ * `Cebab-2t9.3`) — what it buys, why BOTH sides must resolve or neither, and the
+ * 0.87 µs vs 31.85 µs measurement that settled the cost question:
+ * `docs/safety-and-security.md`, "The consultant constraint, and its two limits".
  */
 
-import { lstatSync, readlinkSync, realpathSync } from 'node:fs';
-import { basename, dirname, resolve, sep } from 'node:path';
+import { resolve, sep } from 'node:path';
 import { homedir } from 'node:os';
+
+import { canonicalAllowingMissing } from '../path_containment.js';
 
 /**
  * Stable reason-code enum for guardrail violations. Wire-visible — used
@@ -113,8 +114,18 @@ export function classifyMutationScope(opts: {
   // the old answer. This change can therefore only ever ADD detections or
   // remove a false positive — it cannot invent one, which is what makes it
   // safe to turn on for every mutation with no opt-in.
-  const realTarget = resolveThroughLinks(lexicalTarget);
-  const realCwd = resolveThroughLinks(lexicalCwd);
+  //
+  // WHAT THIS DOES NOT BUY, stated plainly because the header used to argue
+  // it was not worth buying at all:
+  //   - It is NOT a sandbox. The link can be swapped between this call and
+  //     the write (TOCTOU). This check reports; it does not gate.
+  //   - It does not help `Bash`, which reaches this function with
+  //     `filePath: undefined` and returns in-scope before any of this runs.
+  //   - It does not address case-insensitive filesystems, where
+  //     `/Users/x/proj` and `/users/x/proj` are the same directory and
+  //     `startsWith` says otherwise. That hole predates the symlink handling.
+  const realTarget = canonicalAllowingMissing(lexicalTarget);
+  const realCwd = canonicalAllowingMissing(lexicalCwd);
   const usingLinks = realTarget !== null && realCwd !== null;
   const target = usingLinks ? realTarget : lexicalTarget;
   const cwdForCompare = usingLinks ? realCwd : lexicalCwd;
@@ -136,85 +147,6 @@ export function classifyMutationScope(opts: {
     resolvedPath: target,
     reasonCode: 'path_outside_cwd',
   };
-}
-
-/**
- * Resolve `p` through symlinks, tolerating a path that does not exist yet.
- * Returns `null` if it cannot be resolved at all.
- *
- * WHY NOT PLAIN `realpathSync`. A `Write` routinely names a file that is
- * about to be created, and `realpathSync` throws ENOENT on those — which
- * would mean the common case falls back to the lexical answer and the
- * check does nothing where it matters most. Worse, the escape does not
- * have to be the leaf: a symlinked PARENT directory redirects a
- * brand-new file just as effectively, and a leaf-only check would miss
- * it entirely. So this walks up to the deepest ancestor that exists,
- * resolves THAT, and re-appends the tail it skipped.
- *
- * BOUNDED, and the bound is not decoration. It is what makes a symlink CYCLE
- * safe: `realpathSync` throws ELOOP, the dangling-link branch below then
- * readlinks it, and the two hops would ping-pong forever. The cap stops that
- * at `MAX_ANCESTOR_WALK` iterations and returns `null`, i.e. "fall back to
- * lexical" — the same conservative answer as any other failure. It also caps
- * the syscalls one classification can issue on the turn path.
- *
- * WHAT THIS DOES NOT BUY, stated plainly because the header used to argue
- * it was not worth buying at all:
- *   - It is NOT a sandbox. The link can be swapped between this call and
- *     the write (TOCTOU). This module reports; it does not gate.
- *   - It does not help `Bash`, which reaches this function with
- *     `filePath: undefined` and returns in-scope before any of this runs.
- *   - It does not address case-insensitive filesystems, where
- *     `/Users/x/proj` and `/users/x/proj` are the same directory and
- *     `startsWith` says otherwise. That hole predates this change and is
- *     untouched by it.
- */
-const MAX_ANCESTOR_WALK = 64;
-
-function resolveThroughLinks(p: string): string | null {
-  let tail: string[] = [];
-  let cur = p;
-  for (let i = 0; i <= MAX_ANCESTOR_WALK; i++) {
-    try {
-      const real = realpathSync(cur);
-      return tail.length === 0 ? real : resolve(real, ...tail);
-    } catch {
-      // A DANGLING link: `realpathSync` throws on it exactly as it does on a
-      // path that was never there, but the two are not the same question. The
-      // link itself still says where a write would land, and creating the
-      // target through it is precisely how an escape gets staged for a file
-      // that does not exist yet. So ask the link before walking past it —
-      // otherwise the walk reaches the containing directory, which IS inside
-      // the cwd, and the answer comes back in-scope.
-      let linkTarget: string | null = null;
-      try {
-        if (lstatSync(cur).isSymbolicLink()) linkTarget = readlinkSync(cur);
-      } catch {
-        /* not a link, or it vanished between the two calls — walk up */
-      }
-      if (linkTarget !== null) {
-        // `readlink` may be relative, and it is relative to the link's own
-        // directory, not to the process cwd. `tail` is deliberately kept: the
-        // segments below the link still hang off wherever it points.
-        cur = resolve(dirname(cur), linkTarget);
-        continue;
-      }
-      const parent = dirname(cur);
-      // `dirname` is idempotent at a filesystem root, so this is the
-      // termination condition for "walked to the top and found nothing
-      // resolvable" — without it the loop would spin on '/' until the cap.
-      if (parent === cur) return null;
-      // `basename`, NOT `cur.slice(parent.length + 1)`. The arithmetic form
-      // is right for every parent except the one that always gets walked to:
-      // at the root, `dirname` returns '/' whose length is 1 AND whose last
-      // character is the separator, so the +1 eats the first real character
-      // and '/workspace' becomes '/orkspace'. The repo's existing
-      // out-of-scope test caught exactly that.
-      tail = [basename(cur), ...tail];
-      cur = parent;
-    }
-  }
-  return null;
 }
 
 /**

@@ -739,7 +739,8 @@ describe('AgentRunner', () => {
             //     would have passed CI.
             //
             // `realpathSync` here is Node's own primitive, deliberately NOT a
-            // reimplementation of guardrail.ts's ancestor walk — a fixture
+            // reimplementation of the ancestor walk the guardrail uses
+            // (`canonicalAllowingMissing` in path_containment.ts) — a fixture
             // that ports the implementation agrees with its bugs.
             violatedPath: (() => {
               const lexical = resolve('/tmp/coder', '/etc/passwd');
