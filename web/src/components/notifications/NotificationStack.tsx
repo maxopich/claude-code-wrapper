@@ -154,7 +154,17 @@ export function NotificationStack({ onAction }: NotificationStackProps) {
           on-screen order unchanged (oldest top, newest bottom) while making the
           newest the pinned, always-visible card. The two sr-only live regions
           below are `position: absolute`, so their DOM position among the flex
-          children does not affect the visual stack. */}
+          children does not affect the visual stack.
+
+          Cebab-nlgl: because DOM order is newest-first, tab order runs newest ->
+          oldest — the reverse of the visual sequence. That is a knowing WCAG
+          2.4.3 focus-order tradeoff, accepted rather than fixed (see the
+          styles.css comment beside `flex-direction: column-reverse`). Correcting
+          the record on tab stops: every toast carries an UNCONDITIONAL
+          `.notif-close` button, so a card is a tab stop even when its host is
+          `tabIndex={-1}`; and because this component always passes `onMute`,
+          info/success/warn hosts are `tabIndex={0}` too. There is no dock
+          configuration with zero tab stops. */}
       {[...state.visible].reverse().map((n) => (
         <Notification
           key={n.id}

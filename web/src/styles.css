@@ -7546,7 +7546,21 @@ pre {
    * `column-reverse` pins the scroll to the newest end instead (the chat-log
    * idiom). NotificationStack renders `visible` newest-first to match, so the
    * visual order is unchanged (oldest top, newest bottom) but the newest is now
-   * always in view; overflow scrolls the OLDEST off the top. */
+   * always in view; overflow scrolls the OLDEST off the top.
+   *
+   * Cebab-nlgl: the DOM order is newest-first to match the visual pin above, so
+   * the document/tab order of the dock runs newest -> oldest — the REVERSE of
+   * the visual sequence (oldest at the top, newest at the bottom). That is the
+   * classic column-reverse focus-order pitfall and a KNOWING WCAG 2.4.3 (Focus
+   * Order) tradeoff, accepted here rather than fixed. Why accepted: before #662
+   * a burst of toasts could hide a freshly arrived danger alert entirely, which
+   * is strictly worse than an inverted focus order; and the dock holds at most
+   * MAX_VISIBLE (4) cards, so the inverted run is short. The rejected
+   * alternative was to drop column-reverse and pin the scroll imperatively with
+   * a `scrollTop` write on push — that trades away the CSS invariant this file
+   * declares (which `notifStackBounded.test.ts` can actually scan for) for a
+   * layout effect jsdom cannot test at all (no layout, every scroll metric
+   * reads 0), i.e. a weaker guard for a smaller a11y gain. */
   flex-direction: column-reverse;
   gap: var(--s-2);
   pointer-events: none;
