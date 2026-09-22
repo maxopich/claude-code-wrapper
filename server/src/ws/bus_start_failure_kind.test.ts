@@ -59,15 +59,50 @@ describe('classifyBusStartFailure — the mapping', () => {
     });
     expect(classifyBusStartFailure(undefined).kind).toBe('process_crashed');
   });
+
+  // `Cebab-2ros` — the `cancelledMessage` override, both directions in ONE
+  // test so the case reddens on revert. The override-used half FAILS on the
+  // pre-change one-arg function (the second argument is ignored, so a declined
+  // gate keeps the default *start* wording, not the resume wording). Folding
+  // the anti-vacuity half in beside it — rather than as its own test() —
+  // follows this file's existing rule: a behavioural assertion on a genuine
+  // Error is identical before and after this change (the raw-error path never
+  // touches `cancelledMessage`), so on its own it passes with OR without the
+  // change and guards nothing, which is exactly what the revert-check flags.
+  // Here it still does its job: it reddens if `classifyBusStartFailure` ever
+  // returns `cancelledMessage` unconditionally (as do the existing genuine-throw
+  // cases above, through the default).
+  const RESUME_OVERRIDE =
+    'Resume cancelled: you declined a trust or environment prompt, so the session was not re-attached.';
+
+  test('the cancelled-message override is used for a cancel, IGNORED for a real failure', () => {
+    // Override used: a declined gate carries the resume wording, not the
+    // default start wording — reverting to the one-arg function reddens this.
+    const cancelled = classifyBusStartFailure(
+      new GateAbandonedError('session-start', 'cancelled'),
+      RESUME_OVERRIDE,
+    );
+    expect(cancelled.kind).toBe('aborted');
+    expect(cancelled.message).toBe(RESUME_OVERRIDE);
+
+    // ANTI-VACUITY: override IGNORED for a real failure. An implementation that
+    // returned `cancelledMessage` unconditionally would report a genuine ENOENT
+    // resume failure as a quiet cancellation — greener test, worse product.
+    const crashed = classifyBusStartFailure(new Error('ENOENT: workspace gone'), RESUME_OVERRIDE);
+    expect(crashed.kind).toBe('process_crashed');
+    expect(crashed.message).toBe('ENOENT: workspace gone');
+  });
 });
 
 const SERVER_TS = fileURLToPath(new URL('./server.ts', import.meta.url));
 
 /**
  * Slice out the `start_multi_agent` case. `resume_multi_agent` also releases
- * the start claim in a `finally` and hard-codes its own kind — the same class
- * of defect, tracked separately — so an unscoped scan would drag that third
- * site in and this bead's fix would not turn it green.
+ * the start claim in a `finally` — the same class of defect, now guarded by
+ * `resumeMultiAgentRegion` below (`Cebab-2ros`) — so an unscoped scan would
+ * drag that third site in and a revert of either start arm alone would still
+ * leave a passing count. One region per site keeps a fix to one arm from
+ * carrying the other.
  */
 export function startMultiAgentRegion(source: string): string {
   const stripped = stripComments(source);
@@ -77,6 +112,24 @@ export function startMultiAgentRegion(source: string): string {
     -1,
   );
   expect(to, 'the case after start_multi_agent moved — anchor is stale').toBeGreaterThan(from);
+  return stripped.slice(from, to);
+}
+
+/**
+ * `Cebab-2ros` — slice out the `resume_multi_agent` case only. Mirrors
+ * `startMultiAgentRegion` and carries the same two stale-anchor assertions, so
+ * a renamed case reddens here rather than scanning nothing. Kept a separate
+ * region from the start arms on purpose: one region per site is what lets a
+ * revert of any single catch redden without the others' bodies masking it.
+ */
+export function resumeMultiAgentRegion(source: string): string {
+  const stripped = stripComments(source);
+  const from = stripped.indexOf("case 'resume_multi_agent': {");
+  const to = stripped.indexOf("case 'continue_multi_agent': {");
+  expect(from, "the resume_multi_agent case moved — this gate's anchor is stale").toBeGreaterThan(
+    -1,
+  );
+  expect(to, 'the case after resume_multi_agent moved — anchor is stale').toBeGreaterThan(from);
   return stripped.slice(from, to);
 }
 
@@ -163,5 +216,63 @@ describe('both bus-start catches route through classifyBusStartFailure [regressi
       ).not.toMatch(/kind:\s*'/);
       expect(body).toContain('classifyBusStartFailure(err)');
     }
+  });
+});
+
+// The pre-fix shape of the resume catch, verbatim — the real shape this bead
+// replaced. Used as a control so the resume guard cannot pass vacuously (a
+// scanner that saw nothing would pass forever); it must find this AND match
+// the hard-coded-kind pattern the guard asserts is absent from the real catch.
+const PRE_FIX_RESUME = [
+  '        });',
+  '        } catch (err) {',
+  "          console.error('[ws] resume_multi_agent failed', err);",
+  '          send(conn.ws, {',
+  "            type: 'wrapper_error',",
+  '            sessionId: msg.sessionId,',
+  "            kind: 'process_crashed',",
+  "            message: 'Failed to resume this session.',",
+  '          });',
+  '        } finally {',
+  '          releaseSessionStart(resumeClaimId);',
+  '        }',
+].join('\n');
+
+describe('the resume_multi_agent catch routes through classifyBusStartFailure [regression]', () => {
+  const source = fs.readFileSync(SERVER_TS, 'utf8');
+
+  // One test, so every assertion reddens on revert (restore the hard-coded
+  // `kind: 'process_crashed'` at the resume catch and the guard below fails).
+  test('the resume catch does not hard-code the failure kind (with anti-vacuity + control)', () => {
+    const bodies = startCatchBodies(resumeMultiAgentRegion(source));
+
+    // Anti-vacuity floor: exactly the one resume catch. A rename that made the
+    // region or scanner return nothing would loop over an empty list and pass.
+    expect(bodies, 'expected exactly the resume_multi_agent start catch').toHaveLength(1);
+
+    // Control (the other direction): a scanner that saw nothing would pass the
+    // guard forever. Prove it flags the exact shape this bead replaced.
+    const [ctl] = startCatchBodies(PRE_FIX_RESUME);
+    expect(ctl, 'the scanner failed to see the pre-fix resume catch shape').toBeDefined();
+    expect(ctl).toMatch(/kind:\s*'/);
+
+    // The guard: the catch does not hard-code the kind; it routes the error
+    // through the classifier so a declined trust/env gate (an AbortError) is
+    // `aborted`, not a crash.
+    expect(
+      bodies[0],
+      'The resume_multi_agent catch hard-codes `kind: ...`. A declined ' +
+        'trust/env gate rejects with an AbortError here and must classify as ' +
+        '`aborted`, not a crash. Route it through `classifyBusStartFailure(...)`.',
+    ).not.toMatch(/kind:\s*'/);
+    expect(bodies[0]).toContain('classifyBusStartFailure(');
+    // The resume wording must be passed AT THIS SITE; the one-arg form would
+    // tell the operator a re-attach "never began". Comment-stripped region, so
+    // only the real argument satisfies it. The outcome itself is pinned end to
+    // end in resume_gate_cancel.test.ts.
+    expect(bodies[0]).toContain("'Resume cancelled:");
+    // Pins the sticky-toast regression: a sessionless bus `wrapper_error` is
+    // toasted as a crash regardless of `kind`, so the sessionId must stay.
+    expect(bodies[0]).toContain('sessionId: msg.sessionId');
   });
 });

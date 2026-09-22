@@ -3322,34 +3322,45 @@ export function classifyHandlerFailure(err: unknown): WrapperErrorKind {
 /**
  * `Cebab-2m7n` — a bus start cancelled by the operator is not a crash.
  *
- * Both `start_multi_agent` arms (orchestrator + chain) await
- * `gateProjectsForSpawn` inside a try whose `finally` releases the start claim,
- * and catch its rejection LOCALLY — so, unlike a single-agent turn, it never
- * reaches the dispatch-level `classifyHandlerFailure` at the top of
- * `onConnection`. An operator DECLINING a trust or env-injection prompt during
- * a bus start rejects the parked gate with a `GateAbandonedError`
- * (`name === 'AbortError'`); hard-coding `kind: 'process_crashed'` in those two
- * catches turned that deliberate cancellation into a sticky red crash banner —
- * the same defect `Cebab-6fax.17` fixed on the dispatch catch and the
- * single-agent turn path, missed here because these catches short-circuit it.
+ * Three sites use it — both `start_multi_agent` arms (orchestrator + chain),
+ * which await `gateProjectsForSpawn` inside a try whose `finally` releases the
+ * start claim, and the `resume_multi_agent` catch (`Cebab-2ros`), whose
+ * `resumeMultiAgentTarget` awaits the same gate via `reconstructForMode` when
+ * it rebuilds a session that is not live (after a restart). Each catches the
+ * rejection LOCALLY — so, unlike a single-agent turn, it never reaches the
+ * dispatch-level `classifyHandlerFailure` at the top of `onConnection`. An
+ * operator DECLINING a trust or env-injection prompt rejects the parked gate
+ * with a `GateAbandonedError` (`name === 'AbortError'`); hard-coding
+ * `kind: 'process_crashed'` in those catches reported that deliberate
+ * cancellation as a crash — on the SESSIONLESS start arms a sticky red
+ * "Server error" toast; on the session-scoped resume catch, a crash label and
+ * the uninformative "Failed to resume this session." (the red styling of a
+ * session-scoped error is separate, whatever its kind). The same defect
+ * `Cebab-6fax.17` fixed on the dispatch catch and the single-agent turn path,
+ * missed here because these catches short-circuit it.
+ *
+ * NOT YET COVERED, same shape: the `continue_multi_agent`, mid-run
+ * add-participant and reopen catches also await the gate and still report a
+ * cancel as a failure.
  *
  * Mirrors the single-agent turn path: `aborted` gets a plain-language message,
  * anything else keeps its raw error text and stays `process_crashed`, so a
  * genuine start failure is still reported honestly and loudly.
  */
-export function classifyBusStartFailure(err: unknown): {
-  kind: WrapperErrorKind;
-  message: string;
-} {
+export function classifyBusStartFailure(
+  err: unknown,
+  /**
+   * The sentence shown when the operator cancelled. Defaults to the start
+   * wording; `resume_multi_agent` passes its own (`Cebab-2ros`) so a
+   * re-attach does not tell the operator a start "never began".
+   */
+  cancelledMessage = 'Multi-agent start cancelled: you declined a trust or environment prompt before it began.',
+): { kind: WrapperErrorKind; message: string } {
   const kind = classifyHandlerFailure(err);
   return {
     kind,
     message:
-      kind === 'aborted'
-        ? 'Multi-agent start cancelled: you declined a trust or environment prompt before it began.'
-        : err instanceof Error
-          ? err.message
-          : String(err),
+      kind === 'aborted' ? cancelledMessage : err instanceof Error ? err.message : String(err),
   };
 }
 
@@ -6408,11 +6419,24 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
         emitResumedSession(conn, result.resumed);
       } catch (err) {
         console.error('[ws] resume_multi_agent failed', err);
+        // `Cebab-2ros`: the third site of `Cebab-2m7n`'s shape.
+        // `reconstructForMode` (bus/resume.ts) awaits `gateProjectsForSpawn`
+        // BEFORE it rebuilds anything, so an operator who cancels the
+        // trust/env modal rejects this with a `GateAbandonedError`
+        // (`name === 'AbortError'`) — a deliberate cancellation, not a crash.
+        // A genuine resume throw stays `process_crashed` and now carries its
+        // own message instead of being swallowed behind a fixed sentence.
+        //
+        // `sessionId` STAYS. A sessionless `wrapper_error` is toasted by
+        // `notifyFromServerMsg` as a sticky red "Server error" regardless of
+        // `kind`, which would put the crash styling back on a cancel.
         send(conn.ws, {
           type: 'wrapper_error',
           sessionId: msg.sessionId,
-          kind: 'process_crashed',
-          message: 'Failed to resume this session.',
+          ...classifyBusStartFailure(
+            err,
+            'Resume cancelled: you declined a trust or environment prompt, so the session was not re-attached.',
+          ),
         });
       } finally {
         // Same handoff as the start path: by here the session is either in the
