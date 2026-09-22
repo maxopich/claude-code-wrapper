@@ -141,9 +141,10 @@ const RUNTIME_SET = [
   '--tpl-modal-origin-x',
   '--tpl-modal-origin-y',
   // `Cebab-aids`: the composer's own measured height, published through the
-  // `useComposerClearance` hook (InputBox and the multi-agent/chain draft
-  // composer, Cebab-xqad) so `.notif-stack` can clear it — the notification dock used to sit on the
-  // Send button and eat the click. Unlike the hues above this is a GEOMETRY
+  // `useComposerClearance` hook by whichever composer is mounted (InputBox;
+  // the multi-agent/chain draft, Cebab-xqad; the active-run prompt,
+  // Cebab-ame0) so `.notif-stack` can clear it — the notification dock used to
+  // sit on the Send button and eat the click. Unlike the hues above this is a GEOMETRY
   // value that changes as the textarea grows, so it cannot be a declared token:
   // only the mounted composer knows it. Every read carries a `0px` fallback,
   // which is the no-composer answer.

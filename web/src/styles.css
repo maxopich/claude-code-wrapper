@@ -7548,8 +7548,9 @@ pre {
   right: var(--s-4);
   /* Cebab-aids: clear the composer. `--composer-clearance` is published by
    * `useComposerClearance` from the mounted composer's measured height (it
-   * grows with the draft) — InputBox, and the multi-agent/chain draft
-   * composer (Cebab-xqad); the `0px` fallback is the no-composer case.
+   * grows with the draft) — InputBox, the multi-agent/chain draft composer
+   * (Cebab-xqad) and the active-run prompt (Cebab-ame0); the `0px` fallback
+   * is the no-composer case.
    * Without this the dock and the Send button share the bottom-right corner
    * and a toast card swallows the click — measured, three real Sends lost. */
   bottom: calc(var(--composer-clearance, 0px) + var(--s-4));
