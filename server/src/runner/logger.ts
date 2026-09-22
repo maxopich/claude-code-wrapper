@@ -140,6 +140,32 @@ function closedOrTimeout(stream: fs.WriteStream): Promise<void> {
 }
 
 /**
+ * Closes that have been INITIATED but not yet finished.
+ *
+ * `Cebab-ndd7`: `closeLogger(sessionId)` is called **fire-and-forget** from
+ * `runOneTurn`'s `finally` (`ws/server.ts`) — it removes the session from
+ * `streams` and starts the close without awaiting it. That is correct for
+ * production (a turn's teardown must not block on a flush), but it means the
+ * all-sessions `closeLogger()` — the awaited line a test teardown runs before
+ * `fs.rmSync` — would find an EMPTY map and resolve while the just-ended turn's
+ * stream is still flushing. The `rmSync` then races the open fd, and the
+ * stream's `'error'` handler logs a `[logger]` line AFTER the test finished:
+ * the exact `Cebab-kji` teardown race, but one the rmSync-ordering gate cannot
+ * see because the test file IS compliant. Tracking the in-flight closes here
+ * makes `closeLogger()` mean "every close is done" — including one another
+ * caller already started — rather than only "every close I could still see".
+ */
+const pendingCloses = new Set<Promise<void>>();
+
+/** Close `stream`, and keep the pending promise visible to a later `closeLogger()`. */
+function trackedClose(stream: fs.WriteStream): Promise<void> {
+  const done = closedOrTimeout(stream);
+  pendingCloses.add(done);
+  void done.finally(() => pendingCloses.delete(done));
+  return done;
+}
+
+/**
  * Close the session's transcript stream (or every stream), and **resolve once
  * it is really closed**.
  *
@@ -157,18 +183,22 @@ function closedOrTimeout(stream: fs.WriteStream): Promise<void> {
  *     drop buffered transcript bytes.
  *
  * The map is cleared BEFORE awaiting so a concurrent `logEvent` opens a fresh
- * stream instead of writing into one being torn down. Callers that do not care
- * may still ignore the promise — the close is initiated synchronously either
- * way.
+ * stream instead of writing into one being torn down. The all-sessions form
+ * also awaits any close a fire-and-forget `closeLogger(sessionId)` already
+ * started (`pendingCloses`, `Cebab-ndd7`). Callers that do not care may still
+ * ignore the promise — the close is initiated synchronously either way.
  */
 export function closeLogger(sessionId?: string): Promise<void> {
   if (sessionId) {
     const entry = streams.get(sessionId);
     streams.delete(sessionId);
     if (!entry) return Promise.resolve();
-    return closedOrTimeout(entry.stream);
+    return trackedClose(entry.stream);
   }
   const entries = [...streams.values()];
   streams.clear();
-  return Promise.all(entries.map((e) => closedOrTimeout(e.stream))).then(() => undefined);
+  entries.forEach((e) => trackedClose(e.stream));
+  // Await every close still in flight, including any a fire-and-forget
+  // `closeLogger(sessionId)` started but did not await.
+  return Promise.all([...pendingCloses]).then(() => undefined);
 }

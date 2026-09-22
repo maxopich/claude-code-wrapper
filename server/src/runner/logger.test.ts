@@ -256,6 +256,33 @@ describe('closeLogger resolves only once the stream is really closed', () => {
     expect(settled).toBe(true);
   });
 
+  test('closeLogger() waits for a close a fire-and-forget closeLogger(sessionId) started (Cebab-ndd7)', async () => {
+    // The exact production shape: `runOneTurn`'s finally calls
+    // `closeLogger(sessionId)` WITHOUT awaiting it (ws/server.ts), which removes
+    // the session from the streams map and starts the close. A test teardown
+    // then runs the gate-blessed `await closeLogger()` before `fs.rmSync` — but
+    // with the map already empty, the old all-sessions form resolved
+    // immediately, leaving that turn's stream still flushing into a directory
+    // about to be removed. That is the non-deterministic EnvironmentTeardownError
+    // this bead is about; the rmSync-ordering gate cannot see it because the
+    // teardown IS ordered correctly.
+    const fake = new FakeWriteStream();
+    __setStreamFactoryForTests(() => fake as unknown as fs.WriteStream);
+    await logEvent('sess-turn', { n: 1 });
+
+    // Fire-and-forget, as the turn's finally does. The map is now empty.
+    void closeLogger('sess-turn');
+    // Anti-vacuity: the close was INITIATED but has NOT finished — the fake, like
+    // fs.WriteStream, closes on a later tick. If this were already true the final
+    // assertion would hold for the wrong reason.
+    expect(fake.ended).toBe(true);
+    expect(fake.closed).toBe(false);
+
+    // The teardown's awaited all-sessions close must still wait for it.
+    await closeLogger();
+    expect(fake.closed).toBe(true);
+  });
+
   test('closing one session leaves the others open', async () => {
     const a = new FakeWriteStream();
     const b = new FakeWriteStream();
