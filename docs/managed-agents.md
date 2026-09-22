@@ -163,6 +163,17 @@ Three questions the design had to settle:
   stray unlink failure must not strand the database delete that is the real state.
 - **The audit comes first**, per BE-1.
 
+**What the delete does NOT remove.** The CLI's own transcripts of this agent's sessions,
+at `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` — a full, unredacted copy of every
+conversation, keyed by the agent's cwd under `<dataDir>/agents/<slug>/`. That tree belongs
+to the `claude` CLI and sits outside `managedAgentsRoot()`, so `runManagedDelete` leaves it
+alone on purpose: the boundary that makes "Cebab owns every byte under
+`managedAgentsRoot()` and none outside it" true is the same boundary that keeps a delete
+out of `~/.claude`. `Cebab-6fax.44.1` settled this for session delete and the 7-day purge;
+`Cebab-0dv9` applied the same answer here. The remedy is the accurate sentence at the point
+of deletion, not a cross-boundary delete — so the modal and the sidebar tooltip name the
+location and say Cebab does not touch it, and the operator can remove it themselves.
+
 **The tree comes out before any DB write, and the order is deliberate.**
 `removeManagedDir` is idempotent (`force: true`) and by far the most likely step to
 fail — a recursive delete of a gigabyte-scale tree can hit `EBUSY`/`EACCES` where a

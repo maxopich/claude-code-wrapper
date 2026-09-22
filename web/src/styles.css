@@ -1478,6 +1478,13 @@ pre {
 .session-row-managed-delete .session-name {
   color: var(--err-ink);
 }
+/* Cebab-0dv9: the transcript path in the delete note. Same treatment as the
+   session-delete note's path — monospace, and allowed to break mid-token so
+   it stays inside the modal. */
+.managed-delete-modal code {
+  font-family: var(--font-mono);
+  word-break: break-all;
+}
 
 /* ── Project scan line (Cebab-ws0.6) ───────────────────────────────────────
  * A second line inside `.project-header`, carrying what the project declares
