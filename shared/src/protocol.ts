@@ -2961,6 +2961,29 @@ export type ServerMsg =
       agentName: string;
       phase: AgentActivityPhase;
       currentTool?: string;
+      /**
+       * `Cebab-ygu.48`: the operator-readable one-line summary the server
+       * derives for the trailing `tool_use` block's (name, input) — e.g.
+       * `reading src/module_07.js`, `searching for refundCharge`, `calling
+       * search_issues (linear)`. This is the "what is it working on" line:
+       * where `currentTool` alone reads `Read` for every tick of a 15-file read
+       * loop, `currentSummary` names the file and changes as the agent moves
+       * through them. Undefined when the agent is reasoning with no tool in
+       * flight, and (like `currentTool`) on the `idle` clear tick.
+       * Optional/additive: a pre-`ygu.48` server omits it.
+       *
+       * WHAT THIS IS AND IS NOT SAFE FOR. It is DERIVED FROM MODEL-WRITTEN TOOL
+       * INPUT — a file path, a search pattern, a shell command — so treat it as
+       * project-controlled text, not as a server-authored string. It is safe for
+       * a single-line text node specifically because `toolActivity` (shared, the
+       * same formatter the single-agent chat uses) runs `flatten` over every
+       * subject, stripping `\p{Cc}`/`\p{Cf}` — the literal newline, U+2028, and
+       * the bidi overrides that would otherwise reverse the rest of the line —
+       * and clips to column width. Render it as TEXT. Never as markup, never as
+       * a URL or a path anyone acts on, and never re-derive this field from
+       * `classifyToolCall`, whose summary escapes `\n` only.
+       */
+      currentSummary?: string;
       lastActivityTs: number;
       turnStartedAt: number;
       model?: string;

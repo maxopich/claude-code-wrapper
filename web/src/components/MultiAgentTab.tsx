@@ -2854,6 +2854,12 @@ function AgentActivityStrip(props: {
   const agentName = act.agentName;
   const stalled = act.phase === 'stalled';
   const tool = act.currentTool;
+  // `Cebab-ygu.48`: prefer the operator-readable summary ("read src/foo.ts")
+  // over the bare tool name ("Read") — it is the "what is it working on" line,
+  // and it distinguishes each step of a same-tool loop (a 15-file read) that
+  // the tool name alone renders identically. Falls back to the tool name for a
+  // pre-`ygu.48` server (summary absent) and to nothing when neither is set.
+  const summary = act.currentSummary;
   // Cluster C Phase 4g1: resolve this agent's per-participant control state
   // for the inline ParticipantStatePills mount. Wire-side envelopes key by
   // projectId; `busAgentName` is the join. undefined (no match, or no
@@ -2886,7 +2892,12 @@ function AgentActivityStrip(props: {
         {stalled ? (
           <>
             <strong className="ma-stall-word">stalled</strong>
-            {tool ? (
+            {summary ? (
+              <>
+                {' · '}
+                <code className="ma-activity-summary">{summary}</code>
+              </>
+            ) : tool ? (
               <>
                 {' · '}
                 <code>{tool}</code>
@@ -2898,7 +2909,12 @@ function AgentActivityStrip(props: {
         ) : (
           <>
             <strong>working</strong>
-            {tool ? (
+            {summary ? (
+              <>
+                {' · '}
+                <code className="ma-activity-summary">{summary}</code>
+              </>
+            ) : tool ? (
               <>
                 {' · running '}
                 <code>{tool}</code>

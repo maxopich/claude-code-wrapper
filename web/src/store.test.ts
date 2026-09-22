@@ -1257,6 +1257,7 @@ describe('store / agent_activity (ephemeral liveness)', () => {
       agentName: string;
       phase: 'working' | 'stalled' | 'idle';
       currentTool?: string;
+      currentSummary?: string;
       lastActivityTs: number;
       turnStartedAt: number;
     }> = {},
@@ -1290,6 +1291,18 @@ describe('store / agent_activity (ephemeral liveness)', () => {
       msg: activity({ phase: 'stalled', currentTool: 'Bash', lastActivityTs: 1000 }),
     });
     expect(s.multiAgent.active!.activityByAgent['coder'].phase).toBe('stalled');
+  });
+
+  // `Cebab-ygu.48`: the "what is it working on" summary rides the tick into
+  // the agent's slot, so the activity strip can show `read src/foo.ts` rather
+  // than just `Bash`.
+  test('carries currentSummary into the agent slot', () => {
+    let s = started();
+    s = reduce(s, {
+      type: 'server',
+      msg: activity({ currentTool: 'Read', currentSummary: 'read src/foo.ts' }),
+    });
+    expect(s.multiAgent.active!.activityByAgent['coder'].currentSummary).toBe('read src/foo.ts');
   });
 
   test("idle deletes that agent's slot", () => {
