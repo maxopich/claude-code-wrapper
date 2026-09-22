@@ -25,6 +25,7 @@ import { agentIdentity } from '../agentIdentity';
 import { formatElapsed, timeAgo } from '../format';
 import { ThinkingIndicator, useElapsed } from './ThinkingIndicator';
 import { GrowTextarea } from './GrowTextarea';
+import { useComposerClearance } from './useComposerClearance';
 import { Markdown } from './Markdown';
 import { RecoveryDisclosure } from './RecoveryDisclosure';
 import { useModalSurface } from '../useModalSurface';
@@ -872,7 +873,10 @@ export function DraftView(props: {
   );
 }
 
-function MultiAgentComposer(props: {
+/** Exported for `MultiAgentComposer.clearance.test.tsx`, which pins the
+ *  `--composer-clearance` mechanism (Cebab-xqad) without mounting the whole
+ *  DraftView. Not imported by app code — DraftView renders it directly. */
+export function MultiAgentComposer(props: {
   mode: 'chain' | 'orchestrator';
   value: string;
   onChange: (t: string) => void;
@@ -882,8 +886,14 @@ function MultiAgentComposer(props: {
 }) {
   const blocked = props.disabled || props.pending;
   const isChain = props.mode === 'chain';
+  // Cebab-xqad: publish this composer's height so the notification dock clears
+  // the Start button. Without it `--composer-clearance` was empty on the
+  // multi-agent/chain tabs and a sticky toast covered Start, swallowing the
+  // click. Shared with InputBox via the same hook.
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  useComposerClearance(wrapRef);
   return (
-    <div className="input-box multi-agent-composer">
+    <div className="input-box multi-agent-composer" ref={wrapRef}>
       <GrowTextarea
         value={props.value}
         onChange={props.onChange}

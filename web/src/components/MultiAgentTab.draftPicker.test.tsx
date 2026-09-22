@@ -130,6 +130,29 @@ function pickButtons(): HTMLButtonElement[] {
 }
 
 describe('[a11y] the draft view offers a non-drag path to add a participant', () => {
+  test('the rendered draft view publishes --composer-clearance (Cebab-xqad)', () => {
+    // The composer's own test mounts it in isolation; this pins the CALL SITE:
+    // the tab the operator sees must publish, or a toast sits on Start again.
+    // jsdom has no layout, so the height is stubbed; the real hit-test lives in
+    // a browser run (see the PR).
+    const rect = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue({
+      height: 88,
+      width: 0,
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      x: 0,
+      y: 0,
+    } as DOMRect);
+    try {
+      render([]);
+      expect(document.documentElement.style.getPropertyValue('--composer-clearance')).toBe('88px');
+    } finally {
+      rect.mockRestore();
+    }
+  });
+
   test('every project gets a real, named, focusable Add button', () => {
     render([]);
     const buttons = pickButtons();

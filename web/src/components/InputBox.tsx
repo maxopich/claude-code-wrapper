@@ -2,6 +2,12 @@ import { useEffect, useRef, useState } from 'react';
 import { GrowTextarea } from './GrowTextarea';
 import { Icon } from './Icon';
 import { SlashCommandPalette } from './SlashCommandPalette';
+import { COMPOSER_CLEARANCE_VAR, useComposerClearance } from './useComposerClearance';
+
+// Re-exported for callers/tests that reach the constant through this module
+// (`Cebab-aids`'s clearance test imports it from here). The definition now
+// lives beside the shared hook (`Cebab-xqad`).
+export { COMPOSER_CLEARANCE_VAR };
 
 /**
  * Cluster C Phase 1 (spec §4.1-4.3): single-agent message composer.
@@ -50,15 +56,6 @@ import { SlashCommandPalette } from './SlashCommandPalette';
 /** Ties the reason line to the textarea. There is at most one composer on
  *  screen, so a constant id is safe and keeps the association readable. */
 const REASON_ID = 'input-box-disabled-reason';
-
-/**
- * The custom property the composer publishes its height on, read by
- * `.notif-stack` in `styles.css` so the notification dock clears the composer
- * (`Cebab-aids`). Exported so the test asserts the same string the component
- * writes — a hand-copied name in the test would keep passing after a rename
- * while the stylesheet quietly stopped matching.
- */
-export const COMPOSER_CLEARANCE_VAR = '--composer-clearance';
 
 export function InputBox(props: {
   /** Absent = composer usable. Present = disabled, and `reason` is the
@@ -156,52 +153,12 @@ export function InputBox(props: {
     return () => wrap.removeEventListener('keydown', onKey);
   }, [isRunning, onStop, stopping, paletteOpen]);
 
-  // `Cebab-aids`: the notification dock and the Send button both live in the
-  // bottom-right corner, and nothing in the stack said which one yields.
-  // Measured live at 1280x900 — with a toast up, `document.elementFromPoint` at
-  // the Send button's own centre returned `notif-message`, and three real
-  // clicks on Send were swallowed with no error and no visual response. From
-  // the operator's side that is indistinguishable from the app ignoring them,
-  // and it lands exactly when notifications are arriving.
-  //
-  // THE OBVIOUS FIX IS THE WRONG ONE. Making the toast cards
-  // `pointer-events: none` would let the click through, but
-  // `.notif-stack > .notif` is `auto` ON PURPOSE (`Cebab-git`): the dock is
-  // height-capped and scrolls internally, and the cards are what carry the
-  // wheel to that scroller. That would fix a swallowed click by breaking a
-  // deliberate one, and it would still leave the toast covering the button the
-  // operator is aiming at.
-  //
-  // So the DOCK moves, and the composer is the only thing that knows how far —
-  // it grows with the draft. It publishes its own height; `.notif-stack`
-  // offsets by it. A ResizeObserver rather than a one-shot read because the
-  // textarea grows as the operator types, which is precisely when they are
-  // about to press Send.
-  useEffect(() => {
-    const wrap = wrapRef.current;
-    if (!wrap) return;
-    const root = document.documentElement;
-    const publish = () => {
-      root.style.setProperty(
-        COMPOSER_CLEARANCE_VAR,
-        `${Math.ceil(wrap.getBoundingClientRect().height)}px`,
-      );
-    };
-    publish();
-    // Guarded: jsdom and older embedders do not implement ResizeObserver, and a
-    // composer that throws on mount is a worse bug than a dock that does not
-    // follow a growing textarea.
-    const ro = typeof ResizeObserver === 'function' ? new ResizeObserver(publish) : null;
-    ro?.observe(wrap);
-    return () => {
-      ro?.disconnect();
-      // REMOVED, not set to 0: with no composer mounted there is nothing for the
-      // dock to clear, and a stale offset would leave it floating in mid-air
-      // over the transcript. The CSS fallback in `var(..., 0px)` is the
-      // no-composer answer, and it only applies if the property is absent.
-      root.style.removeProperty(COMPOSER_CLEARANCE_VAR);
-    };
-  }, []);
+  // `Cebab-aids` / `Cebab-xqad`: publish the composer's height on
+  // `--composer-clearance` so the notification dock clears the Send button
+  // instead of swallowing the click. The mechanism is shared with the
+  // multi-agent and chain composers so the next one cannot forget it — see
+  // `useComposerClearance`.
+  useComposerClearance(wrapRef);
 
   // Cluster E Phase 1: trigger detection for the palette. We attach to
   // the wrap (not the textarea) so the listener survives GrowTextarea
