@@ -23,13 +23,15 @@ import { stripComments } from './test_support/strip_comments.js';
  * The fix is one awaited line per teardown; this gate is what stops the 115th
  * hand-rolled preamble from shipping without it.
  *
- * WHAT CANNOT BE REVERT-CHECKED, stated so it is not mistaken for a gap: the
- * underlying race is timing-dependent and does not reproduce on demand (PR #626
- * measured zero logger write lines with and without the fix on the file that
- * failed CI). So this gate's own tests are the evidence, not a red-to-green on
- * the race. The gate itself IS behaviourally revert-checkable — delete the
- * `await closeLogger()` from any migrated file and the real-tree scan below
- * reddens naming that `file:line`.
+ * NECESSARY, NOT SUFFICIENT (`Cebab-ndd7`). PR #626 measured zero logger
+ * write lines with and without the ordering on the file that failed CI and
+ * concluded the race could not be reproduced on demand. It can: any test that
+ * drives a turn (`runOneTurn` closes its session's stream fire-and-forget) left
+ * a late `[logger] … ENOENT` on EVERY turn, with a teardown this gate accepts,
+ * until the all-sessions `closeLogger()` also awaited closes already in flight.
+ * `runner/logger.test.ts` now pins that half with a real stream. The gate itself
+ * IS behaviourally revert-checkable — delete the `await closeLogger()` from any
+ * migrated file and the real-tree scan below reddens naming that `file:line`.
  *
  * HOW IT READS THE TREE, each choice the opposite of the obvious one:
  *

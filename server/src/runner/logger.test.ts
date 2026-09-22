@@ -4,7 +4,12 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import { config } from '../config.js';
-import { __setStreamFactoryForTests, closeLogger, logEvent } from './logger.js';
+import {
+  __pendingCloseCountForTests,
+  __setStreamFactoryForTests,
+  closeLogger,
+  logEvent,
+} from './logger.js';
 
 // A minimal stand-in for fs.WriteStream so we can simulate write errors and
 // backpressure deterministically. CI runs ubuntu + windows; relying on an
@@ -202,6 +207,11 @@ describe('closeLogger resolves only once the stream is really closed', () => {
 
     expect(settled).toBe(false);
     expect(fake.ended).toBe(true); // the close WAS initiated, just not finished
+
+    // Release it. The all-sessions `closeLogger()` in afterEach also awaits
+    // closes already in flight (Cebab-ndd7), so a fake left wedged here would
+    // cost every run the full 2 s close timeout.
+    fake.emit('close');
   });
 
   test('a wedged stream is released by the timeout rather than hanging', async () => {
@@ -254,6 +264,36 @@ describe('closeLogger resolves only once the stream is really closed', () => {
     for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
 
     expect(settled).toBe(true);
+  });
+
+  test('closeLogger() waits for a close a fire-and-forget closeLogger(sessionId) started (Cebab-ndd7)', async () => {
+    // The exact production shape: `runOneTurn`'s finally calls
+    // `closeLogger(sessionId)` WITHOUT awaiting it (ws/server.ts), which removes
+    // the session from the streams map and starts the close. A test teardown
+    // then runs the gate-blessed `await closeLogger()` before `fs.rmSync` — but
+    // with the map already empty, the old all-sessions form resolved
+    // immediately, leaving that turn's stream still flushing into a directory
+    // about to be removed. That is the non-deterministic EnvironmentTeardownError
+    // this bead is about; the rmSync-ordering gate cannot see it because the
+    // teardown IS ordered correctly.
+    const fake = new FakeWriteStream();
+    __setStreamFactoryForTests(() => fake as unknown as fs.WriteStream);
+    await logEvent('sess-turn', { n: 1 });
+
+    // Fire-and-forget, as the turn's finally does. The map is now empty.
+    void closeLogger('sess-turn');
+    // Anti-vacuity: the close was INITIATED but has NOT finished — the fake, like
+    // fs.WriteStream, closes on a later tick. If this were already true the final
+    // assertion would hold for the wrong reason.
+    expect(fake.ended).toBe(true);
+    expect(fake.closed).toBe(false);
+
+    // The teardown's awaited all-sessions close must still wait for it.
+    await closeLogger();
+    expect(fake.closed).toBe(true);
+    // And a finished close leaves the in-flight set, or it grows by one per
+    // turn for the life of the server.
+    expect(__pendingCloseCountForTests()).toBe(0);
   });
 
   test('closing one session leaves the others open', async () => {
@@ -338,6 +378,24 @@ describe('[security] the teardown ordering this exists to protect', () => {
     // The transcript really was written — otherwise this passes because
     // nothing ever opened a stream.
     expect(fs.existsSync(path.join(tmpRoot, '.cebab'))).toBe(false);
+  });
+
+  test("a turn's fire-and-forget close is covered too: no late [logger] error (Cebab-ndd7)", async () => {
+    // The production shape with a REAL stream: `runOneTurn`'s finally starts
+    // `closeLogger(sessionId)` without awaiting it, then the test teardown runs
+    // the gate-blessed `await closeLogger()` and removes the directory. Before
+    // the fix the all-sessions close found an empty map and resolved at once,
+    // the directory went, and the turn stream's deferred open failed with a
+    // late `[logger] … ENOENT` — the symptom, not just the promise contract.
+    const { lines, restore } = captureLoggerErrors();
+    await logEvent('sess-ff', { n: 1 });
+    void closeLogger('sess-ff');
+    await closeLogger();
+    fs.rmSync(tmpRoot, { recursive: true, force: true });
+    await waitForLoggerError(lines, 500);
+    restore();
+
+    expect(lines).toEqual([]);
   });
 
   test('positive control: the stream DOES report a broken directory', async () => {
