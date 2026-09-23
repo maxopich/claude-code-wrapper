@@ -2480,6 +2480,26 @@ export function reduce(state: AppState, action: Action): AppState {
   }
 }
 
+/**
+ * Cebab-7vl4: does this session id belong to a multi-agent run the client
+ * knows about — the active bus run, or an iteration listed on the Multi-Agent
+ * tab (what a pending Resume targets, by the iteration's own id)?
+ *
+ * ONE definition for both readers: the `wrapper_error` reducer branch (bus-
+ * scoped → bump `failureSeq`, never adopt into a chat) and App.tsx's
+ * `isKnownMultiAgentSession` notify predicate (which decides whether the run's
+ * error toast is pushed). App.tsx has no test file, so a copy there could drop
+ * the iterations arm and leave the spinner clearing with no message shown,
+ * with every test still green.
+ */
+export function isKnownMultiAgentSession(state: AppState, sessionId: string): boolean {
+  const ma = state.multiAgent;
+  return (
+    ma.active?.sessionId === sessionId ||
+    (ma.iterations?.some((it) => it.sessionId === sessionId) ?? false)
+  );
+}
+
 function reduceServer(state: AppState, msg: ServerMsg): AppState {
   switch (msg.type) {
     case 'managed_copy_preflight':
@@ -4238,14 +4258,10 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // invented a phantom single-agent error row under it (Cebab-m40r). Both
       // kinds are bus-scoped: bump `failureSeq` so the tab's Resume spinner
       // clears, and never adopt it into a single-agent chat. The operator's
-      // surface — a transient "Resume cancelled" for `aborted`, a sticky error
-      // otherwise — is the `notifyFromServerMsg` toast keyed on the same
-      // membership test.
-      const busScoped = Boolean(
-        msg.sessionId &&
-        (state.multiAgent.active?.sessionId === msg.sessionId ||
-          state.multiAgent.iterations?.some((it) => it.sessionId === msg.sessionId)),
-      );
+      // surface — a transient "Cancelled" for `aborted`, a sticky "Multi-agent
+      // error" otherwise, the server's message saying which verb failed — is
+      // the `notifyFromServerMsg` toast keyed on the same membership test.
+      const busScoped = Boolean(msg.sessionId && isKnownMultiAgentSession(state, msg.sessionId));
       if (busScoped) {
         return {
           ...state,

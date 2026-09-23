@@ -1,6 +1,13 @@
 import { describe, expect, test } from 'vitest';
 import type { IterationSummary } from '@cebab/shared/protocol';
-import { activeSession, initialState, reduce, sessionPhase, type AppState } from './store';
+import {
+  activeSession,
+  initialState,
+  isKnownMultiAgentSession,
+  reduce,
+  sessionPhase,
+  type AppState,
+} from './store';
 
 /**
  * Register W16 + Cebab-da6: a `wrapper_error` with no session of its own must
@@ -352,6 +359,16 @@ describe('store / a wrapper_error for a known multi-agent iteration (Cebab-7vl4)
       msg: { type: 'iterations', items: [iter(BUS_SID)] },
     });
   }
+
+  test('isKnownMultiAgentSession: a listed iteration counts, an unknown id does not', () => {
+    // The single definition App.tsx's toast predicate and this reducer share.
+    // App.tsx has no test file, so this is the only place the iterations arm
+    // is pinned for the toast half.
+    const s = seedIterations();
+    expect(isKnownMultiAgentSession(s, BUS_SID)).toBe(true);
+    expect(isKnownMultiAgentSession(s, 'chat-9')).toBe(false);
+    expect(isKnownMultiAgentSession(initialState, BUS_SID)).toBe(false);
+  });
 
   function busError(kind: 'aborted' | 'process_crashed') {
     return {

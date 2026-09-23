@@ -89,8 +89,8 @@ export type NotifyContext = {
    * tab (which is what a pending Resume targets)? Such a session-scoped
    * wrapper_error has no chat transcript to render into, so store.ts treats it
    * as bus-scoped and renders nothing; when this returns `true` the wrapper_error
-   * case pushes the run's error surface (transient "Resume cancelled" for
-   * `aborted`, sticky "Resume failed" otherwise). Reads live state from App.tsx's
+   * case pushes the run's error surface (a transient "Cancelled" for `aborted`,
+   * a sticky "Multi-agent error" otherwise). Reads live state from App.tsx's
    * `stateRef`. Returns `false`/`undefined` for a single-agent session id, whose
    * error is already a chat banner.
    */
@@ -278,6 +278,15 @@ export function notifyFromServerMsg(msg: ServerMsg, ctx: NotifyContext): void {
         // (`aborted`) is a brief, self-fading info notice, exactly like the
         // sessionless `aborted` toast below (Cebab-osfq); any other failure is
         // a sticky error the operator must dismiss.
+        //
+        // The TITLES ARE NEUTRAL on purpose. Resume is not the only verb that
+        // sends a session-scoped wrapper_error for a bus run: archive_session,
+        // continue, retry_worker, abandon_session, continue_through_mutation,
+        // set_multi_agent_lifecycle and add_multi_agent_participant all do,
+        // for the active run or a listed iteration, and each was invisible
+        // until this branch. A fixed "Resume failed" would mislabel every one
+        // of them. The server's own message says what failed ("Resume
+        // cancelled: …", "archive_session: …"), so the title does not have to.
         if (ctx.isKnownMultiAgentSession?.(m.sessionId)) {
           const busMsg = typeof m.message === 'string' ? m.message : 'Wrapper error';
           if (m.kind === 'aborted') {
@@ -287,7 +296,7 @@ export function notifyFromServerMsg(msg: ServerMsg, ctx: NotifyContext): void {
               severity: 'info',
               class: 'operational',
               dedupeKey: `${PHASE_2_WRAPPER_DEDUPE_KEY_PREFIX}:multi-agent:${m.sessionId}:aborted`,
-              title: 'Resume cancelled',
+              title: 'Cancelled',
               message: busMsg,
               sticky: false,
             });
@@ -298,7 +307,7 @@ export function notifyFromServerMsg(msg: ServerMsg, ctx: NotifyContext): void {
               severity: 'error',
               class: 'operational',
               dedupeKey: `${PHASE_2_WRAPPER_DEDUPE_KEY_PREFIX}:multi-agent:${m.sessionId}`,
-              title: 'Resume failed',
+              title: 'Multi-agent error',
               message: busMsg,
               sticky: true,
             });

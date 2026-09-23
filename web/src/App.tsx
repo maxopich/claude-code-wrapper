@@ -88,7 +88,13 @@ import {
   resolveFromAuthTokenResponse,
   resolveFromCloseInfo,
 } from './components/connectionLost';
-import { canSaveManagedEdit, HELD_MESSAGES_CAP, managedEditorMode, turnInFlight } from './store';
+import {
+  canSaveManagedEdit,
+  HELD_MESSAGES_CAP,
+  isKnownMultiAgentSession,
+  managedEditorMode,
+  turnInFlight,
+} from './store';
 import type { ActiveRunView } from './store';
 import { downloadSessionLog, isDownloadError } from './exports';
 import { readStored, writeStored } from './prefs';
@@ -965,13 +971,8 @@ function AppShell({
                 // targets) has no chat to land in — surface it as the run's
                 // error toast instead. Same pre-reduce `stateRef` snapshot the
                 // other predicates read.
-                isKnownMultiAgentSession: (sessionId) => {
-                  const ma = stateRef.current.multiAgent;
-                  return (
-                    ma.active?.sessionId === sessionId ||
-                    (ma.iterations?.some((it) => it.sessionId === sessionId) ?? false)
-                  );
-                },
+                isKnownMultiAgentSession: (sessionId) =>
+                  isKnownMultiAgentSession(stateRef.current, sessionId),
               });
             }
           } catch (err) {
