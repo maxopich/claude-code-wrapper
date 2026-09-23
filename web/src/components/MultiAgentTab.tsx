@@ -917,9 +917,9 @@ export function MultiAgentDraftFooter(props: {
   );
 }
 
-/** Exported for `MultiAgentComposer.clearance.test.tsx`, which pins the
- *  `--composer-clearance` mechanism (Cebab-xqad) without mounting the whole
- *  DraftView. Not imported by app code — DraftView renders it directly. */
+/** The draft's prompt box and Start button. Rendered by
+ *  `MultiAgentDraftFooter`, which owns the `--composer-clearance` measurement
+ *  (Cebab-7jcq moved it up from here so the dock clears the whole footer). */
 export function MultiAgentComposer(props: {
   mode: 'chain' | 'orchestrator';
   value: string;
