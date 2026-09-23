@@ -19,9 +19,11 @@ import {
   claimSessionStart,
   isSessionStartInFlight,
   listLiveSessionIds,
+  registerLiveSession,
   releaseSessionStart,
   unregisterLiveSession,
 } from '../bus/session_registry.js';
+import { getMultiAgentSession } from '../repo/multi_agent.js';
 import { handleClientMsg } from './server.js';
 import { closeLogger } from '../runner/logger.js';
 
@@ -71,20 +73,46 @@ const of = <T extends ServerMsg['type']>(sent: ServerMsg[], type: T) =>
 
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
-/** Tick until `sent` carries a message of `type`, bounded. The reopen's
- *  `computeWorkspaceDiff` spawns real `git` before it reaches the gate, so a
- *  single microtask is not enough; this is the gate-message handshake, not a
- *  wall-clock assertion. */
+/** Tick until `sent` carries a message of `type`, or the reopen settles
+ *  without producing one. The reopen's `computeWorkspaceDiff` spawns real
+ *  `git` before it reaches the gate, so a single microtask is not enough — and
+ *  a fixed tick count would be a hidden wall-clock budget that a slow runner
+ *  exhausts, failing with a message that blames the fixture. Stopping when the
+ *  reopen SETTLES instead makes a non-parking regression fail at once, and
+ *  leaves vitest's timeout as the only time bound. */
 async function tickUntil<T extends ServerMsg['type']>(
   sent: ServerMsg[],
   type: T,
+  reopen: Promise<unknown>,
 ): Promise<Extract<ServerMsg, { type: T }>[]> {
-  for (let i = 0; i < 200; i++) {
-    const hit = of(sent, type);
-    if (hit.length > 0) return hit;
-    await tick();
-  }
+  let settled = false;
+  void reopen.then(
+    () => (settled = true),
+    () => (settled = true),
+  );
+  while (of(sent, type).length === 0 && !settled) await tick();
   return of(sent, type);
+}
+
+/** A live incumbent, as the start-guard tests register one. */
+function registerFakeLive(sessionId: string): void {
+  registerLiveSession({
+    sessionId,
+    mode: 'orchestrator',
+    handle: {
+      sessionId,
+      iterationId: 'iter-1',
+      participantAgentNames: [],
+      lifecycle: 'temp',
+      sessionFolder: '',
+      stop: async () => {},
+      detach: () => {},
+      retry: async () => {},
+      continueThroughMutation: async () => {},
+    },
+    rebind: () => 1,
+    sendServerMsg: () => {},
+  } as never);
 }
 
 beforeEach(() => {
@@ -120,6 +148,7 @@ beforeEach(() => {
 afterEach(async () => {
   // The live registry + claim set are process singletons.
   unregisterLiveSession('target');
+  unregisterLiveSession('incumbent');
   releaseSessionStart('other-window');
   closeDb();
   config.dataDir = originalDataDir;
@@ -127,7 +156,7 @@ afterEach(async () => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
-describe('reopen holds the start claim across its trust-gate park (Cebab-xm95)', () => {
+describe('reopen holds the start claim across its trust-gate park (Cebab-xm95) [security]', () => {
   test('a start is refused while the reopen is parked, and the claim is released on cancel', async () => {
     const sent: ServerMsg[] = [];
     const conn = makeConn(sent);
@@ -148,7 +177,7 @@ describe('reopen holds the start claim across its trust-gate park (Cebab-xm95)',
     // Anti-vacuity FIRST: the reopen really parked on the gate. Without this a
     // reopen that never reached step 4 would satisfy the assertions for the
     // wrong reason.
-    const pending = await tickUntil(sent, 'mcp_auto_install_pending');
+    const pending = await tickUntil(sent, 'mcp_auto_install_pending', reopen);
     expect(pending, 'the reopen did not park on the gate — this test proves nothing').toHaveLength(
       1,
     );
@@ -172,5 +201,84 @@ describe('reopen holds the start claim across its trust-gate park (Cebab-xm95)',
     expect(isSessionStartInFlight()).toBe(false);
     expect(claimSessionStart('other-window')).toBe(true);
     releaseSessionStart('other-window');
+  });
+
+  test('a reopen is REFUSED while another start holds the slot — nothing parks, nothing is displaced', async () => {
+    // The other half of the fix, and the bead's "two windows race" case: the
+    // refusal branch at the top of the reopen case. Registry empty, so the
+    // refusal can only come from the held claim.
+    expect(listLiveSessionIds()).toEqual([]);
+    expect(claimSessionStart('other-window')).toBe(true);
+
+    const sent: ServerMsg[] = [];
+    const conn = makeConn(sent);
+    const reopen = handleClientMsg(conn, {
+      type: 'reopen_session_confirmed',
+      sessionId: 'target',
+      acknowledgedWorkspaceDiff: true,
+      typedConfirmation: 'reopen',
+    } as never);
+    // Not awaited: were the refusal missing, the reopen would park on the gate
+    // and this test would hang to the timeout instead of failing. Wait for the
+    // refusal, the park, or the settle — whichever comes first.
+    let settled = false;
+    void reopen.then(
+      () => (settled = true),
+      () => (settled = true),
+    );
+    while (
+      !settled &&
+      of(sent, 'reopen_session_failed').length === 0 &&
+      of(sent, 'mcp_auto_install_pending').length === 0
+    ) {
+      await tick();
+    }
+    const parked = of(sent, 'mcp_auto_install_pending');
+    if (parked.length > 0) {
+      await handleClientMsg(conn, {
+        type: 'cancel_gate',
+        kind: 'mcp',
+        pendingId: parked[0]!.pendingId,
+      } as never);
+    }
+    await reopen.catch(() => {});
+
+    const failed = of(sent, 'reopen_session_failed');
+    expect(failed).toHaveLength(1);
+    expect(failed[0]).toMatchObject({ sessionId: 'target', reason: 'start_in_flight' });
+    // It stopped before any work: no gate prompt, the target untouched, and the
+    // other window's claim still held (the refusal must not release it).
+    expect(of(sent, 'mcp_auto_install_pending')).toHaveLength(0);
+    expect(getMultiAgentSession('target')?.status).toBe('crashed');
+    expect(isSessionStartInFlight()).toBe(true);
+  });
+
+  test("a LIVE incumbent does not block the reopen — displacing it is the reopen's job", async () => {
+    // Why this is `claimSessionReopen` and not `claimSessionStart`: the latter
+    // also refuses on a live session, which would make every ordinary reopen
+    // fail. Drive the verb with a live incumbent and no held claim.
+    registerFakeLive('incumbent');
+    expect(listLiveSessionIds()).toEqual(['incumbent']);
+
+    const sent: ServerMsg[] = [];
+    const conn = makeConn(sent);
+    const reopen = handleClientMsg(conn, {
+      type: 'reopen_session_confirmed',
+      sessionId: 'target',
+      acknowledgedWorkspaceDiff: true,
+      typedConfirmation: 'reopen',
+    } as never);
+
+    const pending = await tickUntil(sent, 'mcp_auto_install_pending', reopen);
+    expect(of(sent, 'reopen_session_failed')).toHaveLength(0);
+    expect(pending).toHaveLength(1);
+
+    await handleClientMsg(conn, {
+      type: 'cancel_gate',
+      kind: 'mcp',
+      pendingId: pending[0]!.pendingId,
+    } as never);
+    await reopen.catch(() => {});
+    expect(isSessionStartInFlight()).toBe(false);
   });
 });
