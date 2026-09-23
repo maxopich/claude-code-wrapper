@@ -322,6 +322,10 @@ describe('SettingsModal — Storage section', () => {
     expect(text).toContain('~/.claude/projects/');
     expect(text).toContain('.jsonl');
     expect(text.toLowerCase()).toContain('unredacted');
+    // Cebab-bkrm: the list reads as exhaustive, so deleting a managed agent
+    // belongs alongside the session delete and the purge — the README's
+    // identical list already carries this clause.
+    expect(text.toLowerCase()).toContain('deleting a managed agent');
   });
 
   // Cebab-6fax.43.3: the managed-agent tree size, and its truncation flag —

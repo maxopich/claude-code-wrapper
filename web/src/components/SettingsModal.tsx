@@ -443,7 +443,8 @@ export function SettingsModal(props: {
                *  never sees its point-of-deletion note. Say here, plainly and
                *  by location, what neither delete nor cleanup touches. */}
               <p className="hint" data-testid="storage-cli-transcript-note">
-                Neither deleting a session nor this cleanup removes Claude&rsquo;s own transcript at{' '}
+                Neither deleting a session, nor deleting a managed agent, nor this cleanup removes
+                Claude&rsquo;s own transcript at{' '}
                 <code>~/.claude/projects/&lt;encoded-cwd&gt;/&lt;session-id&gt;.jsonl</code>. That
                 copy is unredacted and stays on disk until you remove it yourself.
               </p>

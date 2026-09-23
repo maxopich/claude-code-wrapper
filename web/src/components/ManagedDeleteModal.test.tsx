@@ -65,6 +65,22 @@ describe('ManagedDeleteModal — what survives the delete', () => {
     expect(text).not.toMatch(/\bits (files, )?(its )?conversations\b/);
   });
 
+  test('the success line names Cebab-side records, not the conversations', () => {
+    // The single most misleading string in the flow: the done-state line only
+    // renders here, so a check on 'confirming' cannot see it. On a revert of
+    // the success-line edit the line reads "and its 3 conversations." and the
+    // negative assertion below reddens.
+    render(
+      state({
+        status: 'done',
+        result: { ok: true, name: 'ledger-agent', sessionsRemoved: 3 },
+      }),
+    );
+    const text = container.textContent ?? '';
+    expect(text).toContain('Cebab-side conversation record');
+    expect(text).not.toMatch(/its \d+ conversations?\b/);
+  });
+
   test('the note is present in every status, not only while confirming', () => {
     // The success line reads "Deleted <name> and its N conversations" — the
     // moment the operator is most likely to believe the conversations are gone,
