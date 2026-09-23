@@ -2211,6 +2211,22 @@ export async function executeReopenSessionConfirmed(args: {
   try {
     result = await reactivate(sessionId, cbs);
   } catch (err) {
+    // `Cebab-5vqm`: a declined trust/env gate (`GateAbandonedError`,
+    // `name === 'AbortError'`) parked by `gateParticipants` inside the
+    // reconstruct is a cancel, not a reactivation failure. Give it the
+    // dedicated `cancelled` reason so the modal shows a neutral "Reopen
+    // cancelled" rather than "Reactivation failed". A genuine throw keeps
+    // `reactivate_failed` and its raw message.
+    if (classifyHandlerFailure(err) === 'aborted') {
+      send({
+        type: 'reopen_session_failed',
+        sessionId,
+        reason: 'cancelled',
+        message:
+          'Reopen cancelled: you declined a trust or environment prompt, so the session was not re-attached.',
+      });
+      return;
+    }
     console.error(`[reopen_session_confirmed] resumeMultiAgentTarget threw for ${sessionId}`, err);
     send({
       type: 'reopen_session_failed',
@@ -2512,8 +2528,20 @@ export async function executeContinueMultiAgent(args: {
       applyMcpDenials(projectId, serverNames);
     }
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    send({ type: 'wrapper_error', kind: 'process_crashed', message });
+    // `Cebab-5vqm`: an operator DECLINING the trust/env gate this Continue
+    // parks rejects with a `GateAbandonedError` (`name === 'AbortError'`) — a
+    // deliberate cancel, not a crash. Route through `classifyBusStartFailure`
+    // so it surfaces as `aborted`, kept SESSIONLESS (as this catch always was);
+    // `notifyFromServerMsg` then shows the transient "Cancelled" info toast
+    // rather than a sticky red "Server error". A genuine throw keeps
+    // `process_crashed` and its own raw message.
+    send({
+      ...classifyBusStartFailure(
+        err,
+        'Continue cancelled: you declined a trust or environment prompt, so the session was not continued.',
+      ),
+      type: 'wrapper_error',
+    });
     return;
   }
   try {
@@ -3362,9 +3390,14 @@ export function classifyHandlerFailure(err: unknown): WrapperErrorKind {
  * `Cebab-6fax.17` fixed on the dispatch catch and the single-agent turn path,
  * missed here because these catches short-circuit it.
  *
- * NOT YET COVERED, same shape: the `continue_multi_agent`, mid-run
- * add-participant and reopen catches also await the gate and still report a
- * cancel as a failure.
+ * `Cebab-5vqm` extended the same fix to the three remaining sites that await
+ * the gate and used to report a cancel as a failure: `continue_multi_agent`
+ * (routes through this helper, sessionless) and the mid-run add-participant
+ * catch (branches on `classifyHandlerFailure` → a sessionless `aborted`
+ * `wrapper_error`) both surface the transient "Cancelled" toast, and the
+ * `reopen_session_confirmed` catch maps a cancel to the dedicated
+ * `reopen_session_failed` reason `cancelled` so the modal reads "Reopen
+ * cancelled" instead of "Reactivation failed".
  *
  * Mirrors the single-agent turn path: `aborted` gets a plain-language message,
  * anything else keeps its raw error text and stays `process_crashed`, so a
@@ -6787,6 +6820,24 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
           }
         }
       } catch (err) {
+        // `Cebab-5vqm`: a declined trust/env gate (`GateAbandonedError`,
+        // `name === 'AbortError'`) parked by the `gateProjectsForSpawn` above
+        // is a cancel, not a failure. Report it SESSIONLESS as `aborted`, which
+        // `notifyFromServerMsg` shows as the transient "Cancelled" info toast.
+        // (Since Cebab-7vl4 a session-scoped one for the active run would toast
+        // too; sessionless is kept because it is what the pinned test asserts
+        // and it reads the same to the operator.) A genuine throw keeps its
+        // session-scoped `process_crashed`, which since Cebab-7vl4 shows as a
+        // sticky "Multi-agent error" toast.
+        if (classifyHandlerFailure(err) === 'aborted') {
+          send(conn.ws, {
+            type: 'wrapper_error',
+            kind: 'aborted',
+            message:
+              'Add cancelled: you declined a trust or environment prompt, so the participant was not added.',
+          });
+          return;
+        }
         const message = err instanceof Error ? err.message : String(err);
         send(conn.ws, {
           type: 'wrapper_error',

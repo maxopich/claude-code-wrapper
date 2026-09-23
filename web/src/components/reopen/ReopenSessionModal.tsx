@@ -279,6 +279,9 @@ const FAILURE_TITLE: Record<ReopenSessionFailureReason, string> = {
   typed_confirmation_required: 'Typed confirmation required',
   chain_reconstruction_unsupported: 'Cannot reopen chain session',
   reactivate_failed: 'Reactivation failed',
+  // Cebab-5vqm: the operator declined the trust/env gate — a cancel, not a
+  // failure. Neutral title so it doesn't read as something breaking.
+  cancelled: 'Reopen cancelled',
   start_in_flight: 'Another session is starting',
 };
 

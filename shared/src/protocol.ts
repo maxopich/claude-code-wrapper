@@ -5043,6 +5043,14 @@ export type ReopenSessionFailureReason =
   | 'chain_reconstruction_unsupported'
   /** R-B reconstruction failed for some other reason (folder missing, etc.). */
   | 'reactivate_failed'
+  /**
+   * `Cebab-5vqm`: the operator DECLINED the trust/env gate the reconstruct
+   * parked (a `GateAbandonedError`) — a deliberate cancel, not a failure. The
+   * modal renders a neutral "Reopen cancelled" rather than "Reactivation
+   * failed". Distinct from `reactivate_failed` so a real reconstruct throw
+   * still reads as a failure.
+   */
+  | 'cancelled'
   /** Another start/resume/reopen holds the process-wide slot; retry shortly. */
   | 'start_in_flight';
 

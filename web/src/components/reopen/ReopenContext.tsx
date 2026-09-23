@@ -142,7 +142,9 @@ function reducer(state: ReopenState, action: Action): ReopenState {
     case 'failed': {
       // Hard failures (not_found, still_running, reactivate_failed,
       // chain_reconstruction_unsupported) replace the modal content with
-      // a terminal error + Close button.
+      // a terminal error + Close button. So does `cancelled` (Cebab-5vqm):
+      // the operator declined the trust/env prompt, and the modal says so
+      // under a neutral "Reopen cancelled" title.
       if (action.sessionId !== currentSessionId(state)) return state;
       return {
         kind: 'failed',
@@ -182,8 +184,8 @@ function stripCommitting(s: Extract<ReopenState, { kind: 'committing' }>) {
  *   - ack_required / typed_confirmation_required come from the typed
  *     gate; the operator can correct them in the form.
  *   - Everything else (not_found, still_running, no_participant,
- *     chain_reconstruction_unsupported, reactivate_failed, start_in_flight)
- *     is a hard stop for the form. For start_in_flight that is not "cannot
+ *     chain_reconstruction_unsupported, reactivate_failed, cancelled,
+ *     start_in_flight) is a hard stop for the form. For start_in_flight that is not "cannot
  *     recover": the slot frees when the other start finishes, and the
  *     operator retries from the banner.
  */
