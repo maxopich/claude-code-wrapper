@@ -38,8 +38,10 @@ export type ManagedFileEditorProps = {
   saving: boolean;
   savedAt: number | null;
   /** The agent's Trust setting. An untrusted agent's chats load none of these
-   *  files -- and managed copies start untrusted -- so the save message must not
-   *  promise that the next session will. `Cebab-6fax.43.1`. */
+   *  files -- and a managed copy inherits the source project's Trust as a
+   *  snapshot (`Cebab-gkme`), so a copy of an untrusted project is untrusted --
+   *  so the save message must not promise that the next session will.
+   *  `Cebab-6fax.43.1`. */
   trusted: boolean;
   /** A failed SAVE, shown alongside the operator's text rather than replacing
    *  it — losing what they typed to report why it did not save would be worse

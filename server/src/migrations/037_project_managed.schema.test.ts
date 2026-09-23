@@ -56,7 +56,9 @@ describe('037_project_managed', () => {
     // stub of one — the cast is only how a typed signature is bypassed.
     const target = path.join(managedAgentsRoot(), 'rollback');
     fs.mkdirSync(target, { recursive: true });
-    expect(() => registerManagedProject('rollback', target, {} as unknown as string, 1)).toThrow();
+    expect(() =>
+      registerManagedProject('rollback', target, {} as unknown as string, 1, false, null),
+    ).toThrow();
 
     const rows = getDb()
       .prepare<[string], { n: number }>('SELECT COUNT(*) AS n FROM projects WHERE path = ?')
@@ -67,7 +69,14 @@ describe('037_project_managed', () => {
   test('registerManagedProject stores provenance and returns the fresh row', () => {
     const target = path.join(managedAgentsRoot(), 'copied');
     fs.mkdirSync(target, { recursive: true });
-    const row = registerManagedProject('copied', target, '/somewhere/source', 1_700_000_000_000);
+    const row = registerManagedProject(
+      'copied',
+      target,
+      '/somewhere/source',
+      1_700_000_000_000,
+      false,
+      null,
+    );
     expect(row.managed_source_path).toBe('/somewhere/source');
     expect(row.managed_copied_at).toBe(1_700_000_000_000);
     expect(getProject(row.id)?.managed_source_path).toBe('/somewhere/source');
@@ -77,7 +86,7 @@ describe('037_project_managed', () => {
     // Both directions, because each failure looks like the feature working.
     const managedDir = path.join(managedAgentsRoot(), 'real');
     fs.mkdirSync(managedDir, { recursive: true });
-    const managed = registerManagedProject('real', managedDir, '/src', 1);
+    const managed = registerManagedProject('real', managedDir, '/src', 1, false, null);
     expect(isManagedProjectPath(managed.path)).toBe(true);
 
     // Clearing the provenance does NOT make a managed agent stop being managed
