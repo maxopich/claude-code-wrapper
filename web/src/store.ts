@@ -459,9 +459,10 @@ export type MultiAgentRun = {
    *  the operator's choice at session start. UI surfaces it as a read-only
    *  row in Session info (the toggle itself lives in setup). */
   pauseOnDangerous: boolean;
-  /** Execute mode for this session (orchestrator only). When true, workers may
-   *  change their own project; drives the "Execute mode" banner/chip in place
-   *  of the consultant-mode one. Mirrored from `multi_agent_started`. */
+  /** Execute mode for this session (both modes since `Cebab-6fax.4`). When true,
+   *  participants may change their own project; drives the "Execute mode"
+   *  banner/chip in place of the consultant-mode one. Mirrored from
+   *  `multi_agent_started`. */
   executeMode: boolean;
   /** Item #5: all classified non-'read' tool calls observed during this
    *  session, ordered by ts ascending. Drives the Session-info "Mutations"
@@ -774,8 +775,8 @@ export type MultiAgentState = {
    *  during the session draft; sent on `start_multi_agent` as
    *  `pauseOnDangerous`. Default false; the operator opts in explicitly. */
   draftPauseOnDangerous: boolean;
-  /** Setup-screen opt-in for Execute mode (orchestrator only). Sent on
-   *  `start_multi_agent` as `executeMode`. Default false (consultant). */
+  /** Setup-screen opt-in for Execute mode (both modes since `Cebab-6fax.4`).
+   *  Sent on `start_multi_agent` as `executeMode`. Default false (consultant). */
   draftExecuteMode: boolean;
   /** Non-null while a chain (or future orchestrator session) is running, and
    *  until the operator dismisses it. */
@@ -1326,6 +1327,46 @@ export function managedEditorMode(edit: NonNullable<AppState['managedEdit']>): M
  * the buffer still matches what was read — an always-enabled Save invites a
  * no-op write, and every write here appends an audit row.
  */
+/**
+ * The `start_multi_agent` a chain draft sends, or `null` when the draft cannot
+ * start (no prompt, or fewer than two participants).
+ *
+ * Lives here, not in App.tsx, because App.tsx has no test file and this is the
+ * line `Cebab-3wt3` is about: the chain toggle was once present in the UI and
+ * never sent, which made execute mode unreachable for chain runs. A test on
+ * the DraftView checkbox cannot see whether the value reaches the wire.
+ */
+export function chainStartMsg(
+  ma: MultiAgentState,
+): Extract<ClientMsg, { type: 'start_multi_agent' }> | null {
+  const {
+    draftParticipants,
+    draftPrompt,
+    draftLifecycle,
+    draftPauseOnDangerous,
+    draftExecuteMode,
+    // PR-7: template provenance + per-template hop budget. Both are null
+    // for ad-hoc runs; the server stamps them onto the row only if set.
+    draftTemplateId,
+    draftHopBudget,
+  } = ma;
+  if (draftPrompt.trim().length === 0) return null;
+  if (draftParticipants.length < 2) return null;
+  return {
+    type: 'start_multi_agent',
+    mode: 'chain',
+    participants: draftParticipants,
+    initialPrompt: draftPrompt,
+    lifecycle: draftLifecycle,
+    pauseOnDangerous: draftPauseOnDangerous,
+    // `Cebab-6fax.4`: chain participants carry a consultant/execute clause too,
+    // so a chain start sends executeMode exactly as the orchestrator start does.
+    executeMode: draftExecuteMode,
+    ...(draftTemplateId ? { templateId: draftTemplateId } : {}),
+    ...(draftHopBudget !== null ? { hopBudget: draftHopBudget } : {}),
+  };
+}
+
 export function canSaveManagedEdit(edit: NonNullable<AppState['managedEdit']>): boolean {
   if (edit.status !== 'ready') return false;
   if (edit.draft === null) return false;
@@ -2785,8 +2826,8 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             // `multi_agent_started`. Always populated (server resolves and
             // sends `false` + `[]` for fresh starts; reads DB for R-A/R-B).
             pauseOnDangerous: msg.pauseOnDangerous,
-            // Execute mode (orchestrator only) — server sends false for chain
-            // and for consultant-mode orchestrator sessions. Default false if a
+            // Execute mode — server echoes the operator's grant for both modes
+            // (false for consultant-mode sessions). Default false if a
             // pre-execute-mode server omits it.
             executeMode: msg.executeMode ?? false,
             mutations: msg.mutations,

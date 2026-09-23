@@ -90,6 +90,7 @@ import {
 } from './components/connectionLost';
 import {
   canSaveManagedEdit,
+  chainStartMsg,
   HELD_MESSAGES_CAP,
   isKnownMultiAgentSession,
   managedEditorMode,
@@ -2140,28 +2141,8 @@ function AppShell({
   }
   function startChain() {
     // Mode is enforced by the mounted tab (Chained Chat) — no mode guard.
-    const {
-      draftParticipants,
-      draftPrompt,
-      draftLifecycle,
-      draftPauseOnDangerous,
-      // PR-7: template provenance + per-template hop budget. Both are null
-      // for ad-hoc runs; the server stamps them onto the row only if set.
-      draftTemplateId,
-      draftHopBudget,
-    } = state.multiAgent;
-    if (draftPrompt.trim().length === 0) return;
-    if (draftParticipants.length < 2) return;
-    wsRef.current?.send({
-      type: 'start_multi_agent',
-      mode: 'chain',
-      participants: draftParticipants,
-      initialPrompt: draftPrompt,
-      lifecycle: draftLifecycle,
-      pauseOnDangerous: draftPauseOnDangerous,
-      ...(draftTemplateId ? { templateId: draftTemplateId } : {}),
-      ...(draftHopBudget !== null ? { hopBudget: draftHopBudget } : {}),
-    });
+    const msg = chainStartMsg(state.multiAgent);
+    if (msg) wsRef.current?.send(msg);
   }
   function startOrchestrator() {
     // Mode is enforced by the mounted tab (Multi-Agent) — no mode guard.
@@ -2186,7 +2167,7 @@ function AppShell({
       initialPrompt: draftPrompt,
       lifecycle: draftLifecycle,
       pauseOnDangerous: draftPauseOnDangerous,
-      // Execute mode is orchestrator-only; consultant is the default.
+      // Execute mode; consultant is the default.
       executeMode: draftExecuteMode,
       ...(draftTemplateId ? { templateId: draftTemplateId } : {}),
       ...(draftHopBudget !== null ? { hopBudget: draftHopBudget } : {}),
@@ -2448,7 +2429,7 @@ function AppShell({
     dispatch({ type: 'ma_set_draft_pause_on_dangerous', value });
   }
   function setDraftExecuteMode(value: boolean) {
-    // Setup-screen toggle (orchestrator only). Client state until
+    // Setup-screen toggle (both modes since `Cebab-6fax.4`). Client state until
     // `start_multi_agent` sends it as `executeMode`.
     dispatch({ type: 'ma_set_draft_execute_mode', value });
   }
