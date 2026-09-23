@@ -2480,6 +2480,26 @@ export function reduce(state: AppState, action: Action): AppState {
   }
 }
 
+/**
+ * Cebab-7vl4: does this session id belong to a multi-agent run the client
+ * knows about — the active bus run, or an iteration listed on the Multi-Agent
+ * tab (what a pending Resume targets, by the iteration's own id)?
+ *
+ * ONE definition for both readers: the `wrapper_error` reducer branch (bus-
+ * scoped → bump `failureSeq`, never adopt into a chat) and App.tsx's
+ * `isKnownMultiAgentSession` notify predicate (which decides whether the run's
+ * error toast is pushed). App.tsx has no test file, so a copy there could drop
+ * the iterations arm and leave the spinner clearing with no message shown,
+ * with every test still green.
+ */
+export function isKnownMultiAgentSession(state: AppState, sessionId: string): boolean {
+  const ma = state.multiAgent;
+  return (
+    ma.active?.sessionId === sessionId ||
+    (ma.iterations?.some((it) => it.sessionId === sessionId) ?? false)
+  );
+}
+
 function reduceServer(state: AppState, msg: ServerMsg): AppState {
   switch (msg.type) {
     case 'managed_copy_preflight':
@@ -4227,9 +4247,21 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // something this guard can swallow. (`classifyError`'s auth path is
       // the single-agent turn loop today, so that combination should not
       // arise; carrying it costs one expression and removes the question.)
-      const busScoped = Boolean(
-        msg.sessionId && state.multiAgent.active?.sessionId === msg.sessionId,
-      );
+      //
+      // Cebab-7vl4: "a multi-agent run the client knows about" is the active
+      // bus run OR any iteration listed on the Multi-Agent tab. A pending
+      // Resume targets an iteration by its own session id (resume re-uses it),
+      // and a failed or cancelled resume never becomes `active` — so without
+      // the iterations arm such an error fell through to the project fallback
+      // below: with no chat project selected it was dropped (failureSeq
+      // untouched, "Resuming…" stuck forever), and with one selected it
+      // invented a phantom single-agent error row under it (Cebab-m40r). Both
+      // kinds are bus-scoped: bump `failureSeq` so the tab's Resume spinner
+      // clears, and never adopt it into a single-agent chat. The operator's
+      // surface — a transient "Cancelled" for `aborted`, a sticky "Multi-agent
+      // error" otherwise, the server's message saying which verb failed — is
+      // the `notifyFromServerMsg` toast keyed on the same membership test.
+      const busScoped = Boolean(msg.sessionId && isKnownMultiAgentSession(state, msg.sessionId));
       if (busScoped) {
         return {
           ...state,

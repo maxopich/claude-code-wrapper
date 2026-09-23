@@ -123,6 +123,102 @@ describe('notifyFromServerMsg', () => {
     expect(r.pushed).toHaveLength(0);
   });
 
+  // Cebab-7vl4: a session-scoped wrapper_error whose id is a known multi-agent
+  // run (an iteration / pending resume) has no chat to render into, so the toast
+  // is its only surface. Gated on `isKnownMultiAgentSession` — a single-agent
+  // session id (predicate false) still takes no toast (rendered as a chat banner).
+  describe('Cebab-7vl4: a known multi-agent session-scoped wrapper_error', () => {
+    test('aborted resume → transient "Cancelled" info toast, not sticky/red', () => {
+      const r = recorder();
+      notifyFromServerMsg(
+        {
+          type: 'wrapper_error',
+          kind: 'aborted',
+          message: 'Resume cancelled: you declined a trust or environment prompt.',
+          sessionId: 'bus-1',
+        } as ServerMsg,
+        {
+          push: r.push,
+          mintId: () => 'mock-id',
+          now: () => 42,
+          isKnownMultiAgentSession: (sid) => sid === 'bus-1',
+        },
+      );
+      expect(r.pushed).toHaveLength(1);
+      expect(r.pushed[0]).toMatchObject({
+        id: 'mock-id',
+        ts: 42,
+        severity: 'info',
+        sticky: false,
+        title: 'Cancelled',
+        message: 'Resume cancelled: you declined a trust or environment prompt.',
+        dedupeKey: 'wrap:multi-agent:bus-1:aborted',
+      });
+      expect(r.pushed[0]?.severity).not.toBe('error');
+      expect(r.pushed[0]?.sticky).not.toBe(true);
+    });
+
+    test('a real resume failure → sticky "Multi-agent error" toast', () => {
+      for (const kind of ['process_crashed', 'claude_not_found', 'auth_expired'] as const) {
+        const r = recorder();
+        notifyFromServerMsg(
+          {
+            type: 'wrapper_error',
+            kind,
+            message: 'the resume blew up',
+            sessionId: 'bus-1',
+          } as ServerMsg,
+          { push: r.push, isKnownMultiAgentSession: (sid) => sid === 'bus-1' },
+        );
+        expect(r.pushed, kind).toHaveLength(1);
+        expect(r.pushed[0], kind).toMatchObject({
+          severity: 'error',
+          sticky: true,
+          title: 'Multi-agent error',
+          message: 'the resume blew up',
+          dedupeKey: 'wrap:multi-agent:bus-1',
+        });
+      }
+    });
+
+    test('a non-resume error on a known run is not labelled as a resume', () => {
+      // Resume is one of eight verbs that send a session-scoped wrapper_error
+      // for a bus run. An archive refusal on a listed iteration must read as
+      // what it is: the server's message, under a neutral title.
+      const r = recorder();
+      notifyFromServerMsg(
+        {
+          type: 'wrapper_error',
+          kind: 'process_crashed',
+          message: 'archive_session: session is still running — Stop or End it first',
+          sessionId: 'bus-1',
+        } as ServerMsg,
+        { push: r.push, isKnownMultiAgentSession: (sid) => sid === 'bus-1' },
+      );
+      expect(r.pushed).toHaveLength(1);
+      expect(r.pushed[0]?.title).not.toMatch(/resume/i);
+      expect(r.pushed[0]?.message).toBe(
+        'archive_session: session is still running — Stop or End it first',
+      );
+    });
+
+    test('a session id the predicate does NOT know still takes no toast', () => {
+      // Anti-vacuity: the toast is gated on membership, not on "has a sessionId".
+      // A single-agent session error renders as a chat banner, not a toast.
+      const r = recorder();
+      notifyFromServerMsg(
+        {
+          type: 'wrapper_error',
+          kind: 'process_crashed',
+          message: 'boom',
+          sessionId: 'not-a-bus-run',
+        } as ServerMsg,
+        { push: r.push, isKnownMultiAgentSession: (sid) => sid === 'bus-1' },
+      );
+      expect(r.pushed).toHaveLength(0);
+    });
+  });
+
   test('unrelated ServerMsg types are silently ignored', () => {
     const r = recorder();
     notifyFromServerMsg(
