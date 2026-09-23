@@ -259,6 +259,26 @@ export function releaseSessionStart(owner: string): void {
   startClaims.delete(owner);
 }
 
+/**
+ * Reopen's variant of `claimSessionStart`.
+ *
+ * Deliberately does NOT check `live.size`: a live incumbent is reopen's
+ * NORMAL precondition (reopen displaces it), so the start-path check would
+ * refuse the very case reopen exists for. It still refuses when another
+ * start/resume/reopen holds the slot, and it fills the same set — so while a
+ * reopen is parked on its trust gate, `claimSessionStart` refuses and
+ * `describeLiveSessionConflict` reports the in-flight message. That is the
+ * whole fix (Cebab-xm95): the reopen's step 5 reads the live set AFTER an
+ * operator-length park, and a run that went live during that park was
+ * crash-displaced.
+ */
+export function claimSessionReopen(owner: string): boolean {
+  if (startClaims.has(owner)) return true;
+  if (startClaims.size > 0) return false;
+  startClaims.add(owner);
+  return true;
+}
+
 export function isSessionStartInFlight(): boolean {
   return startClaims.size > 0;
 }
