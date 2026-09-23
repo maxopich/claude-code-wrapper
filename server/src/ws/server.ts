@@ -1314,7 +1314,11 @@ const openConns = new Set<Conn>();
  *
  * Safe to fan out because the receiving reducer is already scoped: every
  * `multi_agent_*` case bails on `active.sessionId !== msg.sessionId`, so a
- * broadcast is a no-op in every tab that is not tracking that run.
+ * broadcast is a no-op in every tab that is not tracking that run. That
+ * reasoning covers the `multi_agent_*` messages only. The reopen path
+ * (Cebab-0gjz) also fans out `session_superseded` and an operational
+ * notification, which EVERY tab shows (a toast and a bell row) — deliberate:
+ * the operator whose run was displaced may be looking at any tab.
  */
 export function broadcastTo(conns: Iterable<{ ws: WebSocket }>, msg: ServerMsg): void {
   for (const c of conns) send(c.ws, msg);
@@ -2080,6 +2084,14 @@ export async function executeReopenSessionConfirmed(args: {
   adoptResumed: (resumed: ResumedSession) => void;
   resumeCallbacks: Parameters<typeof resumeMultiAgentTarget>[1];
   send: (msg: ServerMsg) => void;
+  /**
+   * Fan-out to every open connection. The displaced run may be live on a
+   * DIFFERENT connection than the reopening one (Cebab-r833), and `send`
+   * reaches only the reopening conn — so the supersede notice and its
+   * operational notification MUST broadcast, or the displaced window gets a
+   * bare `multi_agent_ended` with no explanation (Cebab-0gjz).
+   */
+  broadcast: (msg: ServerMsg) => void;
   /** Test seam: override the diff computer. */
   computeDiff?: (projectPath: string) => Promise<WorkspaceDiff>;
   /** Test seam: override the resume implementation (avoids needing a
@@ -2095,6 +2107,7 @@ export async function executeReopenSessionConfirmed(args: {
     adoptResumed,
     resumeCallbacks: cbs,
     send,
+    broadcast,
   } = args;
   const diff = args.computeDiff ?? computeWorkspaceDiff;
 
@@ -2307,7 +2320,16 @@ export async function executeReopenSessionConfirmed(args: {
         }
       }
       endMultiAgentSession(displacedId, 'crashed');
-      send({
+      // Cebab-0gjz: broadcast, don't `send`. The displaced run may be live on a
+      // DIFFERENT connection than the reopening one, so a conn-bound `send`
+      // reaches the wrong window and leaves the displaced operator with only a
+      // bare `multi_agent_ended` and no supersede explanation. Sticky-inbox
+      // replay cannot cover this path: `buildInboxSnapshot()` is pushed
+      // unsolicited only in `onConnection` and otherwise only on an explicit
+      // `request_inbox_snapshot`, which the client sends only when the operator
+      // opens the bell popover — so an already-open displaced window would see
+      // it only by opening the bell or reloading, never as a toast.
+      broadcast({
         type: 'session_superseded',
         sessionId: displacedId,
         supersedingSessionId: sessionId,
@@ -2328,7 +2350,7 @@ export async function executeReopenSessionConfirmed(args: {
           sticky: true,
           reasonCode: 'operator_reopen',
         },
-        send,
+        broadcast,
       );
       if (!notif.ok) {
         console.error(
@@ -6940,6 +6962,7 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
           gateParticipants: (projectIds) => gateProjectsForSpawn(conn, projectIds),
         },
         send: (m) => send(conn.ws, m),
+        broadcast: broadcastServerMsg,
       });
       return;
     }
