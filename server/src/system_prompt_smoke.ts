@@ -4,39 +4,63 @@
  *   npm --workspace server exec tsx src/system_prompt_smoke.ts
  *
  * WHY THIS IS A SMOKE AND NOT A TEST. It spawns the real `claude` CLI and
- * spends four short model turns, so it needs the operator's credentials and
- * costs quota; CI has neither. Same reason `live_smoke.ts` and
+ * spends about ten short model turns, so it needs the operator's credentials
+ * and costs quota; CI has neither. Same reason `live_smoke.ts` and
  * `mcp_scope_smoke.ts` are scripts.
  *
  * WHY IT EXISTS. `Cebab-ws0.15` attaches a short factual note about unhealthy
- * MCP servers to `Options.systemPrompt`, and that is only safe because an
- * ordinary project turn sets no system prompt. The SDK's normalizer (`pO` in `sdk.mjs` 0.3.220)
- * maps an OMITTED `systemPrompt` to the empty string — an explicit override,
- * not "use the CLI default" — so writing a note there adds a line where there
- * was nothing rather than replacing Claude Code's preset with one sentence.
+ * MCP servers to the system prompt, and `Cebab-0fgx` attaches an untrusted
+ * project's CLAUDE.md the same way. Both are only safe because the text is
+ * APPENDED to Claude Code's preset (`Cebab-6s27`) rather than replacing it, and
+ * both are only useful because they are recomputed on every turn. Each of
+ * those is a claim about SDK behaviour, not about our code, so it is measured
+ * here instead of trusted, and re-measured whenever the SDK or the CLI moves.
+ * Nothing else in this repo spawns a real CLI and inspects what it was told.
  *
- * That reading came from minified vendor code. If it is wrong, the note would
- * silently destroy the agent's entire system prompt, and NOTHING in this repo
- * would notice: no test spawns a real CLI and inspects what it was told. So the
- * claim is measured here instead of trusted, and re-measured whenever the SDK
- * or the CLI moves.
- *
- * HOW IT DISCRIMINATES. The claim is an EQUIVALENCE, so it is measured as one:
- * `omitted` and an explicit `''` must be indistinguishable, and both must
- * differ from the preset. Asking "does omitting give an empty prompt?" directly
- * would need the model to introspect its own instructions, which it cannot do
- * reliably. Asking for the working directory does not: that fact reaches the
- * model only through the preset's dynamic sections, so it is present or it is
- * not, and the model can answer from what it was given.
+ * HOW IT DISCRIMINATES. Asking "what is your system prompt?" would need the
+ * model to introspect its own instructions, which it cannot do reliably.
+ * Asking for the working directory does not: that fact reaches the model only
+ * through the preset's dynamic sections, so it is present or it is not, and
+ * the model can answer from what it was given.
  *
  * The SENTINEL case is the positive control, and it is not optional. Without
  * it, a CLI that ignored `systemPrompt` entirely would report UNKNOWN for every
  * case and read as a clean confirmation of the very thing being tested
- * (`project_gates_pass_vacuously`). RESUMED is the third question the bead
- * asked: whether a system prompt supplied on a `--resume` turn binds, or
- * whether the session's first one sticks.
+ * (`project_gates_pass_vacuously`).
  *
- * Measured 2026-08-20, SDK 0.3.220, CLI 2.1.212:
+ * EVERY ROW THAT CLAIMS TO BE CEBAB GOES THROUGH `buildSdkOptions` UNCHANGED.
+ * A row that hand-writes the preset measures a second implementation of the
+ * thing under test — and the resume row below did exactly that: it passed a
+ * plain string, which Cebab never ships, so it could not see an option Cebab
+ * sets on the preset. Only the rows that are deliberately NOT Cebab's posture
+ * (the string override, the omitted key, the recorded default) modify the
+ * options, and each says so in its label.
+ *
+ * THE RESUME ROWS, and why they now fail the run. Cebab runs one subprocess
+ * per message with `--resume`, and recomputes its append every turn. SDK
+ * 0.3.271 added `systemPrompt.snapshot`; omitted, it means the CLI records the
+ * prompt on a session's first request and re-sends that record on every
+ * resume, so a new append is ignored until compaction. Cebab sets
+ * `snapshot: false`. Three resume rows pin that from three sides:
+ *
+ *   resumed, as shipped        — the claim itself. MUST bind, or the MCP note,
+ *                                 the project rules and the preset's git
+ *                                 status freeze at the first message.
+ *   recorded first, shipped on resume
+ *                              — a session whose first turn WAS recorded (one
+ *                                 started by a build without the fix)
+ *                                 un-freezes. MUST bind.
+ *   recorded both turns        — the control that makes `snapshot: false` the
+ *                                 cause rather than a bystander: the SDK default
+ *                                 should NOT bind. It is observational, because
+ *                                 recording is rolling out per account; where it
+ *                                 is off, this row binds too and the run says it
+ *                                 cannot tell the two apart on this account.
+ *
+ * Each resume row asks arithmetic, not the cwd question, and a fresh-session
+ * control asks the same thing with the same append. See MATH below for why.
+ *
+ * Measured 2026-08-20, SDK 0.3.220, CLI 2.1.212 (the original rows):
  *
  *   omitted (ordinary project turn) → "UNKNOWN"
  *   explicit ''                  → "UNKNOWN"
@@ -45,12 +69,12 @@
  *   resumed + new prompt         → "KUMQUAT"
  *   fresh + same new prompt      → "KUMQUAT"
  *
- * So: omitting `systemPrompt` really is an empty override, the preset really is
- * the thing being declined, and a system prompt supplied on a `--resume` turn
- * DOES bind — Cebab can therefore recompute the note every turn rather than
- * having to fix it at session creation.
+ * Measured 2026-09-23, SDK 0.3.271 (before `snapshot: false`): every first-turn
+ * row as expected, and the resume row answered "4" (2 of 2 runs) where 0.3.251
+ * answered "KUMQUAT" in the same hour. The same run with `snapshot: false`
+ * binds, including when only the resumed turn carries it.
  *
- * THE RESUME ROW COST A SECOND RUN, AND THE FIRST ONE LIED. It originally
+ * THE RESUME ROW COST A SECOND RUN ONCE, AND THE FIRST ONE LIED. It originally
  * re-asked QUESTION on the resumed turn and came back "UNKNOWN", which reads
  * as a clean "resume ignores the new system prompt" — and would have moved the
  * note to session-creation-only, permanently stale for the rest of a session.
@@ -58,7 +82,9 @@
  * context and simply repeated itself. The two explanations are indistinguishable
  * whenever the probe re-asks a question the transcript already answers. Hence
  * MATH below, and the fresh-session control beside it. Keep both: a probe whose
- * negative result has a second, duller explanation is not a measurement.
+ * negative result has a second, duller explanation is not a measurement. For
+ * the same reason every resume row resumes its OWN session: resuming one
+ * session twice would put the first resume's answer in the second's context.
  */
 import crypto from 'node:crypto';
 import fs from 'node:fs';
@@ -79,7 +105,14 @@ const SENTINEL = 'PINEAPPLE';
 /** The append probe's marker. A word no ordinary answer contains, so its
  *  presence can only come from the appended text having reached the model. */
 const APPEND_MARKER = 'MARMALADE';
-const RESUME_SENTINEL = 'KUMQUAT';
+const RESUME_MARKER = 'KUMQUAT';
+
+/** The same phrasing for both markers: it is the one the append row has
+ *  measured the model following, and an append (unlike a string override)
+ *  sits beside the preset, so "begin with" is obeyed where "reply with only"
+ *  competes with everything else the preset says. */
+const appendSaying = (marker: string): string =>
+  `Always begin your reply with the single token ${marker}, then answer normally.`;
 
 /** Answerable only from the preset's dynamic sections. "Do not use any tools"
  *  matters: with a Bash call the model could discover the cwd regardless, which
@@ -95,14 +128,30 @@ const QUESTION =
  * A resumed turn already carries the previous turn's Q&A, so re-asking QUESTION
  * makes "the new system prompt was ignored" and "the model simply repeated its
  * last answer" produce the identical output. Arithmetic breaks the tie: `4` is
- * what a model with no system prompt says, the sentinel is what one carrying
- * the new prompt says, and nothing in the prior context suggests either.
+ * what a model that never saw the new append says, the marker is what one
+ * carrying it says, and nothing in the prior context suggests either.
  */
 const MATH = 'What is 2+2? Reply with only the number. Do not use any tools. Do not explain.';
 
+/**
+ * Which system prompt a spawn carries.
+ *
+ *   shipped  — `buildSdkOptions` exactly as a Cebab turn ships it, with the
+ *              append passed the way Cebab passes it (`systemPromptAppend`).
+ *   recorded — the same object minus `snapshot`, i.e. the SDK's own default.
+ *              What Cebab would send if the `snapshot: false` line went away.
+ *   override — a caller-supplied value (the string-override row only).
+ *   omitted  — no `systemPrompt` key at all. Cebab never ships this.
+ */
+type Shape =
+  | { kind: 'shipped'; append?: string }
+  | { kind: 'recorded'; append?: string }
+  | { kind: 'override'; systemPrompt: Options['systemPrompt'] }
+  | { kind: 'omitted' };
+
 type Case = {
   label: string;
-  systemPrompt?: Options['systemPrompt'];
+  shape: Shape;
   expect: string;
   /**
    * `Cebab-ygs4`: the token that must appear for this row to be a usable
@@ -134,27 +183,21 @@ type Case = {
  */
 const CONTROL_ATTEMPTS = 3;
 
+const SHIPPED_LABEL = 'shipped preset';
+
 const CASES: Case[] = [
-  // THE POSTURE CEBAB SHIPS (`Cebab-6s27`). Every ordinary project turn now
-  // states this explicitly rather than omitting the option and inheriting
-  // whatever the SDK's normalizer does that release.
-  {
-    label: "preset 'claude_code'",
-    systemPrompt: { type: 'preset', preset: 'claude_code' },
-    expect: '<cwd>',
-  },
+  // THE POSTURE CEBAB SHIPS (`Cebab-6s27`): the preset, stated explicitly, via
+  // `buildSdkOptions` untouched. Its session is also the one the first resume
+  // row resumes, so that row measures a conversation Cebab really started.
+  { label: SHIPPED_LABEL, shape: { kind: 'shipped' }, expect: '<cwd>' },
   // THE SAFETY PROPERTY, and the reason `systemPromptAppend` exists as its own
   // field. Cebab's text must ADD to the preset, not replace it — so this row
   // must contain BOTH the marker and a working directory. If it ever carries
   // the marker alone, the MCP status note is once again discarding the agent's
   // instructions, which is exactly the defect this design removed.
   {
-    label: 'preset + append',
-    systemPrompt: {
-      type: 'preset',
-      preset: 'claude_code',
-      append: `Always begin your reply with the single token ${APPEND_MARKER}, then answer normally.`,
-    },
+    label: 'shipped preset + append',
+    shape: { kind: 'shipped', append: appendSaying(APPEND_MARKER) },
     expect: `${APPEND_MARKER} + <cwd>`,
   },
   // WHY THE TWO FIELDS ARE SEPARATE. A plain string REPLACES everything, so
@@ -163,39 +206,68 @@ const CASES: Case[] = [
   // fails, no row above means anything.
   {
     label: 'sentinel string',
-    systemPrompt: `Whatever you are asked, reply with exactly the single word ${SENTINEL} and nothing else.`,
+    shape: {
+      kind: 'override',
+      systemPrompt: `Whatever you are asked, reply with exactly the single word ${SENTINEL} and nothing else.`,
+    },
     expect: SENTINEL,
     control: SENTINEL,
   },
-  // OBSERVATIONAL, not a posture Cebab relies on any more, and recorded for
-  // exactly that reason. Omission used to be believed equivalent to an empty
-  // override; it stopped being so between two SDK releases and took a
-  // documented safety property with it. Kept so the next reader can see whether
-  // it has moved again — never so anything can depend on it.
-  { label: 'omitted (nothing Cebab ships)', expect: '(observational)' },
+  // OBSERVATIONAL, not a posture Cebab relies on, and recorded for exactly that
+  // reason. Omission used to be believed equivalent to an empty override; it
+  // stopped being so between two SDK releases and took a documented safety
+  // property with it. This row used to be labelled "omitted" while running
+  // `buildSdkOptions`' preset — which is always set — so it measured the preset
+  // a second time. It now removes the key, so it observes what it names.
+  { label: 'omitted (Cebab never ships)', shape: { kind: 'omitted' }, expect: '(observational)' },
 ];
+
+/** Apply a `Shape` to options `buildSdkOptions` produced. */
+function applyShape(options: Options, shape: Shape): void {
+  switch (shape.kind) {
+    case 'shipped':
+      return;
+    case 'recorded': {
+      const sp = options.systemPrompt;
+      if (typeof sp !== 'object' || Array.isArray(sp) || sp.type !== 'preset') {
+        throw new Error(`expected buildSdkOptions to ship a preset, got ${JSON.stringify(sp)}`);
+      }
+      // Whatever the shipped object says about `snapshot`, the recorded shape
+      // says nothing — so this stays the SDK default even if the shipped line
+      // is removed, and the rows that compare the two stay meaningful.
+      const copy = { ...sp };
+      delete copy.snapshot;
+      options.systemPrompt = copy;
+      return;
+    }
+    case 'override':
+      options.systemPrompt = shape.systemPrompt;
+      return;
+    case 'omitted':
+      delete options.systemPrompt;
+      return;
+  }
+}
 
 /**
  * Run one turn and return its final text, or null.
  *
- * The options come from `buildSdkOptions` rather than being hand-written, so
- * the subject row really is the object a Cebab turn ships — a hand-built
- * lookalike would be measuring a second implementation of the thing under
- * test. Only `systemPrompt` is overridden, and only for the cases that need a
- * shape (`string[]`, the preset object) that `RunOptions` deliberately refuses.
- *
  * Every tool is denied: the question needs none, and a run that reached for
  * Bash would report the cwd from the tool's answer instead of the prompt's,
- * which would make all four rows agree and mean nothing.
+ * which would make the rows agree and mean nothing.
  */
 async function ask(opts: {
   cwd: string;
+  shape: Shape;
   question?: string;
   sessionId?: string;
   resume?: string;
-  systemPrompt?: Options['systemPrompt'];
 }): Promise<string | null> {
   const prompt = opts.question ?? QUESTION;
+  const append =
+    (opts.shape.kind === 'shipped' || opts.shape.kind === 'recorded') && opts.shape.append
+      ? opts.shape.append
+      : undefined;
   const options = buildSdkOptions({
     cwd: opts.cwd,
     prompt,
@@ -204,8 +276,9 @@ async function ask(opts: {
     canUseTool: async () => ({ behavior: 'deny', message: 'no tools in this measurement' }),
     ...(opts.sessionId ? { sessionId: opts.sessionId } : {}),
     ...(opts.resume ? { resume: opts.resume } : {}),
+    ...(append ? { systemPromptAppend: append } : {}),
   });
-  if (opts.systemPrompt !== undefined) options.systemPrompt = opts.systemPrompt;
+  applyShape(options, opts.shape);
 
   const q = query({ prompt, options });
   try {
@@ -220,20 +293,40 @@ async function ask(opts: {
   return null;
 }
 
+/**
+ * A first turn, then a resumed turn in the SAME session carrying the resume
+ * marker's append. Returns the resumed turn's answer. The first turn asks the
+ * cwd question so the transcript holds nothing that suggests either answer.
+ */
+async function resumePair(cwd: string, first: Shape, resumed: Shape): Promise<string | null> {
+  const sessionId = crypto.randomUUID();
+  await ask({ cwd, sessionId, shape: first });
+  return ask({ cwd, question: MATH, resume: sessionId, shape: resumed });
+}
+
 async function main(): Promise<void> {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-sysprompt-cwd-'));
   const rows: { label: string; answer: string; expect: string }[] = [];
-  let subjectSession: string | undefined;
+  const record = (label: string, answer: string | null, expect: string): void => {
+    rows.push({ label, answer: answer ?? '<no result>', expect });
+    console.log(`${label.padEnd(36)} → ${JSON.stringify(answer)}`);
+  };
+  const resumeAppend = appendSaying(RESUME_MARKER);
+  let shippedSession: string | undefined;
 
-  console.log(`[sysprompt] cwd under test: ${dir}\n`);
+  console.log(`[sysprompt] cwd under test: ${dir}`);
+  // Printed so a run's log says what was actually measured. If this line does
+  // not carry `"snapshot":false`, the resume rows below are measuring a build
+  // without the fix.
+  console.log(
+    `[sysprompt] shipped systemPrompt: ${JSON.stringify(
+      buildSdkOptions({ cwd: dir, prompt: '' }).systemPrompt,
+    )}\n`,
+  );
   try {
     for (const c of CASES) {
       let sessionId = crypto.randomUUID();
-      let answer = await ask({
-        cwd: dir,
-        sessionId,
-        ...(c.systemPrompt !== undefined ? { systemPrompt: c.systemPrompt } : {}),
-      });
+      let answer = await ask({ cwd: dir, sessionId, shape: c.shape });
       // `Cebab-ygs4`: a CONTROL row gets up to `CONTROL_ATTEMPTS` asks. Each
       // retry is announced — a silent retry would hide a model that is
       // complying only one time in three, which is itself worth seeing.
@@ -245,64 +338,76 @@ async function main(): Promise<void> {
         attempt += 1
       ) {
         console.log(
-          `${''.padEnd(28)}   (control did not answer ${c.control}; attempt ${attempt} of ${CONTROL_ATTEMPTS})`,
+          `${''.padEnd(36)}   (control did not answer ${c.control}; attempt ${attempt} of ${CONTROL_ATTEMPTS})`,
         );
         sessionId = crypto.randomUUID();
-        answer = await ask({
-          cwd: dir,
-          sessionId,
-          ...(c.systemPrompt !== undefined ? { systemPrompt: c.systemPrompt } : {}),
-        });
+        answer = await ask({ cwd: dir, sessionId, shape: c.shape });
       }
-      if (c.label.startsWith('omitted')) subjectSession = sessionId;
-      rows.push({ label: c.label, answer: answer ?? '<no result>', expect: c.expect });
-      console.log(`${c.label.padEnd(28)} → ${JSON.stringify(answer)}`);
+      if (c.label === SHIPPED_LABEL) shippedSession = sessionId;
+      record(c.label, answer, c.expect);
     }
 
-    // The bead's third question: does a system prompt supplied on a --resume
-    // turn bind, or does the session's original one stick? Answered with the
-    // arithmetic probe so a repeated answer cannot masquerade as a verdict, and
-    // paired with a fresh-session control so "ignored on resume" cannot really
-    // be "this prompt never worked".
-    const resumeSystemPrompt = `Whatever you are asked, reply with exactly the single word ${RESUME_SENTINEL} and nothing else.`;
-    if (subjectSession) {
+    // THE CLAIM: a resumed Cebab turn honours the append it was given.
+    if (shippedSession) {
       const answer = await ask({
         cwd: dir,
         question: MATH,
-        resume: subjectSession,
-        systemPrompt: resumeSystemPrompt,
+        resume: shippedSession,
+        shape: { kind: 'shipped', append: resumeAppend },
       });
-      rows.push({
-        label: 'resumed + new prompt',
-        answer: answer ?? '<no result>',
-        expect: RESUME_SENTINEL,
-      });
-      console.log(`${'resumed + new prompt'.padEnd(28)} → ${JSON.stringify(answer)}`);
+      record('resumed, as shipped', answer, RESUME_MARKER);
     }
-    const control = await ask({
-      cwd: dir,
-      question: MATH,
-      sessionId: crypto.randomUUID(),
-      systemPrompt: resumeSystemPrompt,
-    });
-    rows.push({
-      label: 'fresh + same new prompt',
-      answer: control ?? '<no result>',
-      expect: RESUME_SENTINEL,
-    });
-    console.log(`${'fresh + same new prompt'.padEnd(28)} → ${JSON.stringify(control)}`);
+    // THE MIGRATION: a session whose first turn WAS recorded (one started by
+    // a build without `snapshot: false`) un-freezes once the resumed turn
+    // carries the shipped options.
+    record(
+      'recorded first, shipped on resume',
+      await resumePair(dir, { kind: 'recorded' }, { kind: 'shipped', append: resumeAppend }),
+      RESUME_MARKER,
+    );
+    // THE CAUSE: identical, minus `snapshot` on both turns. Should NOT bind on
+    // an account where recording is on.
+    record(
+      'recorded both turns (control)',
+      await resumePair(dir, { kind: 'recorded' }, { kind: 'recorded', append: resumeAppend }),
+      `not ${RESUME_MARKER} (where recording is on)`,
+    );
+    // The fresh-session control: the same append, asked the same question, in
+    // a session with nothing to resume. If this does not carry the marker, no
+    // resume row above says anything about resume.
+    let fresh: string | null = null;
+    for (let attempt = 1; attempt <= CONTROL_ATTEMPTS; attempt += 1) {
+      if (attempt > 1) {
+        console.log(
+          `${''.padEnd(36)}   (control did not answer ${RESUME_MARKER}; attempt ${attempt} of ${CONTROL_ATTEMPTS})`,
+        );
+      }
+      fresh = await ask({
+        cwd: dir,
+        question: MATH,
+        sessionId: crypto.randomUUID(),
+        shape: { kind: 'shipped', append: resumeAppend },
+      });
+      if ((fresh ?? '').toUpperCase().includes(RESUME_MARKER)) break;
+    }
+    record('fresh + same append (control)', fresh, RESUME_MARKER);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   }
 
-  const by = (k: string) => rows.find((r) => r.label.startsWith(k))?.answer ?? '';
-  const sentinelWorked = by('sentinel').includes(SENTINEL);
-  const presetKnowsCwd = by("preset 'claude").includes('/');
-  const appended = by('preset + append');
+  const by = (label: string): string => rows.find((r) => r.label === label)?.answer ?? '';
+  const has = (label: string, marker: string): boolean => by(label).toUpperCase().includes(marker);
+  const sentinelWorked = by('sentinel string').includes(SENTINEL);
+  const presetKnowsCwd = by(SHIPPED_LABEL).includes('/');
+  const appended = by('shipped preset + append');
   const appendReached = appended.toUpperCase().includes(APPEND_MARKER);
   const appendKeptPreset = appended.includes('/');
-  const overrideReplaces = !by('sentinel').includes('/');
+  const overrideReplaces = !by('sentinel string').includes('/');
+  const freshBinds = has('fresh + same append (control)', RESUME_MARKER);
+  const resumeBinds = has('resumed, as shipped', RESUME_MARKER);
+  const recordedUnfreezes = has('recorded first, shipped on resume', RESUME_MARKER);
+  const defaultFreezes = !has('recorded both turns (control)', RESUME_MARKER);
 
   console.log('\n[sysprompt] verdict');
   if (!sentinelWorked) {
@@ -336,21 +441,15 @@ async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
-  console.log(`  control: sentinel honoured           → yes`);
-  console.log(`  preset supplies the cwd              → yes`);
-  console.log(`  append REACHES the model             → ${appendReached ? 'yes' : 'NO'}`);
-  console.log(`  append KEEPS the preset beside it    → ${appendKeptPreset ? 'yes' : 'NO'}`);
-  console.log(`  a string override replaces the preset → ${overrideReplaces ? 'yes' : 'NO'}`);
-  const resumeBinds = by('resumed').includes(RESUME_SENTINEL);
-  const freshBinds = by('fresh +').includes(RESUME_SENTINEL);
-  console.log(`  control: same prompt on a FRESH       → ${freshBinds ? 'yes' : 'NO'}`);
-  console.log(`  resumed turn honours a new prompt    → ${resumeBinds ? 'yes' : 'NO'}`);
-  if (!freshBinds) {
-    console.error(
-      '  (the resume row is uninterpretable: the prompt it used did not bind on a ' +
-        'fresh session either, so its answer says nothing about resume)',
-    );
-  }
+  console.log(`  control: sentinel honoured                 → yes`);
+  console.log(`  preset supplies the cwd                    → yes`);
+  console.log(`  append REACHES the model                   → ${appendReached ? 'yes' : 'NO'}`);
+  console.log(`  append KEEPS the preset beside it          → ${appendKeptPreset ? 'yes' : 'NO'}`);
+  console.log(`  a string override replaces the preset      → ${overrideReplaces ? 'yes' : 'NO'}`);
+  console.log(`  control: same append on a FRESH session    → ${freshBinds ? 'yes' : 'NO'}`);
+  console.log(`  resumed turn honours a new append          → ${resumeBinds ? 'yes' : 'NO'}`);
+  console.log(`  a recorded session un-freezes on resume    → ${recordedUnfreezes ? 'yes' : 'NO'}`);
+  console.log(`  control: the SDK default freezes it        → ${defaultFreezes ? 'yes' : 'no'}`);
 
   if (!appendReached || !appendKeptPreset) {
     console.error(
@@ -373,9 +472,58 @@ async function main(): Promise<void> {
     process.exitCode = 1;
     return;
   }
+  if (!freshBinds) {
+    console.error(
+      `\n  FAILED (control): after ${CONTROL_ATTEMPTS} attempts the append did not bind on a ` +
+        'FRESH session either, so the resume rows are uninterpretable: their answers ' +
+        'say nothing about resume.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (!resumeBinds) {
+    console.error(
+      '\n  STOP: a resumed Cebab turn IGNORED the append it was given, while the same ' +
+        'append bound on a fresh session. Every message after the first is a resume, ' +
+        "so the MCP status note, an untrusted project's CLAUDE.md and the preset's " +
+        'git status are frozen at the first message of every conversation. Check that ' +
+        '`buildSdkOptions` still sends `snapshot: false` on the preset (the line above ' +
+        'prints what it sends), and whether the SDK changed what that option means.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (!recordedUnfreezes) {
+    console.error(
+      '\n  STOP: a session whose first turn was RECORDED stayed frozen even though the ' +
+        'resumed turn sent `snapshot: false`. New conversations are fine, but any ' +
+        'session a build without the fix started keeps its first-turn prompt until it ' +
+        'is compacted. That is a claim the fix was shipped on; do not ship on it again ' +
+        'without saying it has changed.',
+    );
+    process.exitCode = 1;
+    return;
+  }
+  if (defaultFreezes) {
+    console.log(
+      '\n  `snapshot: false` is what makes the resume row hold: the same pair of turns ' +
+        'without it froze the prompt on this account.',
+    );
+  } else {
+    // Not a failure. Recording is rolling out per account, and where it is off
+    // the option "is accepted and has no effect" (the SDK's own doc). The
+    // claim that matters — a resumed turn binds — held; only its cause could
+    // not be shown here.
+    console.log(
+      '\n  NOTE: this account does not record system prompts yet (the SDK is rolling ' +
+        'that out per account), so the SDK default bound on resume too. The resume row ' +
+        'holds, but this run cannot show that `snapshot: false` is the reason.',
+    );
+  }
   console.log(
     '\n  Ordinary Cebab project turns run the claude_code preset, stated explicitly, ' +
-      "with Cebab's own text APPENDED. Appending cannot replace the agent's instructions.",
+      "with Cebab's own text APPENDED and re-rendered on every turn. Appending cannot " +
+      "replace the agent's instructions.",
   );
 }
 

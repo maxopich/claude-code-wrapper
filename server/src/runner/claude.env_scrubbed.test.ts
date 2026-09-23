@@ -85,6 +85,8 @@ describe('getScrubbedEnvVars — name-only env audit', () => {
       'CLAUDE_CODE_OAUTH_TOKEN',
       'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR',
       'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR',
+      'CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR',
+      'CLAUDE_BG_AUTH_SNAPSHOT_PATH',
       'AWS_BEARER_TOKEN_BEDROCK',
       'ANTHROPIC_FOUNDRY_API_KEY',
       'ANTHROPIC_FOUNDRY_AUTH_TOKEN',
@@ -165,36 +167,93 @@ describe('[security] the scrub list is derived from the CLI, not from a copy of 
   }
 
   /**
-   * The credential-bearing file-descriptor env vars, taken from the bundle's
-   * env-name registry. `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR` and
-   * `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` each name a numbered fd the CLI
-   * reads a secret from — an API key / OAuth token — which overrides the
-   * OAuth subscription just as the inline `ANTHROPIC_API_KEY` /
-   * `CLAUDE_CODE_OAUTH_TOKEN` would (`Cebab-6fax.23`).
+   * The credential file descriptors the CLI knows that are deliberately NOT
+   * scrubbed, each with its reason. Every OTHER `CLAUDE_CODE_*_FILE_DESCRIPTOR`
+   * the bundle names must be on the scrub list.
    *
-   * These do NOT live in the `CI` credential array the backend-switch walk
-   * anchors on; they sit in the bundle's exported env-name map. So this is a
-   * second extraction rather than a reuse of the one above.
-   *
-   * Anchored on `API_KEY|OAUTH_TOKEN` — the two secret-bearing kinds — which
-   * deliberately EXCLUDES `CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR`: that is
-   * transport auth, not an API-key/subscription override, and is out of this
-   * bead's scope (tracked separately). Including `API_KEY` in the pattern is not
-   * circular the way a hand-copied expected list would be: the bundle is still
-   * the source of truth for whether the CLI KNOWS the var — if a release drops
-   * it, the anti-vacuity floor below reddens ("re-derive"), not the security
-   * assertion.
+   * Exclusion by a named, reasoned exception is the whole point of the shape.
+   * The extraction used to be an ALLOW-list of kinds, `API_KEY|OAUTH_TOKEN`,
+   * and SDK 0.3.271 added `CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR` — a third
+   * credential the CLI reads from an fd at startup — which that pattern could
+   * not see. The test stayed green while the name went unscrubbed. Now a new fd
+   * reddens until someone either scrubs it or writes down here why not.
    */
-  function credentialFdsFromBundle(): string[] {
-    const src = sdkBundle();
-    return [...new Set(src.match(/CLAUDE_CODE_(?:API_KEY|OAUTH_TOKEN)_FILE_DESCRIPTOR/g) ?? [])];
+  const FD_NOT_SCRUBBED: Readonly<Record<string, string>> = {
+    // The CLI reads a "session ingress token" from it for its own
+    // remote-session transport. Not an API credential that replaces the
+    // subscription; out of this list's scope and tracked separately.
+    CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR: 'remote-session transport token',
+  };
+
+  /**
+   * Every `CLAUDE_CODE_*_FILE_DESCRIPTOR` literal in `src`, minus the reasoned
+   * exceptions above. Pure over its input so the cases below can feed it text
+   * in both directions without a bundle.
+   *
+   * These names do NOT live in the `CI` credential array the backend-switch
+   * walk anchors on; they sit in the bundle's exported env-name map (and in a
+   * four-name array the CLI groups them in). So this is a second extraction
+   * rather than a reuse of the one above.
+   *
+   * `\b` on both ends is what keeps a longer identifier from being cut down to
+   * a match: `CLAUDE_CODE_FILE_DESCRIPTOR_LIMIT` is not an fd name, and neither
+   * is anything that merely CONTAINS one.
+   */
+  function credentialFdNames(src: string): string[] {
+    const all = src.match(/\bCLAUDE_CODE_[A-Z0-9_]+_FILE_DESCRIPTOR\b/g) ?? [];
+    return [...new Set(all)].filter((name) => !(name in FD_NOT_SCRUBBED));
   }
+
+  function credentialFdsFromBundle(): string[] {
+    return credentialFdNames(sdkBundle());
+  }
+
+  test('the fd extraction would have caught the gateway fd, and catches the next one', () => {
+    // The too-NARROW direction, which is the bug this shape exists to fix. A
+    // name of a kind nobody has listed yet must come out of the extraction, or
+    // the security assertion below has nothing to redden on.
+    const text =
+      '["CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR","CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR",' +
+      '"CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR"],x={CLAUDE_CODE_SOME_FUTURE_SECRET_FILE_DESCRIPTOR:()=>y}';
+    expect(credentialFdNames(text).sort()).toEqual([
+      'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR',
+      'CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR',
+      'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR',
+      'CLAUDE_CODE_SOME_FUTURE_SECRET_FILE_DESCRIPTOR',
+    ]);
+    // And the pattern it replaced really was blind to it — the reason for the
+    // change, pinned so it cannot be "simplified" back.
+    expect(text.match(/CLAUDE_CODE_(?:API_KEY|OAUTH_TOKEN)_FILE_DESCRIPTOR/g)).not.toContain(
+      'CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR',
+    );
+  });
+
+  test('the fd extraction does not sweep in what is not a credential fd', () => {
+    // The too-WIDE direction. A reasoned exclusion stays excluded, a longer
+    // identifier that merely contains the suffix is not cut down to a match,
+    // and an ordinary credential name without the suffix is not this
+    // extraction's business (the hand-listed test above pins those).
+    const text =
+      '"CLAUDE_CODE_WEBSOCKET_AUTH_FILE_DESCRIPTOR","CLAUDE_CODE_FILE_DESCRIPTOR_LIMIT",' +
+      '"XCLAUDE_CODE_API_KEY_FILE_DESCRIPTOR","CLAUDE_CODE_API_KEY_FILE_DESCRIPTORS",' +
+      '"ANTHROPIC_API_KEY","CLAUDE_CODE_OAUTH_TOKEN"';
+    expect(credentialFdNames(text)).toEqual([]);
+  });
+
+  test('every reasoned fd exclusion names something the CLI still knows', () => {
+    // An exclusion for a name the bundle no longer carries is dead weight that
+    // reads as a decision. If the CLI drops it, drop it here.
+    const src = sdkBundle();
+    for (const name of Object.keys(FD_NOT_SCRUBBED)) expect(src).toContain(`"${name}"`);
+  });
 
   test('[security] every credential FILE_DESCRIPTOR the CLI knows is scrubbed', () => {
     // `CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR` was absent from the list until
     // `Cebab-6fax.23`, so a stray `export CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR=N`
     // pointed the CLI at an fd carrying an API key and every spawn authenticated
     // as that key while `getScrubbedEnvVars()` reported nothing to strip.
+    // `CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR` (SDK 0.3.271) was the same
+    // gap again, one release later, hidden by the old extraction's pattern.
     const found = credentialFdsFromBundle();
 
     // Anti-vacuity floor, INLINE rather than its own test on purpose: a
@@ -224,6 +283,19 @@ describe('[security] the scrub list is derived from the CLI, not from a copy of 
     for (const name of credentialFdsFromBundle()) {
       expect(getScrubbedEnvVars({ [name]: '3' })).toEqual([name]);
     }
+  });
+
+  test('[security] the handed-off token FILE the CLI consumes is scrubbed too', () => {
+    // `CLAUDE_BG_AUTH_SNAPSHOT_PATH` is the same handoff as the fds above, by
+    // path instead of by descriptor: the CLI reads the JSON file it names at
+    // startup, takes its `accessToken` as the OAuth token (or `gatewayToken` as
+    // the gateway token), and deletes the file. It is not an fd, so the
+    // extraction above cannot see it; it is pinned by name, and the bundle
+    // check keeps the entry from outliving the CLI's knowledge of it.
+    const name = 'CLAUDE_BG_AUTH_SNAPSHOT_PATH';
+    expect(sdkBundle()).toContain(`"${name}"`);
+    expect(SCRUBBED_ENV_VAR_NAMES).toContain(name);
+    expect(getScrubbedEnvVars({ [name]: '/tmp/snapshot.json' })).toEqual([name]);
   });
 
   test('the extraction actually found the CLI list (anti-vacuity floor)', () => {
