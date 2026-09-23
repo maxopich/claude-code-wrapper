@@ -77,11 +77,8 @@ export function LogTable(props: {
                     </span>
                   )}
                   {row.redactedFields && row.redactedFields.length > 0 && (
-                    <span
-                      className="logs-row-redacted-badge"
-                      title={`${row.redactedFields.length} field(s) masked: ${row.redactedFields.join(', ')}`}
-                    >
-                      redacted
+                    <span className="logs-row-redacted-badge" title={redactedBadgeTitle(row)}>
+                      payload redacted
                     </span>
                   )}
                 </span>
@@ -114,6 +111,25 @@ function formatTime(ts: number): string {
   const ss = String(d.getSeconds()).padStart(2, '0');
   const ms = String(d.getMilliseconds()).padStart(3, '0');
   return `${hh}:${mm}:${ss}.${ms}`;
+}
+
+/**
+ * The "payload redacted" badge covers the row's `raw` payload ONLY — the
+ * `summary` beside it is never run through the redactor and is shown verbatim.
+ * `Cebab-l9hg`: for a Bash mutation row `summary` is the whole command, so the
+ * old bare "redacted" word overstated its reach — it read as if the command
+ * itself had been masked. The badge now names what it covers (`payload`) and
+ * the tooltip says the command/summary above is shown as-is. Keeping the
+ * command verbatim is deliberate: the operator must see exactly what ran, and
+ * the classifier states that twice (`shared/src/mutation.ts`).
+ */
+function redactedBadgeTitle(row: LogRow): string {
+  const fields = row.redactedFields?.join(', ') ?? '';
+  const isBashMutation = (row.kind === 'tool' || row.kind === 'artifact') && row.status === 'Bash';
+  const verbatimClause = isBashMutation
+    ? 'The command above is shown exactly as it ran.'
+    : 'The summary above is shown as-is.';
+  return `Secrets in the raw event are masked (${fields}). ${verbatimClause}`;
 }
 
 /** Mirror of `LogsModal.cssId` — kept local so this component is self-
