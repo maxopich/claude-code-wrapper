@@ -299,6 +299,7 @@ describe('ReopenSessionModal — failed state', () => {
       'typed_confirmation_required',
       'chain_reconstruction_unsupported',
       'reactivate_failed',
+      'start_in_flight',
     ] as const;
     for (const reason of reasons) {
       renderModal({ kind: 'failed', sessionId: 's', reason, message: 'msg' });

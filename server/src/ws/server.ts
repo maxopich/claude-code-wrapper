@@ -230,6 +230,7 @@ import { canReconstruct } from '../bus/reconstruct.js';
 import { busIterationDir, sessionPathsFromFolder } from '../bus/paths.js';
 import {
   claimSessionStart,
+  claimSessionReopen,
   getLiveSession,
   hasLiveSession,
   isSessionStartInFlight,
@@ -6940,36 +6941,59 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       return;
     }
     case 'reopen_session_confirmed': {
-      // Cluster D Phase 5c (spec §6.3 / BE-D20, BE-D21): commit step.
-      // Body delegated to `executeReopenSessionConfirmed` for testability.
-      // The conn-bound side effects (detach current active, set
-      // `conn.multiAgent`) ride a small bridge object so the helper
-      // doesn't need a full Conn type.
-      await executeReopenSessionConfirmed({
-        sessionId: msg.sessionId,
-        acknowledgedWorkspaceDiff: msg.acknowledgedWorkspaceDiff === true,
-        typedConfirmation: msg.typedConfirmation,
-        currentActiveSessionId: conn.multiAgent?.sessionId ?? null,
-        detachCurrentActive: () => {
-          if (conn.multiAgent) {
-            conn.multiAgent.detach();
-            conn.multiAgent = null;
-          }
-        },
-        adoptResumed: (resumed) => {
-          emitResumedSession(conn, resumed);
-        },
-        resumeCallbacks: {
-          ...resumeCallbacks(conn),
-          hopBudget: resolveHopBudget(),
-          maxTurns: resolveMaxTurns(),
-          // [security] `Cebab-faoa`: Reopen is operator-initiated (they cleared
-          // the confirmation modal), so gate + prompt exactly like a start.
-          gateParticipants: (projectIds) => gateProjectsForSpawn(conn, projectIds),
-        },
-        send: (m) => send(conn.ws, m),
-        broadcast: broadcastServerMsg,
-      });
+      // `Cebab-xm95`: the process-wide slot, taken before reopen does any
+      // work. Step 5 reads `listLiveSessionIds()` AFTER step 4 parks on the
+      // MCP trust gate, so without this a run started by another window
+      // during the park was reached by the displacement and crashed.
+      // `claimSessionReopen` (not `claimSessionStart`) because a live
+      // incumbent is reopen's normal precondition.
+      const reopenClaimId = randomUUID();
+      if (!claimSessionReopen(reopenClaimId)) {
+        send(conn.ws, {
+          type: 'reopen_session_failed',
+          sessionId: msg.sessionId,
+          reason: 'start_in_flight',
+          message:
+            'Another multi-agent session is being started in this Cebab — possibly from another browser window. Wait for it to finish, then reopen again.',
+        });
+        return;
+      }
+      conn.multiAgentStartClaim = reopenClaimId;
+      try {
+        // Cluster D Phase 5c (spec §6.3 / BE-D20, BE-D21): commit step.
+        // Body delegated to `executeReopenSessionConfirmed` for testability.
+        // The conn-bound side effects (detach current active, set
+        // `conn.multiAgent`) ride a small bridge object so the helper
+        // doesn't need a full Conn type.
+        await executeReopenSessionConfirmed({
+          sessionId: msg.sessionId,
+          acknowledgedWorkspaceDiff: msg.acknowledgedWorkspaceDiff === true,
+          typedConfirmation: msg.typedConfirmation,
+          currentActiveSessionId: conn.multiAgent?.sessionId ?? null,
+          detachCurrentActive: () => {
+            if (conn.multiAgent) {
+              conn.multiAgent.detach();
+              conn.multiAgent = null;
+            }
+          },
+          adoptResumed: (resumed) => {
+            emitResumedSession(conn, resumed);
+          },
+          resumeCallbacks: {
+            ...resumeCallbacks(conn),
+            hopBudget: resolveHopBudget(),
+            maxTurns: resolveMaxTurns(),
+            // [security] `Cebab-faoa`: Reopen is operator-initiated (they cleared
+            // the confirmation modal), so gate + prompt exactly like a start.
+            gateParticipants: (projectIds) => gateProjectsForSpawn(conn, projectIds),
+          },
+          send: (m) => send(conn.ws, m),
+          broadcast: broadcastServerMsg,
+        });
+      } finally {
+        releaseSessionStart(reopenClaimId);
+        conn.multiAgentStartClaim = null;
+      }
       return;
     }
     case 'list_templates': {

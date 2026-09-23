@@ -2,7 +2,9 @@ import { afterEach, describe, expect, test } from 'vitest';
 
 import {
   claimSessionStart,
+  claimSessionReopen,
   isSessionStartInFlight,
+  listLiveSessionIds,
   registerLiveSession,
   releaseSessionStart,
   unregisterLiveSession,
@@ -161,5 +163,59 @@ describe('claimSessionStart — the gap between checking and registering [securi
   test('a live session blocks a claim, so the two guards cannot disagree', () => {
     registerFakeLive('guard-a');
     expect(claimSessionStart(A)).toBe(false);
+  });
+});
+
+// `Cebab-xm95` [security]. Reopen displaces a live incumbent, so a live
+// session is its NORMAL precondition — the start path's `live.size` check would
+// refuse the very case reopen exists for. `claimSessionReopen` therefore skips
+// that check but shares the same `startClaims` set, so a reopen parked on its
+// trust gate still blocks a concurrent start (which is what step 5's later
+// `listLiveSessionIds()` read used to leave a hole for).
+describe('claimSessionReopen — the reopen-scoped start claim [security]', () => {
+  const R = 'reopen-r';
+  const S = 'start-s';
+
+  afterEach(() => {
+    releaseSessionStart(R);
+    releaseSessionStart(S);
+  });
+
+  test('empty registry, no claims → the reopen claim is granted', () => {
+    expect(listLiveSessionIds()).toEqual([]);
+    expect(claimSessionReopen(R)).toBe(true);
+  });
+
+  test('a live incumbent does NOT block the reopen claim, but DOES block a start', () => {
+    // The pair that proves the two functions differ (anti-vacuity): a
+    // `claimSessionReopen` that just delegated to `claimSessionStart` would
+    // return false here and redden.
+    registerFakeLive('guard-a');
+    expect(claimSessionReopen(R)).toBe(true);
+    expect(claimSessionStart(S)).toBe(false);
+  });
+
+  test('while a reopen claim is held on an EMPTY registry, a start is refused and a start is in flight', () => {
+    // `listLiveSessionIds()` is `[]`, so the refusal below can ONLY come from
+    // the claim the reopen holds — not from a live incumbent.
+    expect(claimSessionReopen(R)).toBe(true);
+    expect(listLiveSessionIds()).toEqual([]);
+    expect(claimSessionStart(S)).toBe(false);
+    expect(isSessionStartInFlight()).toBe(true);
+  });
+
+  test('while a start claim is held, a reopen claim is refused', () => {
+    expect(claimSessionStart(S)).toBe(true);
+    expect(claimSessionReopen(R)).toBe(false);
+  });
+
+  test('releasing the reopen claim frees the slot; a foreign-token release is a no-op', () => {
+    expect(claimSessionReopen(R)).toBe(true);
+    // A release with a token that does not hold the claim must not free it.
+    releaseSessionStart(S);
+    expect(isSessionStartInFlight()).toBe(true);
+    releaseSessionStart(R);
+    expect(isSessionStartInFlight()).toBe(false);
+    expect(claimSessionStart(S)).toBe(true);
   });
 });

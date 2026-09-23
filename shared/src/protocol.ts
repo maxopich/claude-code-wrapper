@@ -5042,7 +5042,9 @@ export type ReopenSessionFailureReason =
   /** Chain-mode session whose live handle is gone — R-B is orchestrator-only. */
   | 'chain_reconstruction_unsupported'
   /** R-B reconstruction failed for some other reason (folder missing, etc.). */
-  | 'reactivate_failed';
+  | 'reactivate_failed'
+  /** Another start/resume/reopen holds the process-wide slot; retry shortly. */
+  | 'start_in_flight';
 
 /**
  * Phase H: discriminator for `LogRow.kind`. Each row in the merged session

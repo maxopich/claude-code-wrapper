@@ -69,14 +69,17 @@ export function sitesNotFollowedByTry(source: string): number[] {
 describe('[security] the bus start claim is taken inside its release block', () => {
   const source = fs.readFileSync(SERVER_TS, 'utf8');
 
-  test('the scan finds all three claim sites — anti-vacuity', () => {
-    // `start_multi_agent`'s two arms (orchestrator and chain) plus
+  test('the scan finds all four claim sites — anti-vacuity', () => {
+    // `start_multi_agent`'s two arms (orchestrator and chain), plus
     // `resume_multi_agent`, which took the process-wide claim in
     // `Cebab-6fax.41` — before that it guarded on `conn.multiAgent`, i.e. per
     // CONNECTION, which is the pre-B02 posture its own comment claimed to
-    // mirror. If a rename made this zero, every assertion below would pass
-    // over an empty list (`project_gates_pass_vacuously`).
-    expect(claimSites(source)).toHaveLength(3);
+    // mirror — plus `reopen_session_confirmed`, which took a reopen-scoped
+    // claim in `Cebab-xm95` so a run started by another window during its
+    // trust-gate park can no longer be brought live and then crash-displaced.
+    // If a rename made this zero, every assertion below would pass over an
+    // empty list (`project_gates_pass_vacuously`).
+    expect(claimSites(source)).toHaveLength(4);
   });
 
   test('resume_multi_agent guards process-wide, not on conn.multiAgent', () => {
@@ -93,6 +96,22 @@ describe('[security] the bus start claim is taken inside its release block', () 
     const head = body.slice(at, at + 1200);
     expect(head).toContain('claimSessionStart(');
     expect(head).not.toContain('if (conn.multiAgent) {');
+  });
+
+  test('reopen_session_confirmed takes a process-wide reopen claim', () => {
+    // `Cebab-xm95`: reopen used to take NO claim, so a run another window
+    // started during reopen's trust-gate park went live and was then reached
+    // by step 5's displacement and crashed. It uses `claimSessionReopen` (not
+    // `claimSessionStart`) because a live incumbent is reopen's normal
+    // precondition — the start-path `live.size` check would refuse it.
+    const body = stripComments(source);
+    const at = body.indexOf("case 'reopen_session_confirmed': {");
+    expect(
+      at,
+      "the reopen case moved or was renamed — this gate's anchor is stale",
+    ).toBeGreaterThan(-1);
+    const head = body.slice(at, at + 1200);
+    expect(head).toContain('claimSessionReopen(');
   });
 
   test('every claim site is immediately followed by the try', () => {

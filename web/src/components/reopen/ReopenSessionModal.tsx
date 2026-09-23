@@ -280,6 +280,7 @@ const FAILURE_TITLE: Record<ReopenSessionFailureReason, string> = {
   typed_confirmation_required: 'Typed confirmation required',
   chain_reconstruction_unsupported: 'Cannot reopen chain session',
   reactivate_failed: 'Reactivation failed',
+  start_in_flight: 'Another session is starting',
 };
 
 function FailedBody({
