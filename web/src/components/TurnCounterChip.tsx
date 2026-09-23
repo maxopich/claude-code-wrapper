@@ -1,3 +1,4 @@
+import { memo } from 'react';
 import type { MessageView } from '../store';
 
 /**
@@ -58,7 +59,7 @@ export function selectLastTurnCounts(
   return null;
 }
 
-export function TurnCounterChip({ messages }: TurnCounterChipProps) {
+function TurnCounterChipImpl({ messages }: TurnCounterChipProps) {
   const last = selectLastTurnCounts(messages);
   if (!last) return null;
   const ratio = last.numTurns / last.effectiveMaxTurns;
@@ -83,3 +84,14 @@ export function TurnCounterChip({ messages }: TurnCounterChipProps) {
     </span>
   );
 }
+
+/**
+ * Cebab-f7b2: memoised for the same reason MessageBlock is (Cebab-0u8x).
+ * `stream_delta` re-spreads the session object per token but keeps
+ * `session.messages` array identity (store.ts `case 'stream_delta'`), so a
+ * shallow compare on this one prop bails out and the backward scan in
+ * selectLastTurnCounts stops being per-token O(transcript) work. Safe
+ * because EVERY reducer write to `messages` builds a new array — there is
+ * no in-place mutation anywhere in store.ts.
+ */
+export const TurnCounterChip = memo(TurnCounterChipImpl);
