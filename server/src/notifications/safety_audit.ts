@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { config } from '../config.js';
 import { getDb } from '../db.js';
+import { collapseHomePathsInPayload } from './audit_home_path.js';
 import { getOperatorId } from './operator.js';
 import {
   appendAuditTip,
@@ -286,7 +287,15 @@ export function appendSafetyAudit(input: SafetyAuditInput): { id: string; hash_s
   const db = getDb();
   const id = randomUUID();
   const operatorId = getOperatorId();
-  const payloadJson = JSON.stringify(input.payload ?? null);
+  // Cebab-6fax.43.5: collapse the operator's home directory to `~` in every
+  // NEW row, at this single funnel so every writer (managed copy/delete/edit,
+  // trust_decided, guardrail, dangerous mutation, MCP trust, ...) inherits it.
+  // BEFORE JSON.stringify — and therefore before hashing — so the chain covers
+  // exactly what is stored and verification is unaffected. Rows already written
+  // are untouched. The stray-folder writer already emits names only, so this is
+  // a no-op there. If any read site compares a stored path to a live one, it
+  // must fold the same way — see `firstDecisionTs` in repo/mcp_trust.ts.
+  const payloadJson = JSON.stringify(collapseHomePathsInPayload(input.payload ?? null));
   const sessionId = input.sessionId ?? null;
   const parentSessionId = input.parentSessionId ?? null;
   const agentId = input.agentId ?? null;

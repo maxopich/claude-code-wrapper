@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import { getDb } from '../db.js';
+import { collapseHomePath } from '../notifications/audit_home_path.js';
 import { appendSafetyAudit } from '../notifications/safety_audit.js';
 import { getOperatorId } from '../notifications/operator.js';
 import { readFileBounded } from '../safe_fs.js';
@@ -977,13 +978,20 @@ export function previousDeclaration(
  * survives 033's dedupe.
  */
 export function firstDecisionTs(serverName: string, originPath: string): number | null {
+  // Cebab-6fax.43.5: since the append site collapses a home-prefixed path to
+  // `~`, a `trust_decided` row written now stores the origin path in that form,
+  // while rows written before the change stored it absolute. Match BOTH so the
+  // MIN(ts) still reaches the operator's genuinely-first decision across the
+  // seam. `collapseHomePath` is a no-op for a path outside home, so the two
+  // bound values coincide there and the IN clause degrades to a plain equality.
+  const collapsed = collapseHomePath(originPath);
   const row = getDb()
-    .prepare<[string, string], { ts: number | null }>(
+    .prepare<[string, string, string], { ts: number | null }>(
       `SELECT MIN(ts) AS ts FROM safety_audit
         WHERE kind = 'mcp.trust_decided'
           AND json_extract(payload_json, '$.serverName') = ?
-          AND json_extract(payload_json, '$.originPath') = ?`,
+          AND json_extract(payload_json, '$.originPath') IN (?, ?)`,
     )
-    .get(serverName, originPath);
+    .get(serverName, originPath, collapsed);
   return row?.ts ?? null;
 }
