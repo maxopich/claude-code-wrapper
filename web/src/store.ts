@@ -4227,8 +4227,24 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       // something this guard can swallow. (`classifyError`'s auth path is
       // the single-agent turn loop today, so that combination should not
       // arise; carrying it costs one expression and removes the question.)
+      //
+      // Cebab-7vl4: "a multi-agent run the client knows about" is the active
+      // bus run OR any iteration listed on the Multi-Agent tab. A pending
+      // Resume targets an iteration by its own session id (resume re-uses it),
+      // and a failed or cancelled resume never becomes `active` — so without
+      // the iterations arm such an error fell through to the project fallback
+      // below: with no chat project selected it was dropped (failureSeq
+      // untouched, "Resuming…" stuck forever), and with one selected it
+      // invented a phantom single-agent error row under it (Cebab-m40r). Both
+      // kinds are bus-scoped: bump `failureSeq` so the tab's Resume spinner
+      // clears, and never adopt it into a single-agent chat. The operator's
+      // surface — a transient "Resume cancelled" for `aborted`, a sticky error
+      // otherwise — is the `notifyFromServerMsg` toast keyed on the same
+      // membership test.
       const busScoped = Boolean(
-        msg.sessionId && state.multiAgent.active?.sessionId === msg.sessionId,
+        msg.sessionId &&
+        (state.multiAgent.active?.sessionId === msg.sessionId ||
+          state.multiAgent.iterations?.some((it) => it.sessionId === msg.sessionId)),
       );
       if (busScoped) {
         return {

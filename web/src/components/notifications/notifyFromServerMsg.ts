@@ -83,6 +83,18 @@ export type NotifyContext = {
    * it was when the result arrived (App.tsx's `stateRef`, pre-reduce).
    */
   isManagedDeleteModalShowing?: (projectId: number) => boolean;
+  /**
+   * Cebab-7vl4: does this session id belong to a multi-agent run the client
+   * knows about — the active bus run, or an iteration listed on the Multi-Agent
+   * tab (which is what a pending Resume targets)? Such a session-scoped
+   * wrapper_error has no chat transcript to render into, so store.ts treats it
+   * as bus-scoped and renders nothing; when this returns `true` the wrapper_error
+   * case pushes the run's error surface (transient "Resume cancelled" for
+   * `aborted`, sticky "Resume failed" otherwise). Reads live state from App.tsx's
+   * `stateRef`. Returns `false`/`undefined` for a single-agent session id, whose
+   * error is already a chat banner.
+   */
+  isKnownMultiAgentSession?: (sessionId: string) => boolean;
 };
 
 /**
@@ -256,7 +268,47 @@ export function notifyFromServerMsg(msg: ServerMsg, ctx: NotifyContext): void {
       // `project_register_line_numbers_stale`: locate by content, not by line
       // number.)
       const m = msg as { sessionId?: string; kind?: WrapperErrorKind; message?: string };
-      if (m.sessionId) return;
+      if (m.sessionId) {
+        // Cebab-7vl4: a session-scoped wrapper_error whose id belongs to a
+        // multi-agent run the client knows about (an iteration on the
+        // Multi-Agent tab, or the active bus run) has no chat transcript to
+        // land in — store.ts treats it as bus-scoped, bumping `failureSeq`
+        // (which clears a stuck "Resuming…") but rendering nothing. This toast
+        // is its only surface, split the way 7vl4 decided: a cancelled resume
+        // (`aborted`) is a brief, self-fading info notice, exactly like the
+        // sessionless `aborted` toast below (Cebab-osfq); any other failure is
+        // a sticky error the operator must dismiss.
+        if (ctx.isKnownMultiAgentSession?.(m.sessionId)) {
+          const busMsg = typeof m.message === 'string' ? m.message : 'Wrapper error';
+          if (m.kind === 'aborted') {
+            ctx.push({
+              id: mintId(),
+              ts: now,
+              severity: 'info',
+              class: 'operational',
+              dedupeKey: `${PHASE_2_WRAPPER_DEDUPE_KEY_PREFIX}:multi-agent:${m.sessionId}:aborted`,
+              title: 'Resume cancelled',
+              message: busMsg,
+              sticky: false,
+            });
+          } else {
+            ctx.push({
+              id: mintId(),
+              ts: now,
+              severity: 'error',
+              class: 'operational',
+              dedupeKey: `${PHASE_2_WRAPPER_DEDUPE_KEY_PREFIX}:multi-agent:${m.sessionId}`,
+              title: 'Resume failed',
+              message: busMsg,
+              sticky: true,
+            });
+          }
+        }
+        // Any other session-scoped wrapper_error is a single-agent chat error,
+        // rendered as a session-status banner by store.ts's own branch —
+        // toasting it too would double-show.
+        return;
+      }
       const messageText = typeof m.message === 'string' ? m.message : 'Wrapper error';
 
       // Cebab-osfq: a sessionless `aborted` is a deliberate cancellation, not a

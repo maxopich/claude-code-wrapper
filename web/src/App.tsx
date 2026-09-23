@@ -960,6 +960,18 @@ function AppShell({
                 // dropped the result and the toast is the only surface left.
                 isManagedDeleteModalShowing: (projectId) =>
                   stateRef.current.managedDelete?.projectId === projectId,
+                // Cebab-7vl4: a session-scoped wrapper_error whose id is the
+                // active bus run or a known iteration (what a pending Resume
+                // targets) has no chat to land in — surface it as the run's
+                // error toast instead. Same pre-reduce `stateRef` snapshot the
+                // other predicates read.
+                isKnownMultiAgentSession: (sessionId) => {
+                  const ma = stateRef.current.multiAgent;
+                  return (
+                    ma.active?.sessionId === sessionId ||
+                    (ma.iterations?.some((it) => it.sessionId === sessionId) ?? false)
+                  );
+                },
               });
             }
           } catch (err) {

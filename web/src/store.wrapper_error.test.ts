@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'vitest';
+import type { IterationSummary } from '@cebab/shared/protocol';
 import { activeSession, initialState, reduce, sessionPhase, type AppState } from './store';
 
 /**
@@ -309,5 +310,141 @@ describe('store / a wrapper_error for an un-adopted first-turn session (Cebab-yg
     });
     expect(after.authExpired?.count).toBe(1);
     expect(after.activeSessionByProject[PID]).toBe(REAL);
+  });
+});
+
+/**
+ * Cebab-7vl4: a `wrapper_error` whose sessionId belongs to a multi-agent run
+ * the client knows about — an iteration listed on the Multi-Agent tab, which is
+ * what a pending Resume targets — is bus-scoped even when that run is NOT
+ * `state.multiAgent.active` (a failed/cancelled resume never becomes active).
+ *
+ * Before the fix it fell through to `projectFor(state, sessionId) ??
+ * activeProjectId`: with no chat project selected the message was dropped
+ * (failureSeq untouched, so the tab's "Resuming…" spinner stayed stuck), and
+ * with one selected it invented a phantom single-agent error row under it
+ * (Cebab-m40r). Both are wrong. The reducer must bump `failureSeq` (so the
+ * spinner clears) and leave every single-agent chat untouched, for BOTH a
+ * cancelled resume (`aborted`) and a real failure.
+ */
+describe('store / a wrapper_error for a known multi-agent iteration (Cebab-7vl4)', () => {
+  const BUS_SID = 'bus-sess-1';
+
+  function iter(sessionId: string): IterationSummary {
+    return {
+      iterationId: '001',
+      sessionId,
+      mode: 'orchestrator',
+      status: 'crashed',
+      startedAt: 1000,
+      endedAt: 2000,
+      participantAgentNames: ['alpha', 'beta'],
+      artifactsDir: `/tmp/${sessionId}`,
+      resumable: true,
+    };
+  }
+
+  /** State that has fetched an iterations list holding the resume target, with
+   *  no single-agent chat project selected. */
+  function seedIterations(): AppState {
+    return reduce(initialState, {
+      type: 'server',
+      msg: { type: 'iterations', items: [iter(BUS_SID)] },
+    });
+  }
+
+  function busError(kind: 'aborted' | 'process_crashed') {
+    return {
+      type: 'server' as const,
+      msg: {
+        type: 'wrapper_error' as const,
+        sessionId: BUS_SID,
+        kind,
+        message: kind === 'aborted' ? 'Resume cancelled: you declined a prompt.' : 'resume blew up',
+      },
+    };
+  }
+
+  for (const kind of ['aborted', 'process_crashed'] as const) {
+    test(`${kind}: bumps failureSeq (clears the Resume spinner), no chat project active`, () => {
+      const before = seedIterations();
+      expect(before.activeProjectId).toBeNull();
+      const after = reduce(before, busError(kind));
+
+      // The spinner-clearing signal moved...
+      expect(after.failureSeq).toBe(before.failureSeq + 1);
+      // ...and no phantom single-agent session was invented anywhere.
+      expect(after.sessionsByProject).toEqual(before.sessionsByProject);
+      expect(after.activeSessionByProject).toEqual(before.activeSessionByProject);
+      expect(after.pendingByProject).toEqual(before.pendingByProject);
+      // The iteration is still just an iteration — it did not become a chat.
+      expect(after.multiAgent.iterations?.map((it) => it.sessionId)).toEqual([BUS_SID]);
+    });
+
+    test(`${kind}: leaves an active single-agent chat untouched (Cebab-m40r)`, () => {
+      // A chat project IS selected and mid-stream — the exact victim the old
+      // `?? activeProjectId` fallback folded the bus error onto.
+      let before = seedIterations();
+      before = reduce(before, { type: 'select_project', projectId: PID });
+      before = reduce(before, {
+        type: 'server',
+        msg: {
+          type: 'session_started',
+          sessionId: 'chat-1',
+          projectId: PID,
+          model: 'opus-4',
+          tools: [],
+        },
+      });
+      const chat = before.sessionsByProject[PID]!['chat-1']!;
+      before = {
+        ...before,
+        sessionsByProject: {
+          ...before.sessionsByProject,
+          [PID]: {
+            ...before.sessionsByProject[PID],
+            'chat-1': { ...chat, streamingText: 'in flight' },
+          },
+        },
+      };
+
+      const after = reduce(before, busError(kind));
+
+      const sess = after.sessionsByProject[PID]?.['chat-1'];
+      expect(sess).toBeDefined();
+      // Not flagged failed, no red error row appended, partial output preserved.
+      expect(sess!.status).not.toBe('error');
+      expect(sess!.messages.filter((m) => m.kind === 'error')).toHaveLength(0);
+      expect(sess!.streamingText).toBe('in flight');
+      // No extra bucket invented under the active project either.
+      expect(Object.keys(after.sessionsByProject[PID] ?? {})).toEqual(['chat-1']);
+      // Spinner still clears.
+      expect(after.failureSeq).toBe(before.failureSeq + 1);
+    });
+  }
+
+  test('CONTROL: a session-scoped error for an UNKNOWN id still lands in its chat', () => {
+    // Anti-vacuity: the iterations arm must not swallow a genuine single-agent
+    // error. A sessionId that is neither active nor a known iteration takes the
+    // normal chat path (it names a session that exists) and renders inline.
+    let s = seedIterations();
+    s = reduce(s, { type: 'select_project', projectId: PID });
+    s = reduce(s, {
+      type: 'server',
+      msg: {
+        type: 'session_started',
+        sessionId: 'chat-9',
+        projectId: PID,
+        model: 'opus-4',
+        tools: [],
+      },
+    });
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'wrapper_error', sessionId: 'chat-9', kind: 'process_crashed', message: 'boom' },
+    });
+    const sess = s.sessionsByProject[PID]?.['chat-9'];
+    expect(sess!.status).toBe('error');
+    expect(sess!.messages.filter((m) => m.kind === 'error')).toHaveLength(1);
   });
 });
