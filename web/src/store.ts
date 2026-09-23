@@ -459,9 +459,10 @@ export type MultiAgentRun = {
    *  the operator's choice at session start. UI surfaces it as a read-only
    *  row in Session info (the toggle itself lives in setup). */
   pauseOnDangerous: boolean;
-  /** Execute mode for this session (orchestrator only). When true, workers may
-   *  change their own project; drives the "Execute mode" banner/chip in place
-   *  of the consultant-mode one. Mirrored from `multi_agent_started`. */
+  /** Execute mode for this session (both modes since `Cebab-6fax.4`). When true,
+   *  participants may change their own project; drives the "Execute mode"
+   *  banner/chip in place of the consultant-mode one. Mirrored from
+   *  `multi_agent_started`. */
   executeMode: boolean;
   /** Item #5: all classified non-'read' tool calls observed during this
    *  session, ordered by ts ascending. Drives the Session-info "Mutations"
@@ -774,8 +775,8 @@ export type MultiAgentState = {
    *  during the session draft; sent on `start_multi_agent` as
    *  `pauseOnDangerous`. Default false; the operator opts in explicitly. */
   draftPauseOnDangerous: boolean;
-  /** Setup-screen opt-in for Execute mode (orchestrator only). Sent on
-   *  `start_multi_agent` as `executeMode`. Default false (consultant). */
+  /** Setup-screen opt-in for Execute mode (both modes since `Cebab-6fax.4`).
+   *  Sent on `start_multi_agent` as `executeMode`. Default false (consultant). */
   draftExecuteMode: boolean;
   /** Non-null while a chain (or future orchestrator session) is running, and
    *  until the operator dismisses it. */
@@ -2785,8 +2786,8 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
             // `multi_agent_started`. Always populated (server resolves and
             // sends `false` + `[]` for fresh starts; reads DB for R-A/R-B).
             pauseOnDangerous: msg.pauseOnDangerous,
-            // Execute mode (orchestrator only) — server sends false for chain
-            // and for consultant-mode orchestrator sessions. Default false if a
+            // Execute mode — server echoes the operator's grant for both modes
+            // (false for consultant-mode sessions). Default false if a
             // pre-execute-mode server omits it.
             executeMode: msg.executeMode ?? false,
             mutations: msg.mutations,

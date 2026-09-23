@@ -6181,8 +6181,9 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
             hopBudget,
             maxTurns,
             pauseOnDangerous: msg.pauseOnDangerous === true,
-            // Execute mode (orchestrator only): flips worker briefings from
-            // consultant to "may change your own project". Persisted + survives R-B.
+            // Execute mode: flips worker briefings from consultant to "may
+            // change your own project". `Cebab-6fax.4` extended the same grant to
+            // chain participants (see the chain branch below). Persisted + survives R-B.
             executeMode: msg.executeMode === true,
             // PR-7: stamp template provenance onto the row so the rail can
             // SELECT by template post-teardown. Absent on ad-hoc runs.

@@ -139,7 +139,7 @@ export function MultiAgentTab(props: {
   onClearAutoRetry: () => void;
   /** Item #5: setup-screen toggle for pause-on-dangerous. */
   onSetDraftPauseOnDangerous: (value: boolean) => void;
-  /** Setup-screen toggle for Execute mode (orchestrator only). */
+  /** Setup-screen toggle for Execute mode (both modes since `Cebab-6fax.4`). */
   onSetDraftExecuteMode: (value: boolean) => void;
   /**
    * Cluster F Phase D9 (UI-D9): setup-screen hop-budget override input.
@@ -294,7 +294,7 @@ export function DraftView(props: {
   onSetDraftPrompt: (text: string) => void;
   /** Item #5: setup-screen toggle for pause-on-dangerous. */
   onSetDraftPauseOnDangerous: (value: boolean) => void;
-  /** Setup-screen toggle for Execute mode (orchestrator only). */
+  /** Setup-screen toggle for Execute mode (both modes since `Cebab-6fax.4`). */
   onSetDraftExecuteMode: (value: boolean) => void;
   /** Cluster F Phase D9 (UI-D9): setup-screen hop-budget override input. */
   onSetDraftHopBudget: (value: number | null) => void;
@@ -686,28 +686,28 @@ export function DraftView(props: {
             />
             Pause before a worker runs a dangerous command
           </label>
-          {/* Execute mode opt-in — orchestrator only (chain has no consultant
-              mode to relax). Off by default: sessions advise unless the operator
-              opts in. Turning it on also arms pause-on-dangerous as a safety
-              pairing (still independently uncheckable). */}
-          {isOrch && (
-            <label
-              className="ma-pause-mutation-checkbox"
-              title="By default an orchestrator session is consultant-only: workers analyze and advise but don't change files. Enable this to let each worker create, modify, or delete files WITHIN ITS OWN PROJECT FOLDER to actually do the work. Writes outside a worker's own folder are still discouraged and flagged after the fact — this is advisory (relayed in the prompt), not a hard block."
-            >
-              <input
-                type="checkbox"
-                checked={multiAgent.draftExecuteMode}
-                onChange={(e) => {
-                  props.onSetDraftExecuteMode(e.target.checked);
-                  // Safety pairing: arm pause-on-dangerous when enabling execute
-                  // mode so a worker's first dangerous command still stops for you.
-                  if (e.target.checked) props.onSetDraftPauseOnDangerous(true);
-                }}
-              />
-              Let agents make changes in their own project (execute mode)
-            </label>
-          )}
+          {/* Execute mode opt-in — for both modes. `Cebab-6fax.4` gave chain
+              participants the same consultant clause the orchestrator's workers
+              carry, so a chain run has a consultant posture to relax too. Off by
+              default: sessions advise unless the operator opts in. Turning it on
+              also arms pause-on-dangerous as a safety pairing (still
+              independently uncheckable). */}
+          <label
+            className="ma-pause-mutation-checkbox"
+            title="By default a bus session is consultant-only: participants analyze and advise but don't change files. Enable this to let each participant create, modify, or delete files WITHIN ITS OWN PROJECT FOLDER to actually do the work. Writes outside a participant's own folder are still discouraged and flagged after the fact — this is advisory (relayed in the prompt), not a hard block."
+          >
+            <input
+              type="checkbox"
+              checked={multiAgent.draftExecuteMode}
+              onChange={(e) => {
+                props.onSetDraftExecuteMode(e.target.checked);
+                // Safety pairing: arm pause-on-dangerous when enabling execute
+                // mode so a participant's first dangerous command still stops for you.
+                if (e.target.checked) props.onSetDraftPauseOnDangerous(true);
+              }}
+            />
+            Let agents make changes in their own project (execute mode)
+          </label>
           {/* Cluster F Phase D9 (UI-D9): per-run hop-budget override. The
               wire was complete (start_multi_agent.hopBudget + template
               field + resolver precedence) but no UI input existed. This

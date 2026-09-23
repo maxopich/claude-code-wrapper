@@ -2145,6 +2145,7 @@ function AppShell({
       draftPrompt,
       draftLifecycle,
       draftPauseOnDangerous,
+      draftExecuteMode,
       // PR-7: template provenance + per-template hop budget. Both are null
       // for ad-hoc runs; the server stamps them onto the row only if set.
       draftTemplateId,
@@ -2159,6 +2160,9 @@ function AppShell({
       initialPrompt: draftPrompt,
       lifecycle: draftLifecycle,
       pauseOnDangerous: draftPauseOnDangerous,
+      // `Cebab-6fax.4`: chain participants carry a consultant/execute clause too,
+      // so a chain start sends executeMode exactly as the orchestrator start does.
+      executeMode: draftExecuteMode,
       ...(draftTemplateId ? { templateId: draftTemplateId } : {}),
       ...(draftHopBudget !== null ? { hopBudget: draftHopBudget } : {}),
     });
@@ -2186,7 +2190,7 @@ function AppShell({
       initialPrompt: draftPrompt,
       lifecycle: draftLifecycle,
       pauseOnDangerous: draftPauseOnDangerous,
-      // Execute mode is orchestrator-only; consultant is the default.
+      // Execute mode; consultant is the default.
       executeMode: draftExecuteMode,
       ...(draftTemplateId ? { templateId: draftTemplateId } : {}),
       ...(draftHopBudget !== null ? { hopBudget: draftHopBudget } : {}),
@@ -2448,7 +2452,7 @@ function AppShell({
     dispatch({ type: 'ma_set_draft_pause_on_dangerous', value });
   }
   function setDraftExecuteMode(value: boolean) {
-    // Setup-screen toggle (orchestrator only). Client state until
+    // Setup-screen toggle (both modes since `Cebab-6fax.4`). Client state until
     // `start_multi_agent` sends it as `executeMode`.
     dispatch({ type: 'ma_set_draft_execute_mode', value });
   }
