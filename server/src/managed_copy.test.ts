@@ -9,22 +9,26 @@ import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import { promises as fsp } from 'node:fs';
 import path from 'node:path';
-import { describe, expect, test, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 import type { ServerMsg } from '@cebab/shared/protocol';
 import { config } from './config.js';
 import { getDb } from './db.js';
 import * as managedAgent from './managed_agent.js';
-import { managedAgentsRoot } from './managed_agent.js';
+import { managedAgentsRoot, removeManagedDir } from './managed_agent.js';
+import { slugifyAgentName } from './bus/paths.js';
 import { preflightManagedCopy, runManagedCopy } from './managed_copy.js';
 import * as safetyAudit from './notifications/safety_audit.js';
 import {
+  deleteProject,
   getProject,
   listProjects,
+  registerManagedProject,
   setProjectStartPermissionMode,
   setProjectTrusted,
   upsertProject,
 } from './repo/projects.js';
 import { withTempDataDir } from './test_support/temp_data_dir.js';
+import { setWorkspaceRoot, syncWorkspaceProjects } from './workspace.js';
 
 type AuditRow = { kind: string; reason_code: string; payload_json: string };
 
@@ -741,5 +745,137 @@ describe('[security] a managed agent cannot be committed (Cebab-ws0.11)', () => 
     };
     walk(managed);
     expect(files.join('\n')).not.toContain('git@example.com');
+  });
+});
+
+describe("[security] a re-copy never revives a vanished copy's row (Cebab-1o1t)", () => {
+  // A re-copy is a FRESH agent. If it landed on the path a vanished copy used,
+  // `registerManagedProject` would find that copy's row by path and hand the new
+  // copy its id, its Trust and its whole session list — the silent takeover this
+  // bead closes. `claimManagedDir` now treats a slug as TAKEN when its path has
+  // ANY history (a `projects` row, missing or not; or a CLI transcript dir), not
+  // only when a directory sits there right now.
+  const tmp = withTempDataDir('managed-recopy');
+  let priorConfigDir: string | undefined;
+
+  beforeEach(() => {
+    // Relocate the CLI config root so the transcript-dir history check reads an
+    // isolated tree, never the developer's real `~/.claude`. Set AFTER
+    // `withTempDataDir`'s own hook, so `tmp.root()` is already populated.
+    priorConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = path.join(tmp.root(), 'claude-config');
+  });
+  afterEach(() => {
+    if (priorConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = priorConfigDir;
+  });
+
+  /** The most recent successful copy result on this channel. */
+  function lastOk(sent: ServerMsg[]): { managedProjectId: number; name: string } {
+    for (let i = sent.length - 1; i >= 0; i--) {
+      const m = sent[i];
+      if (m.type === 'managed_copy_result' && m.result.ok) return m.result;
+    }
+    throw new Error('no successful managed_copy_result');
+  }
+
+  test('a hand-deleted copy that went missing is stepped around, not revived', async () => {
+    const name = 'reclaimed';
+    const id = seedProject(tmp.root(), name);
+    // Trust the source, so "the copy's Trust follows the SOURCE" has something to
+    // read back. The old row was itself trusted, so this does not discriminate on
+    // its own — the id/path/missing assertions below are what redden on a revert.
+    setProjectTrusted(id, true);
+    const base = slugifyAgentName(name);
+
+    const sent: ServerMsg[] = [];
+    expect((await runManagedCopy(id, (m) => sent.push(m))).registered).toBe(true);
+    const firstRow = getProject(lastOk(sent).managedProjectId)!;
+    // Control, folded in: the FIRST copy of a project gets the bare slug.
+    expect(firstRow.path).toBe(path.join(managedAgentsRoot(), base));
+    expect(firstRow.trusted).toBe(1);
+
+    // The operator deletes the managed folder by hand...
+    fs.rmSync(firstRow.path, { recursive: true, force: true });
+    // ...and the workspace sweep marks the now-vanished managed row missing.
+    setWorkspaceRoot(tmp.root());
+    await syncWorkspaceProjects();
+    expect(getProject(firstRow.id)?.missing).toBe(1);
+
+    // A second copy is a FRESH agent and must not land on the old row.
+    const sent2: ServerMsg[] = [];
+    expect((await runManagedCopy(id, (m) => sent2.push(m))).registered).toBe(true);
+    const secondRow = getProject(lastOk(sent2).managedProjectId)!;
+
+    // Reddens on a revert: without the history check the claim reuses the bare
+    // slug and the registration revives the missing row (same id, same path).
+    expect(secondRow.id).not.toBe(firstRow.id);
+    expect(secondRow.path).not.toBe(firstRow.path);
+    expect(secondRow.path).toBe(path.join(managedAgentsRoot(), `${base}-2`));
+    // Trust follows the SOURCE.
+    expect(secondRow.trusted).toBe(1);
+
+    // The old row is left alone: still missing, still at its old path, deletable.
+    const old = getProject(firstRow.id)!;
+    expect(old.missing).toBe(1);
+    expect(old.path).toBe(firstRow.path);
+  });
+
+  test('a managed-deleted copy is stepped around by its lingering CLI transcript dir', async () => {
+    const name = 'purged';
+    const id = seedProject(tmp.root(), name);
+    const base = slugifyAgentName(name);
+
+    const sent: ServerMsg[] = [];
+    expect((await runManagedCopy(id, (m) => sent.push(m))).registered).toBe(true);
+    const firstRow = getProject(lastOk(sent).managedProjectId)!;
+    expect(firstRow.path).toBe(path.join(managedAgentsRoot(), base));
+
+    // Simulate a session having run in the copy: the CLI keeps a transcript dir
+    // keyed by the copy's cwd (every non-alphanumeric char → '-').
+    const transcriptDir = path.join(
+      process.env.CLAUDE_CONFIG_DIR!,
+      'projects',
+      firstRow.path.replace(/[^a-zA-Z0-9]/g, '-'),
+    );
+    fs.mkdirSync(transcriptDir, { recursive: true });
+
+    // A managed delete removes the row AND the tree — but not the CLI transcript.
+    await removeManagedDir(firstRow.path);
+    expect(deleteProject(firstRow.id)).toBe(1);
+    expect(getProject(firstRow.id)).toBeUndefined();
+
+    // With the row gone and the folder gone, only the transcript dir remembers
+    // the path — and that alone is enough for a re-copy to step around it.
+    const sent2: ServerMsg[] = [];
+    expect((await runManagedCopy(id, (m) => sent2.push(m))).registered).toBe(true);
+    const secondRow = getProject(lastOk(sent2).managedProjectId)!;
+
+    // Reddens on a revert: with no history check the freed slug is reused.
+    expect(secondRow.path).not.toBe(firstRow.path);
+    expect(secondRow.path).toBe(path.join(managedAgentsRoot(), `${base}-2`));
+  });
+
+  test('[security] registerManagedProject refuses a path a row already holds', async () => {
+    // Defence in depth, tested directly: even if a claim ever reached a path with
+    // a live row, the registration must refuse rather than hand that row back.
+    const name = 'guarded';
+    const id = seedProject(tmp.root(), name);
+    const base = slugifyAgentName(name);
+
+    const sent: ServerMsg[] = [];
+    expect((await runManagedCopy(id, (m) => sent.push(m))).registered).toBe(true);
+    const firstRow = getProject(lastOk(sent).managedProjectId)!;
+    expect(firstRow.path).toBe(path.join(managedAgentsRoot(), base));
+
+    // The path is now held by `firstRow`. A direct re-registration at it must
+    // throw — not return `firstRow` with its Trust intact.
+    expect(() =>
+      registerManagedProject(name, firstRow.path, firstRow.path, Date.now(), false, null),
+    ).toThrow(/already holds that path/);
+    // And the existing row is untouched by the refused write.
+    const still = getProject(firstRow.id)!;
+    expect(still.path).toBe(firstRow.path);
+    expect(still.trusted).toBe(firstRow.trusted);
   });
 });

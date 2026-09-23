@@ -168,6 +168,11 @@ function envVarsRead(sources) {
  */
 const NOT_OPERATOR_CONFIG = new Map([
   ['VITEST', 'ambient test-runner signal, read by db.ts to refuse the real data dir'],
+  [
+    'CLAUDE_CONFIG_DIR',
+    "the CLI's own config-root override, not a Cebab knob — managed_agent.ts " +
+      'reads it only to mirror where the CLI writes its per-cwd transcript dir',
+  ],
 ]);
 
 /**
