@@ -1653,7 +1653,7 @@ function authExpiredAfter(
  */
 function cancelledLine(message: string): string {
   return message.startsWith('Turn cancelled:')
-    ? 'Cancelled - you declined the prompt'
+    ? 'Cancelled — you declined the prompt'
     : 'Stopped by you';
 }
 

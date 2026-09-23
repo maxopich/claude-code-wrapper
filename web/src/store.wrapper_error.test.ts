@@ -538,7 +538,7 @@ describe('store / a session-scoped aborted is a neutral cancel, not an error (Ce
       (m) => m.kind === 'cancelled',
     );
     expect(cancel && 'message' in cancel ? cancel.message : null).toBe(
-      'Cancelled - you declined the prompt',
+      'Cancelled — you declined the prompt',
     );
   });
 
