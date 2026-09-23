@@ -1314,7 +1314,11 @@ const openConns = new Set<Conn>();
  *
  * Safe to fan out because the receiving reducer is already scoped: every
  * `multi_agent_*` case bails on `active.sessionId !== msg.sessionId`, so a
- * broadcast is a no-op in every tab that is not tracking that run.
+ * broadcast is a no-op in every tab that is not tracking that run. That
+ * reasoning covers the `multi_agent_*` messages only. The reopen path
+ * (Cebab-0gjz) also fans out `session_superseded` and an operational
+ * notification, which EVERY tab shows (a toast and a bell row) — deliberate:
+ * the operator whose run was displaced may be looking at any tab.
  */
 export function broadcastTo(conns: Iterable<{ ws: WebSocket }>, msg: ServerMsg): void {
   for (const c of conns) send(c.ws, msg);
@@ -2324,7 +2328,7 @@ export async function executeReopenSessionConfirmed(args: {
       // unsolicited only in `onConnection` and otherwise only on an explicit
       // `request_inbox_snapshot`, which the client sends only when the operator
       // opens the bell popover — so an already-open displaced window would see
-      // the row only after a reload.
+      // it only by opening the bell or reloading, never as a toast.
       broadcast({
         type: 'session_superseded',
         sessionId: displacedId,

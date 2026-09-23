@@ -26,6 +26,7 @@ import {
 import { executeReopenSessionConfirmed } from './server.js';
 import { closeLogger } from '../runner/logger.js';
 import { _resetCoalesceState } from '../notifications/dispatcher.js';
+import { stripComments } from '../test_support/strip_comments.js';
 
 // Cluster D Phase 5c (spec §6.3, BE-D20 / BE-D21 / BE-D24): coverage
 // for the `reopen_session_confirmed` commit handler.
@@ -200,6 +201,8 @@ describe('executeReopenSessionConfirmed — happy paths', () => {
     expect(adopt).toHaveBeenCalledTimes(1);
     expect(detach).not.toHaveBeenCalled(); // no current active to detach
     expect(sent).toHaveLength(0); // emitResumedSession is the adopt path
+    // Nothing was displaced, so nothing fans out either.
+    expect(broadcastSent).toHaveLength(0);
 
     const log = listForSession('target');
     expect(log).toHaveLength(1);
@@ -332,6 +335,12 @@ describe('executeReopenSessionConfirmed — happy paths', () => {
 });
 
 describe('executeReopenSessionConfirmed — gate failures', () => {
+  // A refusal answers the reopening window only; nothing may fan out to other
+  // windows (Cebab-0gjz). Checked after every case in this block.
+  afterEach(() => {
+    expect(broadcastSent).toHaveLength(0);
+  });
+
   test('missing acknowledgedWorkspaceDiff → ack_required + no reactivation', async () => {
     const proj = upsertProject('P', '/projects/p');
     createMultiAgentSession('target', 'orchestrator', '001');
@@ -440,6 +449,12 @@ describe('executeReopenSessionConfirmed — gate failures', () => {
 });
 
 describe('executeReopenSessionConfirmed — target validation', () => {
+  // A refusal answers the reopening window only; nothing may fan out to other
+  // windows (Cebab-0gjz). Checked after every case in this block.
+  afterEach(() => {
+    expect(broadcastSent).toHaveLength(0);
+  });
+
   test('unknown sessionId → not_found', async () => {
     await executeReopenSessionConfirmed({
       sessionId: 'gone',
@@ -511,6 +526,12 @@ describe('executeReopenSessionConfirmed — target validation', () => {
 });
 
 describe('executeReopenSessionConfirmed — reactivation failures', () => {
+  // A refusal answers the reopening window only; nothing may fan out to other
+  // windows (Cebab-0gjz). Checked after every case in this block.
+  afterEach(() => {
+    expect(broadcastSent).toHaveLength(0);
+  });
+
   test('chain mode + reattach-failed → chain_reconstruction_unsupported', async () => {
     const proj = upsertProject('P', '/projects/p');
     createMultiAgentSession('chain-tgt', 'chain', '001');
@@ -972,5 +993,25 @@ describe('executeReopenSessionConfirmed — a cross-connection live run is displ
     expect(detach).toHaveBeenCalledTimes(1);
     // The whole point: stop ran while the sink was still attached.
     expect(detachedAtStop).toBe(false);
+  });
+});
+
+describe('reopen_session_confirmed wiring — the displacement notice reaches OTHER windows (Cebab-0gjz)', () => {
+  // The cases above prove executeReopenSessionConfirmed routes the notice to
+  // whatever `broadcast` sink it is given. Whether the displaced window hears
+  // anything depends on ONE line at the production call site; pointing it back
+  // at the connection-bound send type-checks and leaves every other test green.
+  // Same shape and reason as bus_lifecycle_broadcast.test.ts.
+  test('the handler passes the process-wide broadcaster, not the connection send', () => {
+    const source = stripComments(
+      fs.readFileSync(path.join(import.meta.dirname, 'server.ts'), 'utf8'),
+    );
+    const start = source.indexOf("case 'reopen_session_confirmed': {");
+    expect(start).toBeGreaterThan(-1);
+    const next = source.indexOf("case '", start + 1);
+    const block = source.slice(start, next === -1 ? undefined : next);
+    // Anti-vacuity: the slice really is the handler that calls the helper.
+    expect(block).toContain('executeReopenSessionConfirmed(');
+    expect(block).toMatch(/broadcast:\s*broadcastServerMsg\b/);
   });
 });
