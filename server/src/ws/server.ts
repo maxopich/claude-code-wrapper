@@ -2531,8 +2531,8 @@ export async function executeContinueMultiAgent(args: {
     // `Cebab-5vqm`: an operator DECLINING the trust/env gate this Continue
     // parks rejects with a `GateAbandonedError` (`name === 'AbortError'`) — a
     // deliberate cancel, not a crash. Route through `classifyBusStartFailure`
-    // so it surfaces as `aborted`, kept SESSIONLESS (as this catch always was)
-    // so `notifyFromServerMsg` shows the transient "Cancelled" info toast
+    // so it surfaces as `aborted`, kept SESSIONLESS (as this catch always was);
+    // `notifyFromServerMsg` then shows the transient "Cancelled" info toast
     // rather than a sticky red "Server error". A genuine throw keeps
     // `process_crashed` and its own raw message.
     send({
@@ -6822,11 +6822,13 @@ export async function handleClientMsg(conn: Conn, msg: ClientMsg): Promise<void>
       } catch (err) {
         // `Cebab-5vqm`: a declined trust/env gate (`GateAbandonedError`,
         // `name === 'AbortError'`) parked by the `gateProjectsForSpawn` above
-        // is a cancel, not a failure. Report it SESSIONLESS as `aborted` so
-        // `notifyFromServerMsg` shows the transient "Cancelled" info toast — a
-        // bus-scoped `wrapper_error` is swallowed by the store's busScoped
-        // guard, so keeping `sessionId` here would surface nothing. A genuine
-        // throw keeps its session-scoped `process_crashed` reporting unchanged.
+        // is a cancel, not a failure. Report it SESSIONLESS as `aborted`, which
+        // `notifyFromServerMsg` shows as the transient "Cancelled" info toast.
+        // (Since Cebab-7vl4 a session-scoped one for the active run would toast
+        // too; sessionless is kept because it is what the pinned test asserts
+        // and it reads the same to the operator.) A genuine throw keeps its
+        // session-scoped `process_crashed`, which since Cebab-7vl4 shows as a
+        // sticky "Multi-agent error" toast.
         if (classifyHandlerFailure(err) === 'aborted') {
           send(conn.ws, {
             type: 'wrapper_error',

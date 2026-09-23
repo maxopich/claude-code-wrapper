@@ -339,6 +339,25 @@ describe('ReopenSessionModal — failed state', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  test('a declined prompt reads as a cancel, not a failure (Cebab-5vqm)', () => {
+    renderModal({
+      kind: 'failed',
+      sessionId: 's',
+      reason: 'cancelled',
+      message: 'Reopen cancelled: you declined a trust or environment prompt.',
+    });
+    const title = container.querySelector('.gate-modal-title')?.textContent ?? '';
+    expect(title).toBe('Reopen cancelled');
+    expect(title).not.toMatch(/fail/i);
+    act(() => {
+      root.unmount();
+      root = createRoot(container);
+    });
+    // Control, same case: a real reconstruct failure still says so.
+    renderModal({ kind: 'failed', sessionId: 's', reason: 'reactivate_failed', message: 'x' });
+    expect(container.querySelector('.gate-modal-title')?.textContent).toBe('Reactivation failed');
+  });
+
   test('failed reason rendered for each enumerated code', () => {
     const reasons = [
       'not_found',
@@ -348,6 +367,7 @@ describe('ReopenSessionModal — failed state', () => {
       'typed_confirmation_required',
       'chain_reconstruction_unsupported',
       'reactivate_failed',
+      'cancelled',
       'start_in_flight',
     ] as const;
     for (const reason of reasons) {
