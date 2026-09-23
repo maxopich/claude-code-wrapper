@@ -25,6 +25,7 @@ import {
 } from '../bus/session_registry.js';
 import { executeReopenSessionConfirmed } from './server.js';
 import { closeLogger } from '../runner/logger.js';
+import { _resetCoalesceState } from '../notifications/dispatcher.js';
 
 // Cluster D Phase 5c (spec §6.3, BE-D20 / BE-D21 / BE-D24): coverage
 // for the `reopen_session_confirmed` commit handler.
@@ -36,9 +37,19 @@ import { closeLogger } from '../runner/logger.js';
 let tmpRoot: string;
 let originalDataDir: string;
 let sent: ServerMsg[];
+// Cebab-0gjz: the displaced supersede notice + notification now fan out via
+// the `broadcast` sink (the displaced run can be live on another connection),
+// so the two sinks are distinct arrays. Passing one spy as both would make the
+// negative assertions below vacuous — the message lands in the same array
+// either way.
+let broadcastSent: ServerMsg[];
 
 function captureSend(msg: ServerMsg): void {
   sent.push(msg);
+}
+
+function captureBroadcast(msg: ServerMsg): void {
+  broadcastSent.push(msg);
 }
 
 const EMPTY_DIFF: WorkspaceDiff = {
@@ -120,6 +131,12 @@ beforeEach(() => {
   closeDb();
   getDb();
   sent = [];
+  broadcastSent = [];
+  // Operational envelopes coalesce by `dedupeKey` for 5 s; without this a case
+  // asserting the notification for a session id an earlier case already
+  // superseded within the window gets `{ok:true, sent:false}` and an empty
+  // array — measuring the coalescer, not the routing (Cebab-0gjz).
+  _resetCoalesceState();
   stubResumeOk.mockClear();
   stubResumeReattachFailed.mockClear();
   stubResumeNotFound.mockClear();
@@ -174,6 +191,7 @@ describe('executeReopenSessionConfirmed — happy paths', () => {
       adoptResumed: adopt,
       resumeCallbacks: dummyResumeCallbacks,
       send: captureSend,
+      broadcast: captureBroadcast,
       computeDiff: async () => EMPTY_DIFF,
       resumeTarget: stubResumeOk,
     });
@@ -217,6 +235,7 @@ describe('executeReopenSessionConfirmed — happy paths', () => {
       adoptResumed: adopt,
       resumeCallbacks: dummyResumeCallbacks,
       send: captureSend,
+      broadcast: captureBroadcast,
       computeDiff: async () => EMPTY_DIFF,
       resumeTarget: stubResumeOk,
     });
@@ -225,8 +244,9 @@ describe('executeReopenSessionConfirmed — happy paths', () => {
     expect(detach).toHaveBeenCalledTimes(1);
     expect(getMultiAgentSession('current')?.status).toBe('crashed');
 
-    // session_superseded ServerMsg was emitted for the displaced one
-    const superseded = sent.find((m) => m.type === 'session_superseded');
+    // Cebab-0gjz: both the supersede notice and the notification fan out via
+    // `broadcast`, because the displaced run may live on another connection.
+    const superseded = broadcastSent.find((m) => m.type === 'session_superseded');
     expect(superseded).toMatchObject({
       type: 'session_superseded',
       sessionId: 'current',
@@ -234,7 +254,7 @@ describe('executeReopenSessionConfirmed — happy paths', () => {
     });
 
     // Notification envelope with operator_reopen reasonCode
-    const notif = sent.find((m) => m.type === 'notification');
+    const notif = broadcastSent.find((m) => m.type === 'notification');
     expect(notif).toMatchObject({
       type: 'notification',
       class: 'operational',
@@ -243,6 +263,12 @@ describe('executeReopenSessionConfirmed — happy paths', () => {
       action: { kind: 'archive', sessionId: 'current' },
       reasonCode: 'operator_reopen',
     });
+
+    // …and NOT on the conn-bound sink. This negative is what makes the two
+    // positives above non-vacuous: on unfixed code (both sinks === `send`) the
+    // messages would land in `sent` and these would fail.
+    expect(sent.find((m) => m.type === 'session_superseded')).toBeUndefined();
+    expect(sent.find((m) => m.type === 'notification')).toBeUndefined();
 
     // Adopted
     expect(adopt).toHaveBeenCalledTimes(1);
@@ -272,6 +298,7 @@ describe('executeReopenSessionConfirmed — happy paths', () => {
       adoptResumed: vi.fn(),
       resumeCallbacks: dummyResumeCallbacks,
       send: captureSend,
+      broadcast: captureBroadcast,
       computeDiff: async () => EMPTY_DIFF,
       resumeTarget: stubResumeOk,
     });
@@ -294,6 +321,7 @@ describe('executeReopenSessionConfirmed — happy paths', () => {
       adoptResumed: vi.fn(),
       resumeCallbacks: dummyResumeCallbacks,
       send: captureSend,
+      broadcast: captureBroadcast,
       computeDiff: async () => DIRTY_DIFF,
       resumeTarget: stubResumeOk,
     });
@@ -319,6 +347,7 @@ describe('executeReopenSessionConfirmed — gate failures', () => {
       adoptResumed: vi.fn(),
       resumeCallbacks: dummyResumeCallbacks,
       send: captureSend,
+      broadcast: captureBroadcast,
       computeDiff: async () => EMPTY_DIFF,
       resumeTarget: stubResumeOk,
     });
@@ -349,6 +378,7 @@ describe('executeReopenSessionConfirmed — gate failures', () => {
       adoptResumed: vi.fn(),
       resumeCallbacks: dummyResumeCallbacks,
       send: captureSend,
+      broadcast: captureBroadcast,
       computeDiff: async () => DIRTY_DIFF,
       resumeTarget: stubResumeOk,
     });
@@ -375,6 +405,7 @@ describe('executeReopenSessionConfirmed — gate failures', () => {
       adoptResumed: vi.fn(),
       resumeCallbacks: dummyResumeCallbacks,
       send: captureSend,
+      broadcast: captureBroadcast,
       computeDiff: async () => DIRTY_DIFF,
       resumeTarget: stubResumeOk,
     });
@@ -398,6 +429,7 @@ describe('executeReopenSessionConfirmed — gate failures', () => {
       adoptResumed: vi.fn(),
       resumeCallbacks: dummyResumeCallbacks,
       send: captureSend,
+      broadcast: captureBroadcast,
       computeDiff: async () => NO_GIT_DIFF,
       resumeTarget: stubResumeOk,
     });
@@ -418,6 +450,7 @@ describe('executeReopenSessionConfirmed — target validation', () => {
       adoptResumed: vi.fn(),
       resumeCallbacks: dummyResumeCallbacks,
       send: captureSend,
+      broadcast: captureBroadcast,
       computeDiff: async () => EMPTY_DIFF,
       resumeTarget: stubResumeOk,
     });
@@ -445,6 +478,7 @@ describe('executeReopenSessionConfirmed — target validation', () => {
       adoptResumed: vi.fn(),
       resumeCallbacks: dummyResumeCallbacks,
       send: captureSend,
+      broadcast: captureBroadcast,
       computeDiff: async () => EMPTY_DIFF,
       resumeTarget: stubResumeOk,
     });
@@ -466,6 +500,7 @@ describe('executeReopenSessionConfirmed — target validation', () => {
       adoptResumed: vi.fn(),
       resumeCallbacks: dummyResumeCallbacks,
       send: captureSend,
+      broadcast: captureBroadcast,
       computeDiff: async () => EMPTY_DIFF,
       resumeTarget: stubResumeOk,
     });
@@ -491,6 +526,7 @@ describe('executeReopenSessionConfirmed — reactivation failures', () => {
       adoptResumed: vi.fn(),
       resumeCallbacks: dummyResumeCallbacks,
       send: captureSend,
+      broadcast: captureBroadcast,
       computeDiff: async () => EMPTY_DIFF,
       resumeTarget: stubResumeReattachFailed,
     });
@@ -515,6 +551,7 @@ describe('executeReopenSessionConfirmed — reactivation failures', () => {
       adoptResumed: vi.fn(),
       resumeCallbacks: dummyResumeCallbacks,
       send: captureSend,
+      broadcast: captureBroadcast,
       computeDiff: async () => EMPTY_DIFF,
       resumeTarget: stubResumeReattachFailed,
     });
@@ -543,6 +580,7 @@ describe('executeReopenSessionConfirmed — reactivation failures', () => {
       adoptResumed: vi.fn(),
       resumeCallbacks: dummyResumeCallbacks,
       send: captureSend,
+      broadcast: captureBroadcast,
       computeDiff: async () => EMPTY_DIFF,
       resumeTarget: throwingResume,
     });
@@ -580,6 +618,7 @@ describe('executeReopenSessionConfirmed — a displaced LIVE incumbent is torn d
       adoptResumed: vi.fn(),
       resumeCallbacks: dummyResumeCallbacks,
       send: captureSend,
+      broadcast: captureBroadcast,
       computeDiff: async () => EMPTY_DIFF,
       resumeTarget: stubResumeOk,
     });
@@ -591,9 +630,10 @@ describe('executeReopenSessionConfirmed — a displaced LIVE incumbent is torn d
     expect(stop).toHaveBeenCalledWith('crashed');
     expect(hasLiveSession('incumbent')).toBe(false);
     expect(getLiveSession('incumbent')).toBeUndefined();
-    // And the swap still completed: row crashed, superseded notice sent.
+    // And the swap still completed: row crashed, superseded notice broadcast
+    // (Cebab-0gjz).
     expect(getMultiAgentSession('incumbent')?.status).toBe('crashed');
-    expect(sent.find((m) => m.type === 'session_superseded')).toBeDefined();
+    expect(broadcastSent.find((m) => m.type === 'session_superseded')).toBeDefined();
   });
 
   test('a stop that THROWS still clears the registry — the swallow must not re-create the leak', async () => {
@@ -631,6 +671,7 @@ describe('executeReopenSessionConfirmed — a displaced LIVE incumbent is torn d
       adoptResumed: vi.fn(),
       resumeCallbacks: dummyResumeCallbacks,
       send: captureSend,
+      broadcast: captureBroadcast,
       computeDiff: async () => EMPTY_DIFF,
       resumeTarget: stubResumeOk,
     });
@@ -685,6 +726,7 @@ describe('executeReopenSessionConfirmed — a failed reopen keeps the incumbent 
       adoptResumed: vi.fn(),
       resumeCallbacks: dummyResumeCallbacks,
       send: captureSend,
+      broadcast: captureBroadcast,
       computeDiff: async () => EMPTY_DIFF,
       resumeTarget: stubResumeReattachFailed,
     });
@@ -693,10 +735,12 @@ describe('executeReopenSessionConfirmed — a failed reopen keeps the incumbent 
       reason: 'reactivate_failed',
     });
     // The operator keeps what they had: sink attached, row still running, and
-    // no supersede notice for a supersede that never happened.
+    // no supersede notice for a supersede that never happened. Asserted on the
+    // broadcast sink — that is where a supersede WOULD land now (Cebab-0gjz),
+    // so this keeps meaning "none was emitted" rather than passing trivially.
     expect(detach).not.toHaveBeenCalled();
     expect(getMultiAgentSession('incumbent')?.status).toBe('running');
-    expect(sent.find((m) => m.type === 'session_superseded')).toBeUndefined();
+    expect(broadcastSent.find((m) => m.type === 'session_superseded')).toBeUndefined();
   });
 
   test('chain target → incumbent survives the unsupported-reconstruction path', async () => {
@@ -712,6 +756,7 @@ describe('executeReopenSessionConfirmed — a failed reopen keeps the incumbent 
       adoptResumed: vi.fn(),
       resumeCallbacks: dummyResumeCallbacks,
       send: captureSend,
+      broadcast: captureBroadcast,
       computeDiff: async () => EMPTY_DIFF,
       resumeTarget: stubResumeReattachFailed,
     });
@@ -736,6 +781,7 @@ describe('executeReopenSessionConfirmed — a failed reopen keeps the incumbent 
       adoptResumed: vi.fn(),
       resumeCallbacks: dummyResumeCallbacks,
       send: captureSend,
+      broadcast: captureBroadcast,
       computeDiff: async () => EMPTY_DIFF,
       resumeTarget: vi.fn(async () => {
         throw new Error('reconstruction blew up');
@@ -765,6 +811,7 @@ describe('executeReopenSessionConfirmed — a failed reopen keeps the incumbent 
       adoptResumed: vi.fn(),
       resumeCallbacks: dummyResumeCallbacks,
       send: captureSend,
+      broadcast: captureBroadcast,
       computeDiff: async () => DIRTY_DIFF,
       resumeTarget: stubResumeOk,
     });
@@ -775,6 +822,10 @@ describe('executeReopenSessionConfirmed — a failed reopen keeps the incumbent 
     expect(stubResumeOk).not.toHaveBeenCalled();
     expect(detach).not.toHaveBeenCalled();
     expect(getMultiAgentSession('incumbent')?.status).toBe('running');
+    // Cebab-0gjz guard: a refusal answers THIS operator's request and rides the
+    // conn-bound `send`. Nothing must fan out — this catches an over-wide fix
+    // that pointed `reopen_session_failed` (or anything else) at `broadcast`.
+    expect(broadcastSent).toHaveLength(0);
   });
 });
 
@@ -830,6 +881,7 @@ describe('executeReopenSessionConfirmed — a cross-connection live run is displ
       adoptResumed: vi.fn(),
       resumeCallbacks: dummyResumeCallbacks,
       send: captureSend,
+      broadcast: captureBroadcast,
       computeDiff: async () => EMPTY_DIFF,
       resumeTarget: stubResumeOk,
     });
@@ -838,11 +890,29 @@ describe('executeReopenSessionConfirmed — a cross-connection live run is displ
     expect(stop).toHaveBeenCalledWith('crashed');
     expect(hasLiveSession('incumbent')).toBe(false);
     expect(getMultiAgentSession('incumbent')?.status).toBe('crashed');
-    // …and its supersede notice was sent…
-    const superseded = sent.find(
+    // …and its supersede notice was BROADCAST, not conn-sent (Cebab-0gjz): the
+    // displaced run is on a different connection, so a conn-bound `send` would
+    // reach the wrong window. This is the case the bead is about — it must
+    // redden on revert (both sinks pointed back at `send`).
+    const superseded = broadcastSent.find(
       (m) => m.type === 'session_superseded' && m.sessionId === 'incumbent',
     );
     expect(superseded).toBeDefined();
+    // The full operational envelope reaches the displaced operator's dock…
+    const notif = broadcastSent.find(
+      (m) => m.type === 'notification' && m.sessionId === 'incumbent',
+    );
+    expect(notif).toMatchObject({
+      type: 'notification',
+      class: 'operational',
+      severity: 'warn',
+      sessionId: 'incumbent',
+      reasonCode: 'operator_reopen',
+      action: { kind: 'archive', sessionId: 'incumbent' },
+    });
+    // …and neither rode the conn-bound sink.
+    expect(sent.find((m) => m.type === 'session_superseded')).toBeUndefined();
+    expect(sent.find((m) => m.type === 'notification')).toBeUndefined();
     // …while the reopening conn, which owns nothing, is never detached…
     expect(detach).not.toHaveBeenCalled();
     // …and the target the operator just reopened is spared, though it is live
@@ -893,6 +963,7 @@ describe('executeReopenSessionConfirmed — a cross-connection live run is displ
       adoptResumed: vi.fn(),
       resumeCallbacks: dummyResumeCallbacks,
       send: captureSend,
+      broadcast: captureBroadcast,
       computeDiff: async () => EMPTY_DIFF,
       resumeTarget: stubResumeOk,
     });
