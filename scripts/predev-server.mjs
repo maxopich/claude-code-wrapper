@@ -53,6 +53,7 @@
  * Silent on the no-op path; logs only when it acts or refuses.
  */
 import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -78,12 +79,54 @@ export const NEEDLE = /--env-file-if-exists=\.\.[/\\]\.env.*\bsrc[/\\]index\.ts\
  * Resolve the port this dev server will bind, matching `server/src/config.ts`:
  * the prefixed `CEBAB_PORT` wins when meaningfully set, else the bare `PORT`,
  * else `DEFAULT_PORT`; a non-integer or out-of-range value falls back too.
+ *
+ * `fileVars` is the repo-root `.env`, and it has to be read HERE because this
+ * hook runs BEFORE the server loads it. `server.dev` passes
+ * `--env-file-if-exists=../.env`, so a `PORT` declared only in `.env` is the
+ * port the server binds, while this script's own `process.env` never sees it.
+ * Without `fileVars` an operator whose `.env` says `PORT=4400` got 4319 freed,
+ * someone else's server stopped, and their own squatter left in place. Node's
+ * env-file rule is per KEY and the process env wins, so each key is resolved
+ * env-first before the CEBAB_PORT-over-PORT precedence applies.
  */
-export function resolveTargetPort(env = process.env) {
-  const raw = [env.CEBAB_PORT, env.PORT].find((v) => v != null && String(v).trim() !== '');
+export function resolveTargetPort(env = process.env, fileVars = {}) {
+  const pick = (key) => (isSet(env[key]) ? env[key] : fileVars[key]);
+  const raw = [pick('CEBAB_PORT'), pick('PORT')].find(isSet);
   const n = Number(raw);
   if (raw != null && Number.isInteger(n) && n >= 1 && n <= 65535) return n;
   return DEFAULT_PORT;
+}
+
+function isSet(v) {
+  return v != null && String(v).trim() !== '';
+}
+
+/**
+ * `CEBAB_PORT` and `PORT` from a dotenv file, or `{}` when it is absent or
+ * unreadable. The same deliberately small parser as `readEnvFileOrigins` in
+ * `dev-origins.mjs`: `export ` prefixes and surrounding quotes are handled,
+ * the last assignment wins, and nothing else is interpreted.
+ */
+export function readEnvFilePorts(envFilePath) {
+  let text;
+  try {
+    text = fs.readFileSync(envFilePath, 'utf8');
+  } catch {
+    return {};
+  }
+  const out = {};
+  for (const line of text.split(/\r?\n/)) {
+    const t = line.trim().replace(/^export\s+/, '');
+    for (const key of ['CEBAB_PORT', 'PORT']) {
+      if (!t.startsWith(`${key}=`)) continue;
+      const raw = t.slice(key.length + 1).trim();
+      out[key] =
+        (raw.startsWith('"') && raw.endsWith('"')) || (raw.startsWith("'") && raw.endsWith("'"))
+          ? raw.slice(1, -1)
+          : raw;
+    }
+  }
+  return out;
 }
 
 /**
@@ -239,7 +282,8 @@ function gather(port) {
 
 function main() {
   const dryRun = process.argv.includes('--dry-run');
-  const port = resolveTargetPort();
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+  const port = resolveTargetPort(process.env, readEnvFilePorts(path.join(repoRoot, '.env')));
   const { listenerPids, processes } = gather(port);
   const decision = decideKill(processes, listenerPids);
 
@@ -281,7 +325,20 @@ function main() {
 }
 
 // Only act as a CLI when invoked directly, not when imported by the test.
-const invokedDirectly = path.resolve(process.argv[1] ?? '') === fileURLToPath(import.meta.url);
+//
+// Compared through realpath on BOTH sides. `import.meta.url` is already the
+// resolved path; `process.argv[1]` is whatever path the caller typed. Under a
+// symlinked directory (macOS's own /tmp and /var are symlinks into /private)
+// the two differ, and a plain comparison made the whole hook a silent no-op.
+function realOrSelf(p) {
+  try {
+    return fs.realpathSync(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+const invokedDirectly =
+  realOrSelf(process.argv[1] ?? '') === realOrSelf(fileURLToPath(import.meta.url));
 if (invokedDirectly) {
   const result = main();
   if (typeof result === 'number') {

@@ -16,9 +16,14 @@
  * on purpose: a second, fully-matching Cebab tree sits in the process table and
  * must come out untouched, which is the exact regression the old code caused.
  */
+import { execFileSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
 import { describe, expect, test } from 'vitest';
 
-import { decideKill, resolveTargetPort, NEEDLE } from './predev-server.mjs';
+import { decideKill, readEnvFilePorts, resolveTargetPort, NEEDLE } from './predev-server.mjs';
 
 /** A realistic tsx-watch command line for a Cebab dev server. */
 const WATCH_CMD =
@@ -103,6 +108,58 @@ describe('resolveTargetPort: matches server/src/config.ts precedence', () => {
     expect(resolveTargetPort({ PORT: 'abc' })).toBe(4319);
     expect(resolveTargetPort({ PORT: '70000' })).toBe(4319);
     expect(resolveTargetPort({ PORT: '0' })).toBe(4319);
+  });
+});
+
+describe('resolveTargetPort reads the .env the server will load (review of Cebab-ulfb)', () => {
+  test('a PORT declared only in .env is the port that gets freed', () => {
+    // The server gets `--env-file-if-exists=../.env`; this hook runs before it
+    // with a plain process env. Reading only `env` freed 4319 here.
+    expect(resolveTargetPort({}, { PORT: '4400' })).toBe(4400);
+    // Control, same case: nothing anywhere is still the default.
+    expect(resolveTargetPort({}, {})).toBe(4319);
+  });
+
+  test('per key, the process env beats the file, as Node\u2019s --env-file does', () => {
+    expect(resolveTargetPort({ PORT: '5000' }, { PORT: '4400' })).toBe(5000);
+    // CEBAB_PORT from the file still outranks a bare PORT from the env,
+    // because the server reads CEBAB_PORT first whichever source supplied it.
+    expect(resolveTargetPort({ PORT: '5000' }, { CEBAB_PORT: '6000' })).toBe(6000);
+    // A blank env value does not shadow the file.
+    expect(resolveTargetPort({ PORT: '' }, { PORT: '4400' })).toBe(4400);
+  });
+
+  test('the CLI itself reads the .env beside the repo root, not only the function', () => {
+    // Wiring, not logic: a copy of the script under <tmp>/scripts/ with a
+    // <tmp>/.env declaring PORT. --dry-run names the port it decided on and
+    // kills nothing. The env passed has NO port, so only the file can supply it.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'predev-cli-'));
+    try {
+      fs.mkdirSync(path.join(dir, 'scripts'));
+      const script = path.join(dir, 'scripts', 'predev-server.mjs');
+      fs.copyFileSync(new URL('./predev-server.mjs', import.meta.url), script);
+      fs.writeFileSync(path.join(dir, '.env'), 'PORT=45999\n');
+      const env = { ...process.env };
+      delete env.PORT;
+      delete env.CEBAB_PORT;
+      const out = execFileSync(process.execPath, [script, '--dry-run'], { env, encoding: 'utf8' });
+      expect(out).toContain('port 45999');
+      expect(out).not.toContain('port 4319');
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test('readEnvFilePorts parses export prefixes and quotes, last one wins', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'predev-env-'));
+    const file = path.join(dir, '.env');
+    fs.writeFileSync(file, 'MOCK=0\nexport PORT="4400"\nCEBAB_PORT=\nPORT=4401\n');
+    try {
+      expect(readEnvFilePorts(file)).toEqual({ PORT: '4401', CEBAB_PORT: '' });
+      expect(readEnvFilePorts(path.join(dir, 'missing.env'))).toEqual({});
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
