@@ -2127,6 +2127,22 @@ pre {
   border-color: var(--err);
   color: var(--err-ink);
 }
+/* Cebab-6nmo: a deliberate cancellation (operator Stop, or a declined
+ * trust/env/MCP prompt). Quiet and NEUTRAL — the muted text/border of a
+ * separator, deliberately NOT the `.msg.error` colour, because nothing failed. */
+.msg.cancelled {
+  border-color: var(--line-2);
+  color: var(--fg-2);
+}
+.msg.cancelled .role {
+  color: var(--fg-2);
+  font-style: italic;
+  font-weight: 400;
+}
+.msg.cancelled .avatar.system {
+  background: var(--bg-3);
+  color: var(--fg-2);
+}
 .msg.permission {
   border-left: 0;
   border: 1px solid var(--warn-border);

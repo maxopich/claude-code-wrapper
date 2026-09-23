@@ -465,3 +465,99 @@ describe('store / a wrapper_error for a known multi-agent iteration (Cebab-7vl4)
     expect(sess!.messages.filter((m) => m.kind === 'error')).toHaveLength(1);
   });
 });
+
+/**
+ * Cebab-6nmo: a session-scoped `aborted` is a DELIBERATE end — the operator
+ * pressed Stop, or declined a trust/env/MCP prompt that ended the turn. Nothing
+ * failed, so it must NOT flip the session to `status: 'error'` and must NOT
+ * append the red `.msg.error` row. It becomes a quiet neutral `cancelled`
+ * message and the session takes the status a normally-ended turn gets (`done`).
+ *
+ * Every OTHER kind is unchanged (the process_crashed control below), which is
+ * what stops the fix being "swallow every session-scoped wrapper_error".
+ */
+describe('store / a session-scoped aborted is a neutral cancel, not an error (Cebab-6nmo)', () => {
+  function seedLiveSession(sessionId = 'sess-1'): AppState {
+    let s = seedProject();
+    s = reduce(s, {
+      type: 'server',
+      msg: { type: 'session_started', sessionId, projectId: PID, model: 'opus-4', tools: [] },
+    });
+    // Give it in-flight output so we can also see the elapsed timer stop.
+    const sess = s.sessionsByProject[PID]![sessionId]!;
+    return {
+      ...s,
+      sessionsByProject: {
+        ...s.sessionsByProject,
+        [PID]: { ...s.sessionsByProject[PID], [sessionId]: { ...sess, streamingText: 'partial' } },
+      },
+    };
+  }
+
+  function abortedWith(message: string, sessionId = 'sess-1') {
+    return {
+      type: 'server' as const,
+      msg: { type: 'wrapper_error' as const, sessionId, kind: 'aborted' as const, message },
+    };
+  }
+
+  test('does not flip the session to error and renders no error row', () => {
+    const before = seedLiveSession();
+    const after = reduce(before, abortedWith('Operation aborted'));
+
+    const sess = after.sessionsByProject[PID]!['sess-1']!;
+    // The whole point: not 'error'. It is the status a normal turn ends with.
+    expect(sess.status).not.toBe('error');
+    expect(sess.status).toBe('done');
+    // No red error row was appended.
+    expect(sess.messages.filter((m) => m.kind === 'error')).toHaveLength(0);
+    // A single neutral cancelled row is.
+    const cancels = sess.messages.filter((m) => m.kind === 'cancelled');
+    expect(cancels).toHaveLength(1);
+    // The elapsed timer is stopped and the streaming buffer retired.
+    expect(sess.runStartedAt).toBeNull();
+    expect(sess.streamingText).toBe('');
+    // The spinner-clearing signal still moved.
+    expect(after.failureSeq).toBe(before.failureSeq + 1);
+  });
+
+  test('copy: a raw abort message reads as a Stop', () => {
+    const after = reduce(seedLiveSession(), abortedWith('Operation aborted'));
+    const cancel = after.sessionsByProject[PID]!['sess-1']!.messages.find(
+      (m) => m.kind === 'cancelled',
+    );
+    expect(cancel && 'message' in cancel ? cancel.message : null).toBe('Stopped by you');
+  });
+
+  test('copy: the server "Turn cancelled: …" prefix reads as a declined prompt', () => {
+    const after = reduce(
+      seedLiveSession(),
+      abortedWith('Turn cancelled: you declined a trust or environment prompt before it started.'),
+    );
+    const cancel = after.sessionsByProject[PID]!['sess-1']!.messages.find(
+      (m) => m.kind === 'cancelled',
+    );
+    expect(cancel && 'message' in cancel ? cancel.message : null).toBe(
+      'Cancelled — you declined the prompt',
+    );
+  });
+
+  test('CONTROL: a process_crashed in the SAME session still becomes a red error row', () => {
+    // Anti-vacuity: the branch must key on the kind, not swallow every
+    // session-scoped wrapper_error. A genuine crash keeps the old behaviour.
+    const before = seedLiveSession('sess-2');
+    const after = reduce(before, {
+      type: 'server',
+      msg: {
+        type: 'wrapper_error',
+        sessionId: 'sess-2',
+        kind: 'process_crashed',
+        message: 'it really fell over',
+      },
+    });
+    const sess = after.sessionsByProject[PID]!['sess-2']!;
+    expect(sess.status).toBe('error');
+    expect(sess.messages.filter((m) => m.kind === 'error')).toHaveLength(1);
+    expect(sess.messages.filter((m) => m.kind === 'cancelled')).toHaveLength(0);
+  });
+});

@@ -178,6 +178,23 @@ function MessageBlockImpl(props: {
     );
   }
 
+  if (m.kind === 'cancelled') {
+    // Cebab-6nmo: a deliberate cancellation (operator Stop, or a declined
+    // trust/env/MCP prompt) is a QUIET, NEUTRAL line — muted styling, NOT the
+    // `.msg.error` colour, because nothing failed. The reducer already chose
+    // the copy; this only renders it.
+    return (
+      <div className="msg cancelled msg-group">
+        <div className="avatar system" aria-hidden="true">
+          –
+        </div>
+        <div className="msg-body">
+          <div className="role">{m.message}</div>
+        </div>
+      </div>
+    );
+  }
+
   if (m.kind === 'ask_user_question') {
     // `Cebab-uhn2`. Styled as a permission card, because that is what it is
     // from the operator's side: the turn is parked at the same gate and will
