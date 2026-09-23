@@ -150,6 +150,28 @@ describe('buildSweptSessionBannerItem — render integration', () => {
     expect(labels).toContain('Archive');
   });
 
+  // Cross-connection copy (Cebab-oexs): the banner is the surface the
+  // operator actually clicks Reopen from, so its copy must be true in
+  // the no-local-session case too. Negatives redden if "sets aside the
+  // current active session" comes back to either the body or the tooltip.
+  test('body + Reopen tooltip mention another window, not "set aside"', () => {
+    const item = buildSweptSessionBannerItem({
+      sessionId: 'sess-1',
+      callbacks: mkCallbacks(),
+    });
+    act(() => {
+      root.render(<SessionBanner {...item} />);
+    });
+    expect(container.textContent).toContain('another Cebab window');
+    expect(container.textContent).not.toMatch(/set aside/i);
+
+    const reopenTitle = item.actions![0].title!;
+    expect(reopenTitle).toContain('in another window');
+    expect(reopenTitle).not.toMatch(/set aside/i);
+    // Pre-existing clause must survive the rewrite.
+    expect(reopenTitle).toContain('Reviews the workspace diff');
+  });
+
   test('Reopen click invokes onReopen callback', () => {
     const onReopen = vi.fn();
     renderItem({

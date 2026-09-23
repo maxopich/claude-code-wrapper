@@ -87,10 +87,10 @@ export function buildSweptSessionBannerItem(
         <code>{shortId}</code>) is no longer the one your next message would reach.
       </p>
       <p>
-        <strong>Reopen</strong> sets aside the current active session and brings this one back.
-        You'll review the workspace diff first and (when files have changed) type a confirmation
-        before the swap. <strong>Archive</strong> hides this iteration from the list; the session
-        folder and transcripts on disk are preserved.
+        <strong>Reopen</strong> stops any run that is currently live — including one in another
+        Cebab window — and brings this one back. You'll review the workspace diff first and (when
+        files have changed) type a confirmation before the swap. <strong>Archive</strong> hides this
+        iteration from the list; the session folder and transcripts on disk are preserved.
       </p>
     </>
   );
@@ -109,7 +109,7 @@ export function buildSweptSessionBannerItem(
         disabled: reopenInFlight,
         title: reopenInFlight
           ? 'A reopen flow is already in progress — finish or cancel it first.'
-          : 'Bring this iteration back to active and set aside the current run. Reviews the workspace diff first.',
+          : 'Bring this iteration back to active and stop any run currently live, including one in another window. Reviews the workspace diff first.',
       },
       {
         label: 'Archive',
