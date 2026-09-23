@@ -3765,6 +3765,17 @@ pre {
   padding-top: 6px;
   padding-bottom: 6px;
 }
+/* Cebab-7jcq: the draft's pinned footer — the validation warning, the [Inspect
+ * authority] row and the composer in one wrapper. `useComposerClearance`
+ * measures THIS element (not the composer's own `.input-box` wrap) so the
+ * notification dock offsets up by the whole footer's height and clears the
+ * inspect button + warning, which sit above the composer. flex-shrink:0 keeps
+ * it pinned to the bottom while `.multi-agent-draft-body` (flex:1) scrolls. */
+.multi-agent-draft-footer {
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+}
 .ma-lifecycle-inline {
   display: flex;
   align-items: center;
