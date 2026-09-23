@@ -28,7 +28,8 @@
  * and do not buy, and why `.git` is excluded: docs/managed-agents.md.
  */
 
-import { promises as fsp } from 'node:fs';
+import fs, { promises as fsp } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 import { config } from './config.js';
@@ -41,6 +42,7 @@ import {
   isInside,
 } from './path_containment.js';
 import { slugifyAgentName } from './bus/paths.js';
+import { findProjectByPath } from './repo/projects.js';
 
 /** Where every managed agent lives. Mirrors `sessionsRoot()` in `bus/paths.ts`. */
 export function managedAgentsRoot(): string {
@@ -481,12 +483,50 @@ async function secureMkdirAsync(dir: string): Promise<void> {
 }
 
 /**
+ * The CLI's per-cwd transcript directory for `cwd`.
+ *
+ * Cebab-1o1t. `~/.claude/projects/<encoded-cwd>/<session-id>.jsonl` is keyed by
+ * the absolute cwd with every non-alphanumeric character replaced by '-' (the
+ * "Resume gotcha" in CLAUDE.md). `CLAUDE_CONFIG_DIR` relocates the whole config
+ * root and the CLI honours it, so we resolve it the same way — which is also
+ * what makes this observable from an isolated test without touching real `~`.
+ */
+function cliTranscriptDirFor(cwd: string): string {
+  const configDir = process.env.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), '.claude');
+  return path.join(configDir, 'projects', cwd.replace(/[^a-zA-Z0-9]/g, '-'));
+}
+
+/**
+ * [security] Cebab-1o1t: a slug is TAKEN when its path has ANY history, not only
+ * when a directory sits there right now.
+ *
+ * A re-copy is a FRESH agent. If it landed on the path a vanished copy used, the
+ * registration below would find that copy's `projects` row by path and hand the
+ * new copy its id, its Trust, its start mode and its whole session list — the
+ * silent takeover this bead closes. The missing-sweep deliberately leaves a
+ * hand-deleted managed row behind (still missing, still deletable), and a
+ * `managed delete` removes the row but leaves the CLI transcript directory. So
+ * neither trace is proof the path is free, and both are checked:
+ *   - a `projects` row already holds that path, missing or not; or
+ *   - the CLI already has a transcript directory for that path.
+ * A path with either kind of history moves the claim on to the next suffix,
+ * exactly as an on-disk `EEXIST` does.
+ */
+function managedPathHasHistory(candidatePath: string): boolean {
+  if (findProjectByPath(candidatePath)) return true;
+  if (fs.existsSync(cliTranscriptDirFor(candidatePath))) return true;
+  return false;
+}
+
+/**
  * Claim a fresh directory under the managed root for `projectName`.
  *
  * Non-recursive `mkdir` in a loop is the race-free way to do this: it throws
  * `EEXIST` for a taken name rather than silently succeeding the way
  * `recursive: true` does, so two callers cannot both believe they own the same
- * directory.
+ * directory. On top of that on-disk claim, `managedPathHasHistory` rejects any
+ * slug whose path a previous copy has ever used (Cebab-1o1t) — a live directory
+ * is not the only trace a re-copy must step around.
  *
  * Disambiguation is a PRIMARY path here, not an edge case: a second copy of the
  * same project is defined to produce a second managed agent (operator
@@ -504,6 +544,9 @@ export async function claimManagedDir(projectName: string): Promise<string> {
   const base = slugifyAgentName(projectName) || 'agent';
   for (let n = 1; n <= 200; n++) {
     const candidate = path.join(root, n === 1 ? base : `${base}-${n}`);
+    // A path with history is taken even when its directory is gone — skip to the
+    // next suffix before attempting the on-disk claim.
+    if (managedPathHasHistory(candidate)) continue;
     try {
       // Non-recursive on purpose: it throws EEXIST for a taken name, which is
       // what makes the claim race-free. The chmod after is what makes the mode

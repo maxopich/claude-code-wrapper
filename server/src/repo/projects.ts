@@ -325,10 +325,13 @@ export function resolveStartPermissionMode(
  * and `.mcp.json` on its first session and every bus hop rather than silently
  * running as if untrusted. It is required, not optional, so the compiler names
  * every call site rather than letting one leave a stale value behind, and the
- * write is unconditional (1 or 0) so a re-claimed managed directory — see
- * `claimManagedDir` — is set to the source's current Trust rather than keeping
- * whatever the prior occupant had. `startPermissionMode` is inherited the same
- * way and for the same reason (Cebab-yih6, maintainer decision 2026-09-23): a
+ * write is unconditional (1 or 0). Trust follows the SOURCE and never a prior
+ * occupant of the path: `claimManagedDir` refuses any slug whose path has
+ * history (Cebab-1o1t), so a copy always lands on a FRESH row, and the guard
+ * below refuses outright if one ever does not — a copy must never revive a
+ * vanished copy's row and inherit its Trust. `startPermissionMode` is inherited
+ * the same way and for the same reason (Cebab-yih6, maintainer decision
+ * 2026-09-23): a
  * Trusted source set to ask before every tool must not yield a copy that
  * auto-accepts edits, so a copy is never looser than its original. `model` and
  * `bus_trust_decision` are NOT inherited, and later changes on the source do
@@ -351,6 +354,18 @@ export function registerManagedProject(
   // missing-sweep, so it would sit in the sidebar until deleted by hand.
   const db = getDb();
   return db.transaction(() => {
+    // [security] Cebab-1o1t: defence in depth. `claimManagedDir` already keeps a
+    // copy off any path with history, so this should never fire — but if it did,
+    // `upsertProject` would find the existing row by path and hand it back,
+    // re-trusting the fresh copy with the vanished occupant's Trust. Refuse
+    // instead. The caller (`runManagedCopy`) reacts to a throw by removing the
+    // claimed tree, so nothing is left behind and the old row stays untouched.
+    if (findProjectByPath(projectPath)) {
+      throw new Error(
+        `registerManagedProject: refusing to register at ${JSON.stringify(projectPath)} — a ` +
+          'project row already holds that path (Cebab-1o1t)',
+      );
+    }
     const row = upsertProject(name, projectPath);
     db.prepare(
       'UPDATE projects SET managed_source_path = ?, managed_copied_at = ?, trusted = ?, start_permission_mode = ? WHERE id = ?',
