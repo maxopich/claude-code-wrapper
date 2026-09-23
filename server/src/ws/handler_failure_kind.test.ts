@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'vitest';
 
 import { classifyHandlerFailure } from './server.js';
-import { GateAbandonedError } from '../gate_abandon.js';
+import { GateAbandonedError, GateBacklogError } from '../gate_abandon.js';
 
 /**
  * `Cebab-6fax.17` — a cancellation is not a crash.
@@ -21,6 +21,15 @@ describe('classifyHandlerFailure', () => {
   test('an abandoned gate is `aborted` — the operator declined', () => {
     expect(classifyHandlerFailure(new GateAbandonedError('session-start', 'cancelled'))).toBe(
       'aborted',
+    );
+  });
+
+  test('a backlog refusal is `process_crashed` — Cebab refused, nobody cancelled (Cebab-lym0)', () => {
+    // The over-cap fail-closed refusal is NOT an operator decline: it must not
+    // borrow `GateAbandonedError`'s `AbortError` name, or it reads as a cancel
+    // and (post-Cebab-osfq) vanishes as a transient blue toast.
+    expect(classifyHandlerFailure(new GateBacklogError('session-start', 'cap reached'))).toBe(
+      'process_crashed',
     );
   });
 

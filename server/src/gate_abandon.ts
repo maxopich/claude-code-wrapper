@@ -53,6 +53,32 @@ export class GateAbandonedError extends Error {
 }
 
 /**
+ * Thrown when a gate refuses to park because `MAX_PENDING_GATES` are already
+ * parked on the connection — the fail-CLOSED direction (better to refuse than
+ * spawn unacknowledged, and better than growing the map without bound).
+ *
+ * `name` is deliberately NOT `AbortError`. This is Cebab refusing a request it
+ * could not safely queue, not an operator declining a prompt: nobody cancelled
+ * anything. `classifyHandlerFailure`/`classifyBusStartFailure` key `aborted`
+ * off `name === 'AbortError'` and then substitute the operator-cancel sentence,
+ * so reusing `GateAbandonedError` here made a backlog refusal read as a
+ * deliberate decline and (post-`Cebab-osfq`) vanish as a transient blue
+ * "Cancelled" toast. Left with a plain name it classifies as `process_crashed`
+ * and keeps its own message — a loud failure, which is what it is.
+ *
+ * The two peer gates (`mcp_trust_gate.ts`, `install_trust_gate.ts`) express the
+ * same over-cap outcome through a `gate_backlog` refusal return; this gate's
+ * surface is `Promise<void>`, so a throw is its only channel — hence a distinct
+ * error class rather than a distinct return.
+ */
+export class GateBacklogError extends Error {
+  constructor(gateName: string, reason: string) {
+    super(`${gateName} gate refused: ${reason}`);
+    this.name = 'GateBacklogError';
+  }
+}
+
+/**
  * Ceiling on parked entries per gate, per connection.
  *
  * H15's second half: each entry holds a promise plus the snapshot that
