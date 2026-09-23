@@ -129,6 +129,48 @@ describe('appendSafetyAudit', () => {
   });
 });
 
+// ---- home-path collapsing (Cebab-6fax.43.5) ----
+
+describe('appendSafetyAudit collapses the operator home directory', () => {
+  test('a home-prefixed path in the payload is stored as ~/… and the chain still verifies', () => {
+    const home = os.homedir();
+    const managedPath = path.join(home, '.cebab', 'agents', 'my-agent');
+    const { id } = appendSafetyAudit({
+      ts: 42,
+      kind: 'project.managed_file_edited',
+      reasonCode: 'managed_file_edited',
+      payload: {
+        // The prefix that must be collapsed.
+        path: managedPath,
+        // Boundary control A: a sibling whose name merely STARTS with home is
+        // not under it — the boundary is not a separator — and must be kept.
+        sibling: home + 'X' + path.sep + 'agents',
+        // Boundary control B: the home string appearing mid-value is not a
+        // prefix and must be kept verbatim.
+        note: 'copied from ' + home,
+        // A non-string leaf is untouched.
+        bytes: 123,
+      },
+    });
+
+    const row = getSafetyAuditRow(id)!;
+    const stored = JSON.parse(row.payload_json) as {
+      path: string;
+      sibling: string;
+      note: string;
+      bytes: number;
+    };
+    expect(stored.path).toBe('~' + managedPath.slice(home.length));
+    expect(stored.path).not.toContain(home);
+    expect(stored.sibling).toBe(home + 'X' + path.sep + 'agents');
+    expect(stored.note).toBe('copied from ' + home);
+    expect(stored.bytes).toBe(123);
+
+    // Substitution happens BEFORE hashing, so the chain covers what is stored.
+    expect(verifyChain()).toEqual({ ok: true, rowsChecked: 1 });
+  });
+});
+
 // ---- verifyChain ----
 
 describe('[security][A] verifyChain', () => {

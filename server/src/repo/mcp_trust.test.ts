@@ -678,6 +678,29 @@ describe('firstDecisionTs — the first decision, from the chain that keeps them
     expect(firstDecisionTs('never-seen', '/p/settings.json')).toBeNull();
   });
 
+  test('finds a decision on a home-prefixed origin path across the ~ seam (Cebab-6fax.43.5)', () => {
+    // The append site collapses the home prefix, so the `trust_decided` row is
+    // stored with `~/…`; the caller still queries with the live absolute path.
+    const originPath = path.join(os.homedir(), 'agents', 'svr', '.mcp.json');
+    decide({
+      serverName: 'home-svr',
+      originPath,
+      binarySha: null,
+      scriptShas: null,
+      decision: 'trusted',
+    });
+    // The stored value is collapsed…
+    const stored = getDb()
+      .prepare<[], { origin: string | null }>(
+        `SELECT json_extract(payload_json, '$.originPath') AS origin FROM safety_audit
+          WHERE kind = 'mcp.trust_decided' ORDER BY rowid DESC LIMIT 1`,
+      )
+      .get();
+    expect(stored?.origin).toBe('~' + originPath.slice(os.homedir().length));
+    // …yet the lookup by the live absolute path still resolves it.
+    expect(firstDecisionTs('home-svr', originPath)).toBe(1_700_000_000_000);
+  });
+
   test('does not leak across servers or origins', () => {
     decide({
       serverName: 'a',
