@@ -119,6 +119,21 @@ export type ResumeCallbacks = {
    *  `bus_auto_installed`, dangerous-mutation safety toasts) and as the
    *  dispatcher.emit `send` callback (notification envelopes). */
   sendServerMsg?: BusSink['sendServerMsg'];
+  /**
+   * `Cebab-0ueh`: fan-out to EVERY open connection, not just the resuming
+   * one. The auto-sweep (`attemptResumeMultiAgent`) crash-marks any older
+   * `running` row alongside the resume candidate — but that swept run can be
+   * live on a DIFFERENT connection than the one that just connected and
+   * triggered the sweep. Its supersede notice + warn toast must reach the
+   * DISPLACED operator's window, so `markCrashedAndAnnounceSuperseded` routes
+   * them here instead of down the conn-bound `sendServerMsg` (which reaches
+   * only the resuming conn). Mirrors the reopen path's `broadcast` sink
+   * (`Cebab-0gjz`). Optional: when absent it falls back to `sendServerMsg`, so
+   * unit tests that wire only the conn sink keep their existing behaviour and
+   * a caller that forgets it degrades to conn-bound rather than to silence.
+   * The one production caller (`resumeOnConnect`) wires `broadcastServerMsg`.
+   */
+  broadcastServerMsg?: BusSink['sendServerMsg'];
 };
 
 export type ResumedSession = {
@@ -465,10 +480,18 @@ async function markCrashedAndAnnounceSuperseded(
     console.error(`[resume] failed to mark ${orphanSessionId} crashed (supersede)`, err);
   }
 
+  // `Cebab-0ueh`: the swept-crashed run can be live on a DIFFERENT connection
+  // than the one that triggered this sweep, so both the typed notice and the
+  // toast below must reach the DISPLACED operator's window — fan out via
+  // `broadcastServerMsg`. Fall back to the conn-bound `sendServerMsg` only when
+  // no broadcast sink was wired (unit tests), so behaviour degrades to
+  // conn-bound rather than to silence. Mirrors the reopen path (`Cebab-0gjz`).
+  const fanOut = callbacks.broadcastServerMsg ?? callbacks.sendServerMsg;
+
   // Step 2: typed ServerMsg for downstream consumers (Cluster D iterations
   // panel + future inspector). Optional callback — pre-Phase-4 callers
   // (tests, smokes) may not wire it.
-  callbacks.sendServerMsg?.({
+  fanOut?.({
     type: 'session_superseded',
     sessionId: orphanSessionId,
     supersedingSessionId,
@@ -491,7 +514,7 @@ async function markCrashedAndAnnounceSuperseded(
   // risk-graded ordering (`Archive primary` in §6.5), so making it the
   // toast's single-action choice is a clean partial implementation
   // rather than a regression.
-  if (callbacks.sendServerMsg) {
+  if (fanOut) {
     const result = emitNotification(
       {
         class: 'operational',
@@ -509,7 +532,7 @@ async function markCrashedAndAnnounceSuperseded(
         // newer iteration took over the single-active slot.
         reasonCode: 'swept_competing',
       },
-      callbacks.sendServerMsg,
+      fanOut,
     );
     if (!result.ok) {
       console.error('[resume] session_superseded dispatcher.emit failed', result.error);

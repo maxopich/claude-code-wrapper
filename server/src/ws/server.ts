@@ -4001,6 +4001,12 @@ async function resumeOnConnect(conn: Conn): Promise<void> {
   try {
     const resumed = await attemptResumeMultiAgent({
       ...resumeCallbacks(conn),
+      // `Cebab-0ueh`: the sweep crash-marks any older `running` row alongside
+      // the resume candidate, and that swept run can be live on a DIFFERENT
+      // connection than this one. Its supersede notice + toast must reach the
+      // displaced operator's window, so fan them out to every connection
+      // rather than down `resumeCallbacks(conn).sendServerMsg` (this conn only).
+      broadcastServerMsg,
       hopBudget: resolveHopBudget(),
       maxTurns: resolveMaxTurns(),
       // [security] `Cebab-faoa`: this is the AUTOMATIC sweep — refuse

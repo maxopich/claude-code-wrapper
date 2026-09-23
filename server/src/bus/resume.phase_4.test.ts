@@ -141,6 +141,50 @@ describe('[BE-11 / D3] attemptResumeMultiAgent emits session_superseded for orph
     });
   });
 
+  test('Cebab-0ueh: the supersede notice + toast fan out via broadcast, not the conn sink', async () => {
+    // Same two-row sweep as above, but now the caller wires BOTH a conn-bound
+    // `sendServerMsg` and a `broadcastServerMsg`. The swept run can be live on
+    // a different connection than the resuming one, so its notice/toast must go
+    // to every window (broadcast), not just the resuming conn (`sendServerMsg`).
+    createMultiAgentSession(OLDER_SID, 'orchestrator');
+    stampStartedAt(OLDER_SID, OLDER_TS);
+    createMultiAgentSession(NEWER_SID, 'orchestrator');
+    stampStartedAt(NEWER_SID, NEWER_TS);
+
+    const sent: ServerMsg[] = [];
+    const broadcast: ServerMsg[] = [];
+    await attemptResumeMultiAgent({
+      onEvent: vi.fn(),
+      onEnded: vi.fn(),
+      hopBudget: 1000,
+      maxTurns: 50,
+      gateParticipants: async () => new Map<number, readonly string[]>(),
+      sendServerMsg: (m) => sent.push(m),
+      broadcastServerMsg: (m) => broadcast.push(m),
+    });
+
+    expect(getMultiAgentSession(OLDER_SID)!.status).toBe('crashed');
+
+    // Both the typed notice and the warn toast landed on the BROADCAST sink…
+    expect(broadcast.find((m) => m.type === 'session_superseded')).toMatchObject({
+      type: 'session_superseded',
+      sessionId: OLDER_SID,
+      supersedingSessionId: NEWER_SID,
+      supersedingTs: NEWER_TS,
+    });
+    expect(broadcast.find((m) => m.type === 'notification')).toMatchObject({
+      type: 'notification',
+      sessionId: OLDER_SID,
+      reasonCode: 'swept_competing',
+    });
+
+    // …and NOT on the conn-bound sink. This negative is what makes the two
+    // positives non-vacuous: on unfixed code (which routes via `sendServerMsg`)
+    // both would land in `sent` and these assertions would fail.
+    expect(sent.find((m) => m.type === 'session_superseded')).toBeUndefined();
+    expect(sent.find((m) => m.type === 'notification')).toBeUndefined();
+  });
+
   test('no orphan rows → no session_superseded emission', async () => {
     // Just one running row — no older active rows to sweep.
     createMultiAgentSession(NEWER_SID, 'orchestrator');
