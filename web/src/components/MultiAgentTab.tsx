@@ -832,20 +832,10 @@ export function DraftView(props: {
         </section>
       </div>
 
-      {validation !== null && (
-        <p className="multi-agent-warning multi-agent-warning-composer">{validation}</p>
-      )}
-      {/* Cluster B Phase 6e (UI-B8): composer-adjacent [Inspect authority]
-       *  ghost-btn opens the AuthorityPreflightModal in aggregate mode
-       *  (one panel per participant project). Only renders when there's at
-       *  least one participant — empty draft has nothing to inspect. */}
-      {participants.length > 0 && (
-        <div className="multi-agent-inspect-row">
-          <DraftInspectAuthorityButton projectIds={participants.map((p) => p.id)} />
-        </div>
-      )}
-      <MultiAgentComposer
+      <MultiAgentDraftFooter
         mode={props.mode}
+        validation={validation}
+        participantIds={participants.map((p) => p.id)}
         value={multiAgent.draftPrompt}
         onChange={props.onSetDraftPrompt}
         pending={startPending !== null}
@@ -873,9 +863,63 @@ export function DraftView(props: {
   );
 }
 
-/** Exported for `MultiAgentComposer.clearance.test.tsx`, which pins the
- *  `--composer-clearance` mechanism (Cebab-xqad) without mounting the whole
- *  DraftView. Not imported by app code — DraftView renders it directly. */
+/**
+ * The draft's pinned footer: the validation warning, the [Inspect authority]
+ * row and the composer, in one wrapper.
+ *
+ * `Cebab-7jcq`: the `--composer-clearance` ref lives HERE, not on the composer's
+ * own `.input-box` wrap. The notification dock offsets up by that height, and
+ * the warning + inspect row sit ABOVE the composer — so publishing only the
+ * composer's height left the dock covering the [Inspect authority] button (and
+ * the warning). Measured live at 1024x768 with a sticky toast: `elementFromPoint`
+ * at the button's centre returned `div.notif-message`. Measuring the whole
+ * footer clears all three. Still a SINGLE `useComposerClearance` caller — the
+ * hook moved up a level rather than gaining a second call site.
+ *
+ * Exported for `MultiAgentComposer.clearance.test.tsx`, which pins the mechanism
+ * without mounting the whole DraftView.
+ */
+export function MultiAgentDraftFooter(props: {
+  mode: 'chain' | 'orchestrator';
+  validation: string | null;
+  participantIds: number[];
+  value: string;
+  onChange: (t: string) => void;
+  onStart: () => void;
+  pending: boolean;
+  disabled: boolean;
+}) {
+  const footerRef = useRef<HTMLDivElement | null>(null);
+  useComposerClearance(footerRef);
+  return (
+    <div className="multi-agent-draft-footer" ref={footerRef}>
+      {props.validation !== null && (
+        <p className="multi-agent-warning multi-agent-warning-composer">{props.validation}</p>
+      )}
+      {/* Cluster B Phase 6e (UI-B8): composer-adjacent [Inspect authority]
+       *  ghost-btn opens the AuthorityPreflightModal in aggregate mode
+       *  (one panel per participant project). Only renders when there's at
+       *  least one participant — empty draft has nothing to inspect. */}
+      {props.participantIds.length > 0 && (
+        <div className="multi-agent-inspect-row">
+          <DraftInspectAuthorityButton projectIds={props.participantIds} />
+        </div>
+      )}
+      <MultiAgentComposer
+        mode={props.mode}
+        value={props.value}
+        onChange={props.onChange}
+        pending={props.pending}
+        disabled={props.disabled}
+        onStart={props.onStart}
+      />
+    </div>
+  );
+}
+
+/** The draft's prompt box and Start button. Rendered by
+ *  `MultiAgentDraftFooter`, which owns the `--composer-clearance` measurement
+ *  (Cebab-7jcq moved it up from here so the dock clears the whole footer). */
 export function MultiAgentComposer(props: {
   mode: 'chain' | 'orchestrator';
   value: string;
@@ -886,14 +930,8 @@ export function MultiAgentComposer(props: {
 }) {
   const blocked = props.disabled || props.pending;
   const isChain = props.mode === 'chain';
-  // Cebab-xqad: publish this composer's height so the notification dock clears
-  // the Start button. Without it `--composer-clearance` was empty on the
-  // multi-agent/chain tabs and a sticky toast covered Start, swallowing the
-  // click. Shared with InputBox via the same hook.
-  const wrapRef = useRef<HTMLDivElement | null>(null);
-  useComposerClearance(wrapRef);
   return (
-    <div className="input-box multi-agent-composer" ref={wrapRef}>
+    <div className="input-box multi-agent-composer">
       <GrowTextarea
         value={props.value}
         onChange={props.onChange}

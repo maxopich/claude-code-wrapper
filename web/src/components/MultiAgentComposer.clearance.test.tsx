@@ -2,23 +2,31 @@
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, test } from 'vitest';
-import { MultiAgentComposer } from './MultiAgentTab';
+import { MultiAgentDraftFooter } from './MultiAgentTab';
 import { COMPOSER_CLEARANCE_VAR } from './useComposerClearance';
 
 /**
  * `Cebab-xqad`: the multi-agent (and chain) draft composer did NOT publish
  * `--composer-clearance`, so on those tabs the property was empty and the
  * notification dock sat at its default bottom — on top of the Start button.
- * Measured live at 1024x768: `document.elementFromPoint` at the Start button's
- * centre returned `div.notif-message`, and the click did nothing. `InputBox`
- * (single-agent) was fixed for exactly this by `Cebab-aids`; the draft composer
- * forgot to. The fix is a shared hook (`useComposerClearance`) both call.
+ * The fix is a shared hook (`useComposerClearance`) both the single-agent
+ * `InputBox` and the draft footer call.
+ *
+ * `Cebab-7jcq`: the hook then measured only the composer's own `.input-box`
+ * wrap, but the validation warning and the [Inspect authority] row sit ABOVE
+ * the composer — so the dock cleared the composer while still covering the
+ * inspect button (measured live at 1024x768: `elementFromPoint` at the button's
+ * centre returned `div.notif-message`). The ref moved up to the footer wrapper
+ * (`MultiAgentDraftFooter`) that holds all three, so the published height clears
+ * the whole footer. Still a SINGLE hook caller.
  *
  * As with `InputBox.clearance.test.tsx`, jsdom performs no layout and applies
  * no stylesheet, so `elementFromPoint` / `getBoundingClientRect` are meaningless
  * here — the browser hit-test is the Playground's job. These pin the MECHANISM
  * that makes the layout right:
- *   - the draft composer publishes its own MEASURED height, not a constant;
+ *   - the footer publishes its own MEASURED height, not a constant;
+ *   - the observed element is the WHOLE footer (warning + inspect row +
+ *     composer), not just the composer — so the dock clears the inspect button;
  *   - it keeps publishing as the textarea grows;
  *   - it cleans up on unmount, so a tab with no composer leaves no stale offset.
  */
@@ -74,11 +82,19 @@ afterEach(() => {
 
 const clearance = () => document.documentElement.style.getPropertyValue(COMPOSER_CLEARANCE_VAR);
 
-function mount(mode: 'chain' | 'orchestrator' = 'orchestrator') {
+function mount(
+  opts: {
+    mode?: 'chain' | 'orchestrator';
+    validation?: string | null;
+    participantIds?: number[];
+  } = {},
+) {
   act(() => {
     root.render(
-      <MultiAgentComposer
-        mode={mode}
+      <MultiAgentDraftFooter
+        mode={opts.mode ?? 'orchestrator'}
+        validation={opts.validation ?? null}
+        participantIds={opts.participantIds ?? [1]}
         value=""
         onChange={() => {}}
         onStart={() => {}}
@@ -89,21 +105,37 @@ function mount(mode: 'chain' | 'orchestrator' = 'orchestrator') {
   });
 }
 
-describe('multi-agent composer clearance (Cebab-xqad)', () => {
-  test('orchestrator draft publishes its measured height, and observes the composer', () => {
+describe('multi-agent draft footer clearance (Cebab-xqad / Cebab-7jcq)', () => {
+  test('orchestrator draft publishes its measured height, and observes the footer wrap', () => {
     fakeHeight = 96;
-    mount('orchestrator');
+    mount({ mode: 'orchestrator' });
     expect(clearance()).toBe('96px');
-    // Observe the composer WRAP, not nothing — otherwise the first value is
-    // right and every later one is stale (the box grows as the operator types,
-    // then Start dies under the toast).
+    // Observe the FOOTER wrap, not nothing — otherwise the first value is right
+    // and every later one is stale (the box grows as the operator types, then
+    // Start dies under the toast).
     expect(observed.length).toBe(1);
-    expect((observed[0] as HTMLElement).className).toContain('multi-agent-composer');
+    expect((observed[0] as HTMLElement).className).toContain('multi-agent-draft-footer');
+  });
+
+  test('Cebab-7jcq: the measured element wraps the inspect row + warning, not just the composer', () => {
+    // The regression: if the ref were back on the composer's own `.input-box`
+    // wrap, the observed element would be `.multi-agent-composer` and would NOT
+    // contain the inspect button or the warning — so the dock would clear the
+    // composer while still covering them. The whole footer must be measured.
+    fakeHeight = 96;
+    mount({ validation: 'Fix this before starting.', participantIds: [1, 2] });
+    const footer = observed[0] as HTMLElement;
+    expect(footer.className).toContain('multi-agent-draft-footer');
+    expect(footer.className).not.toContain('multi-agent-composer');
+    expect(footer.querySelector('.multi-agent-inspect-btn')).not.toBeNull();
+    expect(footer.querySelector('.multi-agent-warning-composer')).not.toBeNull();
+    // The composer still lives INSIDE the measured footer.
+    expect(footer.querySelector('.multi-agent-composer')).not.toBeNull();
   });
 
   test('chain draft publishes it too — same shape, same hook', () => {
     fakeHeight = 120;
-    mount('chain');
+    mount({ mode: 'chain' });
     expect(clearance()).toBe('120px');
   });
 
@@ -123,7 +155,7 @@ describe('multi-agent composer clearance (Cebab-xqad)', () => {
     expect(clearance()).not.toBe(first);
   });
 
-  test('follows the composer as the draft grows', () => {
+  test('follows the footer as the draft grows', () => {
     fakeHeight = 96;
     mount();
     expect(clearance()).toBe('96px');
