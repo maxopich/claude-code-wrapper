@@ -158,6 +158,15 @@ second one, silently, with both spreads still visibly present at the call site.
 `composeSystemPromptAppend` is the only spelling that cannot do that, and
 `system_prompt_writers.test.ts` asserts the call site uses it.
 
+**Both producers are re-read on every turn, and that needs an SDK option.**
+Every message after the first is a `--resume`. Since SDK 0.3.271 the default is
+to record the system prompt on a session's first request and re-send that record
+on every resume, so a new append is ignored until compaction; the recording is
+rolling out per account, so the same SDK can behave either way on two machines.
+`buildSdkOptions` sends `snapshot: false` on the preset to opt out, and
+`system_prompt_smoke.ts` fails if a resumed turn stops honouring a new append.
+Measured without it: the resume row answered `4` instead of the marker.
+
 ### `default` binds on trusted projects too
 
 `shouldAutoAllow` (`ws/permission.ts`) is the only place _Cebab_ auto-allows for
@@ -424,8 +433,11 @@ operator's subscription and onto paid billing under someone else's identity.
 
 `SCRUBBED_ENV_VAR_NAMES` in `runner/claude.ts` therefore mirrors the CLI's OWN
 auth-precedence enumeration: the credential-env array, the workload-identity
-pair, the OAuth-token file descriptor, the unix socket, and the seven backend
-switches. The SDK REPLACES the child env wholesale and `getScrubbedEnvVars()`
+pair, the credential file descriptors (OAuth token, API key and, since SDK
+0.3.271, gateway token), `CLAUDE_BG_AUTH_SNAPSHOT_PATH` (a token file the CLI's
+own background-session daemon hands to its children; the CLI reads it, adopts
+the token and deletes the file), the unix socket, `ANTHROPIC_BASE_URL`, and the
+seven backend switches. The SDK REPLACES the child env wholesale and `getScrubbedEnvVars()`
 reads the same list, so a name left off that constant would authenticate every
 run as the token's identity while reporting nothing to strip.
 `auth_refresh.ts` filters the `claude login` spawn through the same constant.
@@ -438,7 +450,12 @@ the CLI, and a switch the bundle had carried all along was missing.
 `claude.env_scrubbed.test.ts` now EXTRACTS the switch names from the shipped
 bundle and fails on any the constant lacks, with an anti-vacuity floor so a
 bundle whose shape changed reads as "re-derive the extraction" rather than as a
-pass.
+pass. The credential file descriptors are extracted the same way, and the
+pattern is the lesson of the second miss: it used to match only the kinds
+already known (`API_KEY|OAUTH_TOKEN`), so the gateway-token fd that SDK 0.3.271
+added was invisible to it and the test stayed green. It now takes every
+`CLAUDE_CODE_*_FILE_DESCRIPTOR` the bundle names and excludes by a named,
+reasoned exception, so the next new one fails the test until someone decides.
 
 **One gap is live and accepted.** `subscriptionOnlyEnv()` strips paid-billing
 vars from `process.env`, but the SDK separately layers in `env:` injection from a

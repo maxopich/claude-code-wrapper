@@ -7745,8 +7745,10 @@ async function runOneTurn(
           // turn's `system/init` after that — so this costs no extra spawn and
           // needs nothing this turn has not already got. Recomputed per turn
           // rather than pinned at session creation: a resumed turn's system
-          // prompt does bind (measured, `system_prompt_smoke.ts`), so a server
-          // that comes up between messages stops being mentioned on the next.
+          // prompt binds because `buildSdkOptions` sends `snapshot: false`
+          // (measured, `system_prompt_smoke.ts`; since SDK 0.3.271 the default
+          // re-sends the FIRST turn's prompt on every resume), so a server that
+          // comes up between messages stops being mentioned on the next.
           //
           // A connection whose probe has not landed yet has no entry at all,
           // and that must spawn exactly as Cebab did before this existed —

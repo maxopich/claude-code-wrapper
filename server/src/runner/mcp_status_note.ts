@@ -51,9 +51,13 @@
  * where the deferral saves a capability the old prose threw away.
  *
  * WHY IT IS RECOMPUTED EVERY TURN. Measured (`src/system_prompt_smoke.ts`): a
- * system prompt supplied on a `--resume` turn binds, so the note tracks the
- * freshest reading instead of being frozen at session creation. A server that
- * comes up between turns stops being mentioned on the next one.
+ * system prompt supplied on a `--resume` turn binds — BECAUSE `buildSdkOptions`
+ * sends `snapshot: false` on the preset. Since SDK 0.3.271 the default is to
+ * record the prompt on a session's first request and re-send that record on
+ * every resume, which would freeze this note at the first message (measured:
+ * the resume row answered `4`, not the marker, until the option was set). With
+ * it, the note tracks the freshest reading: a server that comes up between
+ * turns stops being mentioned on the next one.
  */
 import { notConnected, type McpServerStatus } from '@cebab/shared';
 

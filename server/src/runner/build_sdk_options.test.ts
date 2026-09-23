@@ -63,7 +63,22 @@ describe('buildSdkOptions — systemPrompt (Cebab-6s27)', () => {
    */
   test('every ordinary run states the preset explicitly', () => {
     const o = buildSdkOptions(MINIMAL);
-    expect(o.systemPrompt).toEqual({ type: 'preset', preset: 'claude_code' });
+    expect(o.systemPrompt).toEqual({ type: 'preset', preset: 'claude_code', snapshot: false });
+  });
+
+  test('every preset opts out of system-prompt recording, with or without an append', () => {
+    // SDK 0.3.271: an omitted `snapshot` means the CLI records the prompt on
+    // a session's first request and re-sends that record on every `--resume`,
+    // so a per-turn append (the MCP status note, an untrusted project's
+    // CLAUDE.md) would freeze at the first message. `toBe(false)`, not
+    // falsy: an absent key or `undefined` is exactly the default that freezes.
+    // Whether `false` really makes a resumed turn bind is a LIVE fact, and
+    // `system_prompt_smoke.ts` is what measures it; this pins that we send it.
+    for (const opts of [MINIMAL, { ...MINIMAL, systemPromptAppend: 'a note' }]) {
+      const sp = buildSdkOptions(opts).systemPrompt as { snapshot?: unknown };
+      expect('snapshot' in sp).toBe(true);
+      expect(sp.snapshot).toBe(false);
+    }
   });
 
   test('a run with nothing to add sends the bare preset, with no append key', () => {
@@ -87,6 +102,7 @@ describe('buildSdkOptions — systemPrompt (Cebab-6s27)', () => {
       type: 'preset',
       preset: 'claude_code',
       append: note,
+      snapshot: false,
     });
   });
 

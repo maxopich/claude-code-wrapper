@@ -58,10 +58,12 @@ export type RunOptions = {
    * Text Cebab ADDS to this turn's system prompt, after Claude Code's own.
    *
    * Reaches the SDK as the `append` field of
-   * `{ type: 'preset', preset: 'claude_code', append }`, so it is structurally
-   * incapable of replacing anything — which is the entire reason it exists as a
-   * separate field from `systemPrompt` above rather than as a convention about
-   * how that one is used.
+   * `{ type: 'preset', preset: 'claude_code', append, snapshot: false }`, so it
+   * is structurally incapable of replacing anything — which is the entire reason
+   * it exists as a separate field from `systemPrompt` above rather than as a
+   * convention about how that one is used. `snapshot: false` is what lets a
+   * DIFFERENT append on a resumed turn reach the model at all; see
+   * `buildSdkOptions`.
    *
    * Ignored when `systemPrompt` is set: a full override has nothing to append
    * to. The help assistant is the only caller that does so, and it wants none.
@@ -152,8 +154,17 @@ export type RunOptions = {
  * credential FILE_DESCRIPTOR names — to keep it honest. Its settings.json
  * counterpart, `apiKeyHelper` (a command the CLI runs to print a key), is the
  * same exposure through a file rather than an env var. Cebab writes nothing to
- * the operator's settings, so it cannot scrub that one; the maintainer decided
- * the run is REFUSED while it is set (`Cebab-6fax.23`), not merely shown.
+ * the operator's settings, so it cannot scrub that one. The maintainer decided
+ * the run should be REFUSED while it is set (`Cebab-6fax.23`), but that refusal
+ * was never built (its PR was closed unmerged), so today a helper in a loaded
+ * settings layer is neither stripped nor refused.
+ *
+ * `CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR` arrived in SDK 0.3.271 and was
+ * invisible to the fd extraction, which matched only `API_KEY|OAUTH_TOKEN`.
+ * The extraction now takes every `CLAUDE_CODE_*_FILE_DESCRIPTOR` the bundle
+ * names and excludes by explicit, reasoned exception, so the next new fd
+ * reddens the test instead of passing it. `CLAUDE_BG_AUTH_SNAPSHOT_PATH` is the
+ * same credential handoff through a file path rather than an fd.
  *
  * `GATEWAY` WAS MISSING UNTIL Cebab-m99x, and the way it was missed is the
  * reason the test beside this list changed shape. The claim above — "the CLI's
@@ -192,6 +203,20 @@ export const SCRUBBED_ENV_VAR_NAMES: ReadonlyArray<string> = [
   // File-descriptor sibling of ANTHROPIC_API_KEY: the CLI reads a key from the
   // named fd and it overrides OAuth just as an inline key would (Cebab-iira).
   'CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR',
+  // New in SDK 0.3.271: the CLI reads a GATEWAY token from this fd at startup,
+  // beside the two above, and counts it as an external credential next to
+  // ANTHROPIC_AUTH_TOKEN and the API-key fd. The full gateway route also needs
+  // CLAUDE_CODE_USE_GATEWAY and ANTHROPIC_BASE_URL, both stripped below;
+  // whether the token alone can move a turn off the subscription is
+  // unmeasured. Cebab never supplies it, so there is nothing to lose.
+  'CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR',
+  // A path to a JSON handoff file, written by the CLI's own background-session
+  // daemon for the child sessions it launches. At startup the CLI reads it,
+  // takes its `accessToken` as the OAuth token (the same setter the OAuth-token
+  // fd uses) or its `gatewayToken` as the gateway token, and then DELETES the
+  // file. The CLI strips it, together with the credential fds, from the env of
+  // processes it spawns; Cebab does the same. Present since 0.3.251 at least.
+  'CLAUDE_BG_AUTH_SNAPSHOT_PATH',
   'AWS_BEARER_TOKEN_BEDROCK',
   'ANTHROPIC_FOUNDRY_API_KEY',
   'ANTHROPIC_FOUNDRY_AUTH_TOKEN',
@@ -247,6 +272,10 @@ export const SCRUBBED_ENV_POSTURES: Readonly<Record<string, string>> = {
     'Subscription auth (setup-token FD would override OAuth)',
   CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR:
     'Subscription auth (API key read from an fd would override OAuth)',
+  CLAUDE_CODE_GATEWAY_TOKEN_FILE_DESCRIPTOR:
+    'Gateway auth (a gateway token read from an fd — an external credential, not the subscription)',
+  CLAUDE_BG_AUTH_SNAPSHOT_PATH:
+    'Subscription auth (a handed-off token file would override OAuth, and is deleted once read)',
   AWS_BEARER_TOKEN_BEDROCK: 'Bedrock backend (bearer token re-routes off Anthropic API)',
   ANTHROPIC_FOUNDRY_API_KEY: 'Foundry backend (API key re-routes off Anthropic API)',
   ANTHROPIC_FOUNDRY_AUTH_TOKEN: 'Foundry backend (bearer token re-routes off Anthropic API)',
@@ -377,6 +406,38 @@ export function buildSdkOptions(opts: RunOptions): Options {
         // Truthiness, not `!== undefined`: `''` is not a note. A turn with
         // nothing to add must send the bare preset rather than an empty append.
         ...(opts.systemPromptAppend ? { append: opts.systemPromptAppend } : {}),
+        // RE-RENDER THE PROMPT ON EVERY SPAWN. Same lesson as the explicit
+        // preset above: a default that moved under us, stated instead of
+        // inherited.
+        //
+        // SDK 0.3.271 added `snapshot`, and omitting it means `true`: the CLI
+        // renders the prompt (preset + append) on a session's FIRST request,
+        // records it in the transcript, and re-sends that record on every later
+        // request and every `--resume`. A different `append` on a later turn is
+        // ignored until compaction. Cebab runs one subprocess per message with
+        // `--resume` and recomputes the append per turn (the MCP status note,
+        // an untrusted project's CLAUDE.md), and the preset's own dynamic
+        // sections (git status and the rest) are per-spawn too — so recording
+        // would freeze all of it at the first message of the conversation.
+        //
+        // Measured 2026-09-23 with `system_prompt_smoke.ts`: the resume row
+        // answered `4` instead of `KUMQUAT` on 0.3.271 (2 of 2 runs) and
+        // `KUMQUAT` on 0.3.251. With `snapshot: false` it binds again,
+        // including on a session whose first turn was already recorded (one
+        // started by a build without this line), which un-freezes on its next
+        // resumed turn.
+        //
+        // The recording is ROLLING OUT PER ACCOUNT (the SDK's own doc: where it
+        // is not enabled, `snapshot` "is accepted and has no effect"), so the
+        // same SDK version can freeze the prompt on one machine and not on the
+        // next. That is why this is set rather than left to the account.
+        //
+        // Cost: a turn whose prompt changed re-reads the prompt prefix instead
+        // of hitting the cache. That is what every Cebab turn did before
+        // 0.3.271. The help assistant's plain-string arm above is untouched: a
+        // bare string follows the default and is recorded, which is harmless
+        // while it is a constant (`ASSISTANT_SYSTEM_PROMPT`).
+        snapshot: false,
       };
   // `!== undefined`, NOT truthiness: an empty array is a meaningful value for
   // both (tools `[]` = no built-ins; skills `[]` = every skill hidden) and is

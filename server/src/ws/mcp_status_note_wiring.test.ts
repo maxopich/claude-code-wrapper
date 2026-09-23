@@ -159,7 +159,9 @@ describe('a turn carries the MCP status note', () => {
 describe('the note is recomputed per turn, not fixed at session creation', () => {
   test('a server that comes up between turns stops being mentioned', async () => {
     // The measured reason this is possible at all: a system prompt supplied on
-    // a `--resume` turn binds (`src/system_prompt_smoke.ts`). An implementation
+    // a `--resume` turn binds (`src/system_prompt_smoke.ts`), because the runner
+    // sends `snapshot: false` (`runner/build_sdk_options.test.ts` pins that; the
+    // SDK default since 0.3.271 would re-send the first turn's prompt). An implementation
     // that computed the note once and cached it on the session would keep
     // telling the model about a server that is now fine — reddens here.
     const conn = connWith([{ name: 'ledger', status: 'failed' }]);
