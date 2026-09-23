@@ -109,6 +109,55 @@ describe('ReopenSessionModal — committing state', () => {
   });
 });
 
+describe('ReopenSessionModal — cross-connection copy (Cebab-oexs)', () => {
+  // Defends the ConfirmingBody help paragraph: it must be true even for
+  // an operator with no active session of their own, whose Reopen still
+  // crashes a run live on another window. The negatives are the point —
+  // they redden if the old "set aside your current active session" copy
+  // comes back, or if a true sentence is *added* beside the false one.
+  test('confirming help mentions other-window crash, not "set aside"', () => {
+    renderModal({
+      kind: 'confirming',
+      sessionId: 's1',
+      projectPath: '/p',
+      diff: CLEAN_DIFF,
+    });
+    const help = container.querySelector('.gate-modal-help')!.textContent!;
+    expect(help).toContain('another window');
+    expect(help).toContain('marked crashed');
+    expect(help).not.toMatch(/your current active session/i);
+    expect(help).not.toMatch(/set aside/i);
+  });
+
+  // Defends the ack checkbox label (site B), exercised with the typed
+  // gate present (DIRTY_DIFF) so both form fields render.
+  test('ack label covers this-window-or-another, not "set aside"', () => {
+    renderModal({
+      kind: 'confirming',
+      sessionId: 's1',
+      projectPath: '/p',
+      diff: DIRTY_DIFF,
+    });
+    const ack = container.querySelector('.reopen-modal-ack')!.textContent!;
+    expect(ack).toMatch(/in this window or another/i);
+    expect(ack).not.toMatch(/set aside/i);
+  });
+
+  // Defends the CommittingBody help string (a disjoint body — the
+  // confirming tests never render it).
+  test('committing help talks about live runs, not "the active session"', () => {
+    renderModal({
+      kind: 'committing',
+      sessionId: 's1',
+      projectPath: '/p',
+      diff: CLEAN_DIFF,
+    });
+    const help = container.querySelector('.gate-modal-help')!.textContent!;
+    expect(help).not.toMatch(/the active session/i);
+    expect(help).toContain('live runs');
+  });
+});
+
 describe('ReopenSessionModal — confirming state, clean workspace', () => {
   test('reopen button enabled after only checking ack (no typed gate)', () => {
     const { onConfirm } = renderModal({

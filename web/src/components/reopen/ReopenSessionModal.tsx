@@ -88,8 +88,7 @@ function CommittingBody({ state, titleId }: { state: CommittingState; titleId: s
         </h3>
       </header>
       <p className="gate-modal-help">
-        Displacing the active session (if any) and reactivating{' '}
-        <code>{state.sessionId.slice(0, 8)}</code>.
+        Stopping any live runs and reactivating <code>{state.sessionId.slice(0, 8)}</code>.
       </p>
       <div className="reopen-modal-spinner" aria-live="polite">
         <span className="btn-spinner" aria-hidden="true" />
@@ -149,9 +148,9 @@ function ConfirmingBody({
         </h3>
       </header>
       <p className="gate-modal-help">
-        Reopening will set aside your current active session and bring{' '}
-        <code>{state.sessionId.slice(0, 8)}</code> back. You can archive or reopen either side
-        later.
+        Reopening stops every run that is currently live in Cebab — including a run started in
+        another window — and brings <code>{state.sessionId.slice(0, 8)}</code> back. Stopped runs
+        are marked crashed; you can archive or reopen either side later.
       </p>
       <dl className="gate-modal-facts reopen-modal-facts">
         <div className="gate-modal-fact">
@@ -221,8 +220,8 @@ function ConfirmingBody({
           onChange={(e) => setAcknowledged(e.target.checked)}
         />
         <span>
-          I understand the workspace may have changed since this session ran, and any unfinished
-          work in the active session will be set aside.
+          I understand the workspace may have changed since this session ran, and that any run
+          currently live — in this window or another — will be stopped and marked crashed.
         </span>
       </label>
 
