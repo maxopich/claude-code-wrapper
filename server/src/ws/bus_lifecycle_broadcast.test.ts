@@ -98,6 +98,24 @@ describe('[security] every multi_agent_ended emit is a broadcast', () => {
   });
 });
 
+describe('[security] a swept run is told why on EVERY window (Cebab-0ueh)', () => {
+  // The resume sweep's unit tests prove it routes the supersede notice to the
+  // `broadcastServerMsg` sink it is given, and that it falls back to the
+  // connection sink when none is wired. So whether the displaced window hears
+  // anything rests on ONE line in the production caller: drop it and the sweep
+  // silently reverts to conn-bound with every other test green.
+  const source = stripComments(fs.readFileSync(SERVER_TS, 'utf8'));
+
+  test('resumeOnConnect wires the process-wide broadcaster into the sweep', () => {
+    const start = source.indexOf('async function resumeOnConnect(');
+    expect(start).toBeGreaterThan(-1);
+    const block = source.slice(start, source.indexOf('\n}\n', start));
+    // Anti-vacuity: the slice really is the caller of the sweep.
+    expect(block).toContain('attemptResumeMultiAgent(');
+    expect(block).toMatch(/\bbroadcastServerMsg\b/);
+  });
+});
+
 describe('broadcastTo reaches the open sockets and only those', () => {
   function fake(readyState: number): { ws: WebSocket; sent: string[] } {
     const sent: string[] = [];
