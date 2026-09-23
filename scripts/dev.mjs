@@ -107,9 +107,15 @@ async function shutdown(code) {
 // directly (no `npm run server.dev` between us and tsx), so the predev hook
 // never gets a chance to fire on this path. Inherits stdio so the user sees
 // what got killed in the same terminal stream.
-spawnSync(process.execPath, [path.join(root, 'scripts', 'predev-server.mjs')], {
+const predev = spawnSync(process.execPath, [path.join(root, 'scripts', 'predev-server.mjs')], {
   stdio: 'inherit',
 });
+// `Cebab-ulfb`: the cleanup now REFUSES (exit 1, having printed the holder)
+// when the port is held by something that is not a Cebab dev server. `npm run
+// dev:server` stops on that because a failing `predev` aborts the script; this
+// path spawns tsx directly, so it has to honour the refusal itself or the
+// server starts anyway and fails to bind behind a message already scrolled by.
+if (predev.status !== 0) process.exit(predev.status ?? 1);
 
 for (const t of targets) {
   const child = spawn(process.execPath, t.args, {
