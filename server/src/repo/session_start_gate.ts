@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { EnvInjection, ServerMsg } from '@cebab/shared/protocol';
 import { appendSafetyAudit } from '../notifications/safety_audit.js';
 import { getOperatorId } from '../notifications/operator.js';
-import { abandonPendingGates, GateAbandonedError, MAX_PENDING_GATES } from '../gate_abandon.js';
+import { abandonPendingGates, GateBacklogError, MAX_PENDING_GATES } from '../gate_abandon.js';
 
 // Cluster B Phase 5 (§4.5): Env-injection session-start gate.
 //
@@ -160,8 +160,17 @@ export async function awaitEnvInjectionAck(input: AwaitGateInput): Promise<void>
   // gate parks one per project, so the ceiling is only reachable by a client
   // starting sessions far faster than a human answers — and throwing is the
   // fail-closed direction, since the alternative is spawning unacknowledged.
+  //
+  // `GateBacklogError`, NOT `GateAbandonedError`: this refusal is Cebab's, not
+  // the operator's. The abandoned/cancel error carries `name = 'AbortError'`,
+  // which the failure classifiers turn into kind `aborted` and then the
+  // operator-cancel sentence — so reusing it here reported a fail-closed
+  // backlog refusal as a deliberate decline that never happened (and, after
+  // `Cebab-osfq`, as a transient blue "Cancelled" toast). The backlog class
+  // classifies as `process_crashed` and keeps this message, so it stays a loud
+  // failure with its own wording.
   if (input.gate.pending.size >= MAX_PENDING_GATES) {
-    throw new GateAbandonedError(
+    throw new GateBacklogError(
       'session-start',
       `${MAX_PENDING_GATES} acknowledgments already parked on this connection`,
     );

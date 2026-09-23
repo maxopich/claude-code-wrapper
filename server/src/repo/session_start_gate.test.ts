@@ -15,6 +15,8 @@ import {
 } from './session_start_gate.js';
 import * as safetyAudit from '../notifications/safety_audit.js';
 import { closeLogger } from '../runner/logger.js';
+import { GateAbandonedError, MAX_PENDING_GATES } from '../gate_abandon.js';
+import { classifyHandlerFailure } from '../ws/server.js';
 
 // Cluster B Phase 5 (§4.5): env-injection start-gate tests.
 //
@@ -173,6 +175,64 @@ describe('awaitEnvInjectionAck — pending + acknowledge', () => {
     gate.pending.get(env1.pendingStartId)!.resolve();
     gate.pending.get(env2.pendingStartId)!.resolve();
     await Promise.all([p1, p2]);
+  });
+});
+
+// ---- over-cap fail-closed refusal (Cebab-lym0) ----
+
+describe('awaitEnvInjectionAck — over-cap refusal is a crash, not a cancel', () => {
+  // THE DEFECT. Over MAX_PENDING_GATES the gate fails CLOSED by throwing —
+  // Cebab refusing a request it cannot safely queue, nobody having cancelled
+  // anything. The refusal used to throw `GateAbandonedError`, whose
+  // `name = 'AbortError'` makes the failure classifiers report kind `aborted`
+  // and substitute the operator-cancel sentence — so a fail-closed refusal read
+  // as a deliberate decline that never happened, and (post-Cebab-osfq) vanished
+  // as a transient blue "Cancelled" toast in 5s. It must stay a loud failure.
+
+  function fillToCap(gate: ReturnType<typeof makeStartGateState>): void {
+    // Only `pending.size` gates the refusal, so dummy entries suffice.
+    for (let i = 0; i < MAX_PENDING_GATES; i++) {
+      gate.pending.set(`filler-${i}`, {} as never);
+    }
+  }
+
+  test('the over-cap path is `process_crashed`, while a real abandon stays `aborted`', async () => {
+    const sink = makeSink();
+    const gate = makeStartGateState();
+    fillToCap(gate);
+
+    let thrown: unknown;
+    try {
+      await awaitEnvInjectionAck({
+        projectId: 1,
+        gate,
+        send: sink.send,
+        injections: [injection('ANTHROPIC_API_KEY')],
+      });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(Error);
+    // The bug was here: `name === 'AbortError'` → kind `aborted` → cancel copy.
+    expect((thrown as Error).name).not.toBe('AbortError');
+    expect(classifyHandlerFailure(thrown)).toBe('process_crashed');
+    // Keeps its own loud wording, not the operator-cancel sentence.
+    expect((thrown as Error).message).toContain('already parked');
+    // Fail-closed: nothing new was parked, no envelope emitted.
+    expect(sink.sent).toEqual([]);
+    expect(gate.pending.size).toBe(MAX_PENDING_GATES);
+
+    // CONTROL, folded into the same case on purpose. The distinction is the
+    // whole point: a genuine operator abandon (declined / disconnected) must
+    // still read as `aborted`, or the fix would have merely swapped which case
+    // is mislabelled. It rides inside the reddening assertions above rather
+    // than as its own `test(...)` — a standalone control does not redden when
+    // this change is reverted (it never depended on it), and the revert-check
+    // requires every added case to redden.
+    expect(classifyHandlerFailure(new GateAbandonedError('session-start', 'disconnected'))).toBe(
+      'aborted',
+    );
   });
 });
 
