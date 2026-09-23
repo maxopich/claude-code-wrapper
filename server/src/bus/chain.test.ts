@@ -22,10 +22,10 @@ import {
   listMultiAgentEvents,
   setPendingRetry,
 } from '../repo/multi_agent.js';
-import { setProjectModel, upsertProject } from '../repo/projects.js';
+import { setProjectModel, setProjectTrusted, upsertProject } from '../repo/projects.js';
 import * as safetyAudit from '../notifications/safety_audit.js';
 import type { BusEvent } from './runner.js';
-import type { Runner } from '../runner/index.js';
+import type { Runner, RunOptions } from '../runner/index.js';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { closeLogger } from '../runner/logger.js';
 
@@ -687,6 +687,69 @@ describe('startChainSession — project CLAUDE.md injection', () => {
     expect(events.some((e) => e.text.includes('Never touch prod'))).toBe(false);
 
     unregisterLiveSession(handle.sessionId);
+  });
+
+  test('the first hop carries BOTH the visible copy and the durable append; trusted gets neither Cebab copy', async () => {
+    // `Cebab-fu6n`: the visible user-turn copy (transcript) and the durable
+    // system-prompt append (survives a long run / compaction) must coexist on
+    // an untrusted participant's first delivered hop — the append is the fix,
+    // the visible copy is kept. A trusted participant gets the SDK auto-load
+    // instead, so Cebab adds no append (no duplicate copy).
+    const workspace = path.join(tmpRoot, 'ws-append');
+    fs.mkdirSync(workspace, { recursive: true });
+    const claudeMd = '# Coder rules\n\n- Run `npm test` before every reply\n- Never touch prod';
+
+    function optsFactory(captured: (RunOptions & { prompt: string })[]) {
+      return (opts: RunOptions): Runner => {
+        captured.push(opts as RunOptions & { prompt: string });
+        async function* gen(): AsyncGenerator<SDKMessage> {
+          yield { type: 'result', subtype: 'success', session_id: 's1' } as unknown as SDKMessage;
+        }
+        const it = gen();
+        return { [Symbol.asyncIterator]: () => it, close: () => {} };
+      };
+    }
+
+    // Untrusted participant (upsertProject creates trusted=0): both copies fire.
+    {
+      const captured: (RunOptions & { prompt: string })[] = [];
+      const handle = await startChainSession({
+        participants: [participant('coder-u', claudeMd), participant('reviewer-u', null)],
+        initialPrompt: 'do the task',
+        workspaceRoot: workspace,
+        onEvent: vi.fn(),
+        onEnded: vi.fn(),
+        runnerFactory: optsFactory(captured),
+      });
+      await new Promise((r) => setImmediate(r));
+      expect(captured).toHaveLength(1);
+      // Visible copy: prepended to the first delivered prompt (kept).
+      expect(captured[0]!.prompt).toContain('<project_claude_md>');
+      expect(captured[0]!.prompt).toContain('- Run `npm test` before every reply');
+      // Durable copy: the system-prompt append (the fix).
+      expect(captured[0]!.systemPromptAppend).toContain('- Run `npm test` before every reply');
+      unregisterLiveSession(handle.sessionId);
+    }
+
+    // Trusted participant: the SDK re-sends CLAUDE.md every hop, so Cebab adds
+    // no append. The visible copy is a separate, unchanged concern.
+    {
+      const captured: (RunOptions & { prompt: string })[] = [];
+      const trusted = participant('coder-t', claudeMd);
+      setProjectTrusted(trusted.projectId, true);
+      const handle = await startChainSession({
+        participants: [trusted, participant('reviewer-t', null)],
+        initialPrompt: 'do the task',
+        workspaceRoot: workspace,
+        onEvent: vi.fn(),
+        onEnded: vi.fn(),
+        runnerFactory: optsFactory(captured),
+      });
+      await new Promise((r) => setImmediate(r));
+      expect(captured).toHaveLength(1);
+      expect('systemPromptAppend' in captured[0]!).toBe(false);
+      unregisterLiveSession(handle.sessionId);
+    }
   });
 
   test('a completed chain turn persists the participant --resume checkpoint', async () => {

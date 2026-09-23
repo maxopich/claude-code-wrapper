@@ -25,6 +25,7 @@ import type { AskUserQuestionView, RouterDropReasonCode } from '@cebab/shared/pr
 import { config } from '../config.js';
 import { pickRunner, type MockOptions, type RunOptions, type Runner } from '../runner/index.js';
 import type { SettingSource } from '../runner/claude.js';
+import { projectRulesSpec } from '../runner/project_rules_note.js';
 import { busSettingScopesFor } from '../repo/project_authority.js';
 import { registerQuery } from '../runner/lifecycle.js';
 import { isValidBusDestination } from './paths.js';
@@ -1747,6 +1748,20 @@ export class AgentRunner {
       ...mcpDenial,
       ...(spec.model ? { model: spec.model } : {}),
       settingSources,
+      // `Cebab-fu6n`: put an untrusted participant's project CLAUDE.md in the
+      // system-prompt APPEND on EVERY hop, the same durable mechanism the
+      // single-agent path uses (`projectRulesSpec` / `systemPromptAppend`). The
+      // one-time visible copy prepended to the FIRST delivered prompt (the
+      // routers' `readProjectClaudeMd`/`briefed` path) still shows the operator
+      // what the agent was told; this append is what survives a long run or a
+      // compaction, which the user-turn copy cannot. Reusing the single-agent
+      // helper — rather than a second copy — means the same measured condition
+      // decides both paths: it fires ONLY when `settingSources` excludes
+      // `'project'` (an untrusted participant), returns `{}` for a trusted one
+      // (the SDK already re-sends the file every hop, so a second copy would
+      // just pay for the same bytes twice), and returns `{}` for the
+      // orchestrator, whose empty workspace cwd has no CLAUDE.md to read.
+      ...projectRulesSpec({ cwd: spec.cwd, settingSources }),
       // `Cebab-vie.17`. UNCONDITIONAL, deliberately breaking the
       // conditional-spread rule that governs `model` and `deniedMcpServers`
       // above. That rule exists because absence there has a distinct correct
