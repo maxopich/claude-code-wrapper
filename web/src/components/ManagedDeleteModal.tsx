@@ -86,7 +86,7 @@ export function ManagedDeleteModal({ state, onConfirm, onClose }: ManagedDeleteM
             {state.result.ok
               ? `Deleted ${state.result.name}${
                   state.result.sessionsRemoved > 0
-                    ? ` and its ${state.result.sessionsRemoved.toLocaleString('en')} conversation${
+                    ? ` and its ${state.result.sessionsRemoved.toLocaleString('en')} Cebab-side conversation record${
                         state.result.sessionsRemoved === 1 ? '' : 's'
                       }`
                     : ''
