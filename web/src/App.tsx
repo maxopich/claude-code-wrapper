@@ -90,6 +90,7 @@ import {
 } from './components/connectionLost';
 import {
   canSaveManagedEdit,
+  chainStartMsg,
   HELD_MESSAGES_CAP,
   isKnownMultiAgentSession,
   managedEditorMode,
@@ -2140,32 +2141,8 @@ function AppShell({
   }
   function startChain() {
     // Mode is enforced by the mounted tab (Chained Chat) — no mode guard.
-    const {
-      draftParticipants,
-      draftPrompt,
-      draftLifecycle,
-      draftPauseOnDangerous,
-      draftExecuteMode,
-      // PR-7: template provenance + per-template hop budget. Both are null
-      // for ad-hoc runs; the server stamps them onto the row only if set.
-      draftTemplateId,
-      draftHopBudget,
-    } = state.multiAgent;
-    if (draftPrompt.trim().length === 0) return;
-    if (draftParticipants.length < 2) return;
-    wsRef.current?.send({
-      type: 'start_multi_agent',
-      mode: 'chain',
-      participants: draftParticipants,
-      initialPrompt: draftPrompt,
-      lifecycle: draftLifecycle,
-      pauseOnDangerous: draftPauseOnDangerous,
-      // `Cebab-6fax.4`: chain participants carry a consultant/execute clause too,
-      // so a chain start sends executeMode exactly as the orchestrator start does.
-      executeMode: draftExecuteMode,
-      ...(draftTemplateId ? { templateId: draftTemplateId } : {}),
-      ...(draftHopBudget !== null ? { hopBudget: draftHopBudget } : {}),
-    });
+    const msg = chainStartMsg(state.multiAgent);
+    if (msg) wsRef.current?.send(msg);
   }
   function startOrchestrator() {
     // Mode is enforced by the mounted tab (Multi-Agent) — no mode guard.

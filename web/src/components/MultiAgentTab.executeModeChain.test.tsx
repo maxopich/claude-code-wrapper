@@ -156,6 +156,22 @@ describe('chain draft exposes the execute-mode toggle (Cebab-3wt3)', () => {
     expect(onSetDraftPauseOnDangerous).toHaveBeenCalledWith(true);
   });
 
+  test('a chain draft shows the posture banner, and it follows the switch (Cebab-02e9)', () => {
+    // The banner was orchestrator-only from when chain participants had no
+    // consultant clause. They have one now, and the switch relaxes it, so a
+    // chain draft must say which posture the run will start in.
+    render('chain');
+    const banner = () => container.querySelector('#consultant-mode-banner')?.textContent ?? '';
+    expect(banner()).toMatch(/Consultant mode/);
+    expect(banner()).not.toMatch(/orchestrator/i);
+    act(() => {
+      root.unmount();
+      root = createRoot(container);
+    });
+    render('chain', { draftExecuteMode: true });
+    expect(banner()).toMatch(/Execute mode/);
+  });
+
   test('control: turning execute OFF leaves pause-on-dangerous as it was', () => {
     const { onSetDraftExecuteMode, onSetDraftPauseOnDangerous } = render('chain', {
       draftExecuteMode: true,

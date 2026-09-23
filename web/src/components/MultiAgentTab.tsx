@@ -397,14 +397,15 @@ export function DraftView(props: {
             posture that's baked into server/src/bus/runner.ts but is
             otherwise invisible in the UI. Non-dismissible. */}
         <BypassPermissionsBanner />
-        {/* Cluster F Phase D5 (UI-D5): pair with the bypass banner for
-            orchestrator drafts. The consultant-mode guardrail is baked
-            into runtime.ts's renderRosterPrompt + renderWorkerBriefing
-            and applies for every orchestrator-mode bus session. Chain
-            mode's renderChainBriefing has no equivalent constraint, so
-            we don't render the banner there — surfacing it would mislead
-            operators about a guardrail that doesn't exist. */}
-        {isOrch && <ConsultantModeBanner executeMode={multiAgent.draftExecuteMode} />}
+        {/* Cluster F Phase D5 (UI-D5): pair with the bypass banner. The
+            consultant-mode guardrail is baked into all three prompt renderers
+            — renderRosterPrompt and renderWorkerBriefing for orchestrator runs,
+            renderChainBriefing for chain runs (`Cebab-6fax.4`) — and the
+            execute-mode switch relaxes it in both modes (`Cebab-3wt3`), so the
+            banner that says which posture the run will start in shows for
+            both. It used to be orchestrator-only, when chain participants had
+            no such constraint. */}
+        <ConsultantModeBanner executeMode={multiAgent.draftExecuteMode} />
         <header className="multi-agent-header">
           <h2>{isOrch ? 'Multi-Agent' : 'Chained Chat'}</h2>
           <p className="multi-agent-subtitle">

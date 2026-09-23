@@ -1327,6 +1327,46 @@ export function managedEditorMode(edit: NonNullable<AppState['managedEdit']>): M
  * the buffer still matches what was read — an always-enabled Save invites a
  * no-op write, and every write here appends an audit row.
  */
+/**
+ * The `start_multi_agent` a chain draft sends, or `null` when the draft cannot
+ * start (no prompt, or fewer than two participants).
+ *
+ * Lives here, not in App.tsx, because App.tsx has no test file and this is the
+ * line `Cebab-3wt3` is about: the chain toggle was once present in the UI and
+ * never sent, which made execute mode unreachable for chain runs. A test on
+ * the DraftView checkbox cannot see whether the value reaches the wire.
+ */
+export function chainStartMsg(
+  ma: MultiAgentState,
+): Extract<ClientMsg, { type: 'start_multi_agent' }> | null {
+  const {
+    draftParticipants,
+    draftPrompt,
+    draftLifecycle,
+    draftPauseOnDangerous,
+    draftExecuteMode,
+    // PR-7: template provenance + per-template hop budget. Both are null
+    // for ad-hoc runs; the server stamps them onto the row only if set.
+    draftTemplateId,
+    draftHopBudget,
+  } = ma;
+  if (draftPrompt.trim().length === 0) return null;
+  if (draftParticipants.length < 2) return null;
+  return {
+    type: 'start_multi_agent',
+    mode: 'chain',
+    participants: draftParticipants,
+    initialPrompt: draftPrompt,
+    lifecycle: draftLifecycle,
+    pauseOnDangerous: draftPauseOnDangerous,
+    // `Cebab-6fax.4`: chain participants carry a consultant/execute clause too,
+    // so a chain start sends executeMode exactly as the orchestrator start does.
+    executeMode: draftExecuteMode,
+    ...(draftTemplateId ? { templateId: draftTemplateId } : {}),
+    ...(draftHopBudget !== null ? { hopBudget: draftHopBudget } : {}),
+  };
+}
+
 export function canSaveManagedEdit(edit: NonNullable<AppState['managedEdit']>): boolean {
   if (edit.status !== 'ready') return false;
   if (edit.draft === null) return false;

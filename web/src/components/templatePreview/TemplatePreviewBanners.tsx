@@ -168,11 +168,11 @@ export function ConsultantModeBanner({ executeMode = false }: { executeMode?: bo
         title="Execute mode"
         body={
           <>
-            Workers in this orchestrator session may <strong>make changes</strong>: each agent can
-            create, modify, or delete files <strong>within its own project folder</strong> to do the
-            work, not just advise. They must <strong>not</strong> modify, create, or delete files in
-            any other directory. The constraint is advisory (relayed in the prompt to each agent)
-            and out-of-folder writes are flagged post-hoc; there's no server-side enforcement.
+            Agents in this session may <strong>make changes</strong>: each agent can create, modify,
+            or delete files <strong>within its own project folder</strong> to do the work, not just
+            advise. They must <strong>not</strong> modify, create, or delete files in any other
+            directory. The constraint is advisory (relayed in the prompt to each agent) and
+            out-of-folder writes are flagged post-hoc; there's no server-side enforcement.
           </>
         }
         role="status"
@@ -191,12 +191,12 @@ export function ConsultantModeBanner({ executeMode = false }: { executeMode?: bo
       title="Consultant mode"
       body={
         <>
-          Every agent in this orchestrator session acts as a consultant: read, analyze, advise.
-          Workers may write scratch/notes inside their own project folder, but they must{' '}
-          <strong>not</strong> modify, create, or delete files in any other directory, and must{' '}
-          <strong>not</strong> produce deliverable changes — unless your prompt explicitly directs
-          that specific change. The constraint is advisory (relayed in the prompt to each agent);
-          there's no server-side enforcement.
+          Every agent in this session acts as a consultant: read, analyze, advise. Agents may write
+          scratch/notes inside their own project folder, but they must <strong>not</strong> modify,
+          create, or delete files in any other directory, and must <strong>not</strong> produce
+          deliverable changes — unless your prompt explicitly directs that specific change. The
+          constraint is advisory (relayed in the prompt to each agent); there's no server-side
+          enforcement.
         </>
       }
       role="status"
