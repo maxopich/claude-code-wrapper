@@ -104,6 +104,11 @@ const PINNED: { [K in MessageView['kind']]: PinRule<K> } = {
   // The turn died. This is the answer.
   error: () => true,
 
+  // Cebab-6nmo: the turn was deliberately cancelled (Stop, or a declined
+  // prompt). Quiet, but it IS why the turn ended, so it survives the collapse
+  // like `error` — hiding it would leave the turn looking unfinished.
+  cancelled: () => true,
+
   // The turn is parked on the operator. Hiding either of these hangs the run.
   permission_request: () => true,
   ask_user_question: () => true,

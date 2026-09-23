@@ -100,6 +100,20 @@ export type MessageView =
     }
   | { kind: 'error'; id: string; errorKind: WrapperErrorKind; message: string }
   | {
+      /**
+       * Cebab-6nmo: a session-scoped DELIBERATE cancellation — the operator
+       * Stopped the turn, or declined a trust/env/MCP prompt that ended it. The
+       * server classifies both as `wrapper_error { kind: 'aborted' }`; nothing
+       * about them failed, so they render as a QUIET, NEUTRAL row rather than
+       * the red `.msg.error` one. `message` is the ready-to-render line the
+       * reducer already chose (`cancelledLine`); every other `wrapper_error`
+       * kind still becomes an `error` message.
+       */
+      kind: 'cancelled';
+      id: string;
+      message: string;
+    }
+  | {
       kind: 'permission_request';
       id: string;
       requestId: string;
@@ -1624,6 +1638,23 @@ function authExpiredAfter(
     // should not silence the second failure.
     dismissed: false,
   };
+}
+
+/**
+ * Cebab-6nmo: the neutral one-line copy for a session-scoped `aborted`.
+ *
+ * The server classifies TWO deliberate endings as `kind: 'aborted'`: the
+ * operator pressed Stop (the message is the SDK's raw abort text), or they
+ * declined a trust/env/MCP prompt that ended the turn (the server-side
+ * `gateProjectsForSpawn` catch sends `"Turn cancelled: …"`). That prefix is the
+ * only signal the client has to tell the two apart, so it is what we branch on;
+ * if the server ever stops prefixing it, this degrades to the single neutral
+ * "Stopped by you" line, still not an error.
+ */
+function cancelledLine(message: string): string {
+  return message.startsWith('Turn cancelled:')
+    ? 'Cancelled - you declined the prompt'
+    : 'Stopped by you';
 }
 
 export type Action =
@@ -4357,11 +4388,20 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
       const pendingSession =
         pendingId !== undefined ? state.sessionsByProject[projectId]?.[pendingId] : undefined;
 
+      // Cebab-6nmo: an `aborted` is a deliberate end (operator Stop, or a
+      // declined trust/env/MCP prompt), NOT a failure. It must not flip the
+      // session to `status: 'error'` — it takes the status a normally-ended
+      // turn gets (`done`, matching the `result` reducer's success branch) —
+      // and it renders as a quiet neutral `cancelled` row, never the red
+      // `.msg.error` one. Every other kind is unchanged.
+      const isAborted = msg.kind === 'aborted';
+      const endedStatus: SessionView['status'] = isAborted ? 'done' : 'error';
+
       const base: SessionView = existing ??
         pendingSession ?? {
           id: sessionId,
           projectId,
-          status: 'error',
+          status: endedStatus,
           messages: [],
           streamingText: '',
           runStartedAt: null,
@@ -4375,7 +4415,7 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         // project — rekey both onto the real session.
         id: sessionId,
         projectId,
-        status: 'error',
+        status: endedStatus,
         // Turn aborted — stop the elapsed timer.
         runStartedAt: null,
         // Register W01: and retire the streaming buffer with it. The `''`
@@ -4385,12 +4425,18 @@ function reduceServer(state: AppState, msg: ServerMsg): AppState {
         streamingText: '',
         messages: [
           ...base.messages,
-          {
-            kind: 'error',
-            id: nextId(),
-            errorKind: msg.kind,
-            message: msg.message,
-          },
+          isAborted
+            ? {
+                kind: 'cancelled',
+                id: nextId(),
+                message: cancelledLine(msg.message),
+              }
+            : {
+                kind: 'error',
+                id: nextId(),
+                errorKind: msg.kind,
+                message: msg.message,
+              },
         ],
       });
 

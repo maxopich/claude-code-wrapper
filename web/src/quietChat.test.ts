@@ -330,6 +330,7 @@ describe('isPinnedInQuietView — the classes the collapse may never swallow', (
       agent: 'cebab',
       questions: [],
     },
+    cancelled: { kind: 'cancelled', id: 'x', message: 'Stopped by you' },
   };
 
   const EXPECTED: Record<MessageView['kind'], boolean> = {
@@ -341,6 +342,8 @@ describe('isPinnedInQuietView — the classes the collapse may never swallow', (
     error: true,
     permission_request: true,
     ask_user_question: true,
+    // Cebab-6nmo: a deliberate cancel is why the turn ended — pinned like error.
+    cancelled: true,
   };
 
   for (const kind of Object.keys(ONE_OF_EACH) as Array<MessageView['kind']>) {
