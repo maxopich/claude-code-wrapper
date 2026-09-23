@@ -17,7 +17,7 @@ import * as managedAgent from './managed_agent.js';
 import { managedAgentsRoot } from './managed_agent.js';
 import { preflightManagedCopy, runManagedCopy } from './managed_copy.js';
 import * as safetyAudit from './notifications/safety_audit.js';
-import { listProjects, upsertProject } from './repo/projects.js';
+import { getProject, listProjects, setProjectTrusted, upsertProject } from './repo/projects.js';
 import { withTempDataDir } from './test_support/temp_data_dir.js';
 
 type AuditRow = { kind: string; reason_code: string; payload_json: string };
@@ -143,6 +143,55 @@ describe('runManagedCopy', () => {
     const payload = JSON.parse(rows[0].payload_json) as Record<string, unknown>;
     expect(payload.sourcePath).toBe(path.join(tmp.root(), 'audited'));
     expect(String(payload.targetPath)).toContain(managedAgentsRoot());
+  });
+
+  test('[security] a copy of a TRUSTED source is trusted, and the audit row records it (Cebab-gkme)', async () => {
+    // Cebab-gkme: a managed copy of a trusted project inherits the source's
+    // Trust as a SNAPSHOT, so it loads its own `.claude/settings*` and
+    // `.mcp.json` (hooks, env injections, `apiKeyHelper`) on its first session
+    // and every bus hop instead of silently running as if untrusted.
+    //
+    // The flip is load-bearing: `seedProject` goes through `upsertProject`,
+    // which hardcodes `trusted` 0, so WITHOUT this `setProjectTrusted` the case
+    // would assert 0 === 0 and could never redden on a revert.
+    const id = seedProject(tmp.root(), 'trusted-src');
+    setProjectTrusted(id, true);
+    const baseline = auditRows().length;
+    const sent: ServerMsg[] = [];
+
+    const outcome = await runManagedCopy(id, (m) => sent.push(m));
+    expect(outcome.registered).toBe(true);
+
+    // 7a — reddens on a revert: without the inheritance the copy reads back 0.
+    const copy = listProjects().find((p) => p.managed_source_path !== null);
+    expect(getProject(copy!.id)?.trusted).toBe(1);
+
+    // 7b — reddens on a revert: the field is `undefined` once it is gone.
+    const rows = auditRowsSince(baseline);
+    expect(rows).toHaveLength(1);
+    const payload = JSON.parse(rows[0].payload_json) as Record<string, unknown>;
+    expect(payload.sourceTrusted).toBe(true);
+  });
+
+  test('a copy of an UNTRUSTED source stays untrusted (Cebab-gkme control)', async () => {
+    // 7c — the CONTROL. `expect(copy.trusted).toBe(0)` is today's behaviour
+    // (`upsertProject` inserts `trusted` 0) and CANNOT redden on a revert, so it
+    // is a pure control. The half that DOES redden is the audit payload:
+    // `sourceTrusted` reads `undefined` once the field is removed.
+    const id = seedProject(tmp.root(), 'untrusted-src');
+    const baseline = auditRows().length;
+    const sent: ServerMsg[] = [];
+
+    const outcome = await runManagedCopy(id, (m) => sent.push(m));
+    expect(outcome.registered).toBe(true);
+
+    const copy = listProjects().find((p) => p.managed_source_path !== null);
+    expect(getProject(copy!.id)?.trusted).toBe(0);
+
+    const rows = auditRowsSince(baseline);
+    expect(rows).toHaveLength(1);
+    const payload = JSON.parse(rows[0].payload_json) as Record<string, unknown>;
+    expect(payload.sourceTrusted).toBe(false);
   });
 
   test('[security] a failing audit append copies NOTHING and registers NOTHING', async () => {

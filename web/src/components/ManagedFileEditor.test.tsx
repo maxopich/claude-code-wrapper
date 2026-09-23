@@ -130,8 +130,9 @@ describe('saving', () => {
 
   test('on an untrusted agent the save message says when it will actually load (Cebab-6fax.43.1)', () => {
     // Reddens: dropping the untrusted branch -- the editor then promises that the
-    // next session loads a file an untrusted agent's chats never read. Managed
-    // copies start untrusted, so this is the ordinary case, not an edge.
+    // next session loads a file an untrusted agent's chats never read. A managed
+    // copy of an untrusted project is untrusted (Cebab-gkme), so this is an
+    // ordinary case, not an edge.
     render({ savedAt: 123, canSave: false, trusted: false });
     expect(text()).toContain('Trusted');
     expect(text()).not.toContain('next session');

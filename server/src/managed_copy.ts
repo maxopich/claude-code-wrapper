@@ -183,6 +183,14 @@ export async function runManagedCopy(
   const project = getProject(projectId);
   if (!project) return fail('that project no longer exists');
 
+  // [security] Cebab-gkme. Capture the source's Trust ONCE, here at the top, and
+  // use this one value for both the audit row and the registration below. A copy
+  // can take minutes; re-reading at registration time would let the operator flip
+  // Trust (or delete the source) mid-copy and make the audited value disagree with
+  // the row actually written. A copy of a trusted project is trusted — a snapshot,
+  // not a link: later Trust changes on the source do not propagate.
+  const sourceTrusted = project.trusted === 1;
+
   const survey = await surveyTree(project.path, caps);
   if (survey.overCap) {
     return fail(
@@ -216,6 +224,12 @@ export async function runManagedCopy(
         targetPath: target,
         bytes: survey.bytes,
         files: survey.files,
+        // [security] Cebab-gkme: the Trust the copy will inherit, recorded in the
+        // same audit-before-write row that already gates the copy, so the hash
+        // chain shows how a copy came to be trusted. If this append fails the whole
+        // copy is refused (below) — no tree, no row, no trust — which is strictly
+        // stronger than a downgrade.
+        sourceTrusted,
       },
       sticky: false,
     },
@@ -308,7 +322,7 @@ export async function runManagedCopy(
 
   let row;
   try {
-    row = registerManagedProject(project.name, target, project.path, Date.now());
+    row = registerManagedProject(project.name, target, project.path, Date.now(), sourceTrusted);
   } catch (err: unknown) {
     // The tree is on disk but the project row could not be created — the name
     // disambiguation loop can exhaust, a schema error can bite. Same reasoning

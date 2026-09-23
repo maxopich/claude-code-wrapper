@@ -318,12 +318,26 @@ export function resolveStartPermissionMode(
  * the missing/unmissing behaviour that every other project has. Only then is
  * the provenance attached. Nothing downstream needs to know a project is
  * managed to work on it, which is the property the whole bead rests on.
+ *
+ * `trusted` is a REQUIRED SNAPSHOT of the source project's Trust at copy time
+ * (Cebab-gkme, maintainer decision 2026-09-10 / re-confirmed 2026-09-23): a
+ * copy of a trusted project is trusted, so it loads its own `.claude/settings*`
+ * and `.mcp.json` on its first session and every bus hop rather than silently
+ * running as if untrusted. It is required, not optional, so the compiler names
+ * every call site rather than letting one leave a stale value behind, and the
+ * write is unconditional (1 or 0) so a re-claimed managed directory — see
+ * `claimManagedDir` — is set to the source's current Trust rather than keeping
+ * whatever the prior occupant had. Only `trusted` is inherited; `model`,
+ * `start_permission_mode` and `bus_trust_decision` are not, and later Trust
+ * changes on the source do NOT propagate — the copy is its own project from
+ * here on.
  */
 export function registerManagedProject(
   name: string,
   projectPath: string,
   sourcePath: string,
   copiedAt: number,
+  trusted: boolean,
 ): ProjectRow {
   // `Cebab-6fax.43`: one transaction, matching the two other multi-statement
   // writers in this file. These were two independent statements, and since
@@ -336,8 +350,8 @@ export function registerManagedProject(
   return db.transaction(() => {
     const row = upsertProject(name, projectPath);
     db.prepare(
-      'UPDATE projects SET managed_source_path = ?, managed_copied_at = ? WHERE id = ?',
-    ).run(sourcePath, copiedAt, row.id);
+      'UPDATE projects SET managed_source_path = ?, managed_copied_at = ?, trusted = ? WHERE id = ?',
+    ).run(sourcePath, copiedAt, trusted ? 1 : 0, row.id);
     return getProject(row.id)!;
   })();
 }
