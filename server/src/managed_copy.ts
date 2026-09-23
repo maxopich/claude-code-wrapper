@@ -190,6 +190,12 @@ export async function runManagedCopy(
   // the row actually written. A copy of a trusted project is trusted — a snapshot,
   // not a link: later Trust changes on the source do not propagate.
   const sourceTrusted = project.trusted === 1;
+  // Cebab-yih6 (maintainer decision 2026-09-23): the starting permission mode
+  // is inherited with Trust, captured at the same moment for the same reason. A
+  // Trusted source set to ask before every tool would otherwise yield a copy that
+  // auto-accepts edits — looser than its original by one Copy click. Copied raw;
+  // `resolveStartPermissionMode` filters it on read like any stored value.
+  const sourceStartPermissionMode = project.start_permission_mode ?? null;
 
   const survey = await surveyTree(project.path, caps);
   if (survey.overCap) {
@@ -230,6 +236,8 @@ export async function runManagedCopy(
         // copy is refused (below) — no tree, no row, no trust — which is strictly
         // stronger than a downgrade.
         sourceTrusted,
+        // Cebab-yih6: the starting mode the copy inherits, in the same row.
+        sourceStartPermissionMode,
       },
       sticky: false,
     },
@@ -322,7 +330,14 @@ export async function runManagedCopy(
 
   let row;
   try {
-    row = registerManagedProject(project.name, target, project.path, Date.now(), sourceTrusted);
+    row = registerManagedProject(
+      project.name,
+      target,
+      project.path,
+      Date.now(),
+      sourceTrusted,
+      sourceStartPermissionMode,
+    );
   } catch (err: unknown) {
     // The tree is on disk but the project row could not be created — the name
     // disambiguation loop can exhaust, a schema error can bite. Same reasoning

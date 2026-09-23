@@ -327,10 +327,12 @@ export function resolveStartPermissionMode(
  * every call site rather than letting one leave a stale value behind, and the
  * write is unconditional (1 or 0) so a re-claimed managed directory — see
  * `claimManagedDir` — is set to the source's current Trust rather than keeping
- * whatever the prior occupant had. Only `trusted` is inherited; `model`,
- * `start_permission_mode` and `bus_trust_decision` are not, and later Trust
- * changes on the source do NOT propagate — the copy is its own project from
- * here on.
+ * whatever the prior occupant had. `startPermissionMode` is inherited the same
+ * way and for the same reason (Cebab-yih6, maintainer decision 2026-09-23): a
+ * Trusted source set to ask before every tool must not yield a copy that
+ * auto-accepts edits, so a copy is never looser than its original. `model` and
+ * `bus_trust_decision` are NOT inherited, and later changes on the source do
+ * NOT propagate — the copy is its own project from here on.
  */
 export function registerManagedProject(
   name: string,
@@ -338,6 +340,7 @@ export function registerManagedProject(
   sourcePath: string,
   copiedAt: number,
   trusted: boolean,
+  startPermissionMode: string | null,
 ): ProjectRow {
   // `Cebab-6fax.43`: one transaction, matching the two other multi-statement
   // writers in this file. These were two independent statements, and since
@@ -350,8 +353,8 @@ export function registerManagedProject(
   return db.transaction(() => {
     const row = upsertProject(name, projectPath);
     db.prepare(
-      'UPDATE projects SET managed_source_path = ?, managed_copied_at = ?, trusted = ? WHERE id = ?',
-    ).run(sourcePath, copiedAt, trusted ? 1 : 0, row.id);
+      'UPDATE projects SET managed_source_path = ?, managed_copied_at = ?, trusted = ?, start_permission_mode = ? WHERE id = ?',
+    ).run(sourcePath, copiedAt, trusted ? 1 : 0, startPermissionMode, row.id);
     return getProject(row.id)!;
   })();
 }

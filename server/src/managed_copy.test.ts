@@ -17,7 +17,13 @@ import * as managedAgent from './managed_agent.js';
 import { managedAgentsRoot } from './managed_agent.js';
 import { preflightManagedCopy, runManagedCopy } from './managed_copy.js';
 import * as safetyAudit from './notifications/safety_audit.js';
-import { getProject, listProjects, setProjectTrusted, upsertProject } from './repo/projects.js';
+import {
+  getProject,
+  listProjects,
+  setProjectStartPermissionMode,
+  setProjectTrusted,
+  upsertProject,
+} from './repo/projects.js';
 import { withTempDataDir } from './test_support/temp_data_dir.js';
 
 type AuditRow = { kind: string; reason_code: string; payload_json: string };
@@ -156,6 +162,9 @@ describe('runManagedCopy', () => {
     // would assert 0 === 0 and could never redden on a revert.
     const id = seedProject(tmp.root(), 'trusted-src');
     setProjectTrusted(id, true);
+    // Cebab-yih6: a Trusted source that asks before every tool. The copy must
+    // keep that, or it would auto-accept edits its original asks about.
+    setProjectStartPermissionMode(id, 'default');
     const baseline = auditRows().length;
     const sent: ServerMsg[] = [];
 
@@ -165,12 +174,14 @@ describe('runManagedCopy', () => {
     // 7a — reddens on a revert: without the inheritance the copy reads back 0.
     const copy = listProjects().find((p) => p.managed_source_path !== null);
     expect(getProject(copy!.id)?.trusted).toBe(1);
+    expect(getProject(copy!.id)?.start_permission_mode).toBe('default');
 
     // 7b — reddens on a revert: the field is `undefined` once it is gone.
     const rows = auditRowsSince(baseline);
     expect(rows).toHaveLength(1);
     const payload = JSON.parse(rows[0].payload_json) as Record<string, unknown>;
     expect(payload.sourceTrusted).toBe(true);
+    expect(payload.sourceStartPermissionMode).toBe('default');
   });
 
   test('a copy of an UNTRUSTED source stays untrusted (Cebab-gkme control)', async () => {
@@ -187,11 +198,14 @@ describe('runManagedCopy', () => {
 
     const copy = listProjects().find((p) => p.managed_source_path !== null);
     expect(getProject(copy!.id)?.trusted).toBe(0);
+    // Control: a source with no starting mode gives a copy with none.
+    expect(getProject(copy!.id)?.start_permission_mode).toBeNull();
 
     const rows = auditRowsSince(baseline);
     expect(rows).toHaveLength(1);
     const payload = JSON.parse(rows[0].payload_json) as Record<string, unknown>;
     expect(payload.sourceTrusted).toBe(false);
+    expect(payload.sourceStartPermissionMode).toBeNull();
   });
 
   test('[security] a failing audit append copies NOTHING and registers NOTHING', async () => {

@@ -57,7 +57,7 @@ describe('037_project_managed', () => {
     const target = path.join(managedAgentsRoot(), 'rollback');
     fs.mkdirSync(target, { recursive: true });
     expect(() =>
-      registerManagedProject('rollback', target, {} as unknown as string, 1, false),
+      registerManagedProject('rollback', target, {} as unknown as string, 1, false, null),
     ).toThrow();
 
     const rows = getDb()
@@ -75,6 +75,7 @@ describe('037_project_managed', () => {
       '/somewhere/source',
       1_700_000_000_000,
       false,
+      null,
     );
     expect(row.managed_source_path).toBe('/somewhere/source');
     expect(row.managed_copied_at).toBe(1_700_000_000_000);
@@ -85,7 +86,7 @@ describe('037_project_managed', () => {
     // Both directions, because each failure looks like the feature working.
     const managedDir = path.join(managedAgentsRoot(), 'real');
     fs.mkdirSync(managedDir, { recursive: true });
-    const managed = registerManagedProject('real', managedDir, '/src', 1, false);
+    const managed = registerManagedProject('real', managedDir, '/src', 1, false, null);
     expect(isManagedProjectPath(managed.path)).toBe(true);
 
     // Clearing the provenance does NOT make a managed agent stop being managed
