@@ -1502,8 +1502,9 @@ export function routesToAssistant(state: AppState, msg: ServerMsg): boolean {
  *
  * A `notification` envelope is NEVER claimed and NEVER routed by an owned id: a
  * lapsed-login toast rides the app-wide notification stack, and folding it into
- * the assistant would silence it there. (A `notification` carries no sessionId
- * anyway; the guard is defence-in-depth, and the acceptance test names it.)
+ * the assistant would silence it there. The guard is LOAD-BEARING: the help
+ * turn's lapsed-login toast (Cebab-zqhq) carries the assistant's owned
+ * sessionId, so without this check the panel would swallow it.
  */
 export function assistantRoute(
   state: AppState,

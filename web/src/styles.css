@@ -7874,9 +7874,18 @@ pre {
     /* Cebab-eo71: the toasts move to the TOP of the screen while the panel is
      * open (rule below), so with two or more they would overlap the panel
      * header — which sits at the top of a bottom-anchored sheet. Cap the height
-     * so the sheet's top (its header) stays well below the toast area (measured
-     * at 375x812 with two notifications). */
-    max-height: min(var(--assistant-panel-max-h), 60dvh);
+     * so the sheet's top (its header) stays below the toast area. The cap
+     * subtracts the composer's clearance too, because the sheet's bottom rides
+     * above the composer: a flat 60dvh cap put the header under the toasts with
+     * a 120px composer and off-screen with a 310px one (review of PR #698,
+     * measured at 375x812 with two notifications; with this cap the header top
+     * stayed at ~261px for composer heights 0-310). */
+    max-height: min(
+      var(--assistant-panel-max-h),
+      calc(
+        68dvh - var(--composer-clearance, 0px) - var(--assistant-fab-size) - var(--s-4) - var(--s-2)
+      )
+    );
   }
   .assistant-dock[data-open='true'] ~ .notif-stack {
     top: var(--s-2);
