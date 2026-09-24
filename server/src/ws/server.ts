@@ -7931,10 +7931,35 @@ async function runOneTurn(
         // hit it" from "no one chose this number and it tripped". The
         // operator-facing toast is fanned out by the dispatcher as a
         // sticky safety notification.
-        // Cebab-zqhq: no cap toast for the assistant. Its cap is
+        // Cebab-zqhq: no cap TOAST for the assistant. Its cap is
         // `ASSISTANT_MAX_TURNS`, not the operator's Settings default the message
         // tells them to raise, so the toast would point at the wrong knob for a
-        // session the sidebar never lists.
+        // session the sidebar never lists. The hash-chained AUDIT row is still
+        // written — the toast and the row travel together through
+        // emitNotification, and skipping the toast must not leave a gap in the
+        // one log whose value is having none (review of PR #697).
+        if (assistant && out.type === 'result' && out.subtype === 'error_max_turns') {
+          try {
+            appendSafetyAudit({
+              ts: Date.now(),
+              sessionId,
+              kind: 'max_turns.hit',
+              reasonCode: 'max_turns_exceeded',
+              payload: {
+                effectiveMaxTurns,
+                actor: maxTurnsActor,
+                numTurns: out.numTurns ?? null,
+                hadOverride: maxTurnsActor === 'operator',
+                assistant: true,
+              },
+            });
+          } catch (err) {
+            console.error(
+              `[ws] max_turns.hit audit append failed for assistant ${sessionId}:`,
+              err,
+            );
+          }
+        }
         if (!assistant && out.type === 'result' && out.subtype === 'error_max_turns') {
           const capNotified = emitNotification(
             {

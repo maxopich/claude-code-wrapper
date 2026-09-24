@@ -159,7 +159,7 @@ afterEach(async () => {
   fs.rmSync(tmpRoot, { recursive: true, force: true });
 });
 
-describe('the assistant refuses every tool call at the gate', () => {
+describe('[security] the assistant refuses every tool call at the gate', () => {
   test('[security] Read outside the KB is denied at once, not parked', async () => {
     const conn = makeConn();
     const { gate, sessionId } = await spawnTurn(conn, assistantId);
@@ -172,6 +172,24 @@ describe('the assistant refuses every tool call at the gate', () => {
     expect(sent.filter((m) => m.type === 'ask_user_question')).toHaveLength(0);
     expect(conn.pendingPermissions.size).toBe(0);
     expect(refusedRows(sessionId)).toHaveLength(1);
+  });
+
+  test('[security] the deny is returned even when the refusal row cannot be written', async () => {
+    // Review of PR #697: removing the try/catch around the refusal write left
+    // every test green. A failed audit write must never turn a refusal into a
+    // thrown gate (which the SDK would read as an error, not a deny).
+    const conn = makeConn();
+    const { gate } = await spawnTurn(conn, assistantId);
+    getDb().exec('DROP TABLE events'); // insertEvent now throws
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const decision = await settleQuickly(gate('Read', { file_path: '/etc/hosts' }));
+    expect(decision).toEqual({ behavior: 'deny', message: ASSISTANT_TOOL_REFUSED_TEXT });
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('assistant_tool_refused persist failed'),
+      expect.anything(),
+    );
+    errSpy.mockRestore();
+    expect(sent.filter((m) => m.type === 'permission_request')).toHaveLength(0);
   });
 
   test('[security] Bash, AskUserQuestion, and an MCP tool are all refused the same way', async () => {
@@ -233,7 +251,7 @@ describe('the assistant refuses every tool call at the gate', () => {
   });
 });
 
-describe('the assistant spawn loads no MCP server', () => {
+describe('[security] the assistant spawn loads no MCP server', () => {
   test('[security] assistant options carry strictMcpConfig + disableClaudeAiConnectors', async () => {
     const conn = makeConn();
     const { opts } = await spawnTurn(conn, assistantId);
@@ -249,7 +267,7 @@ describe('the assistant spawn loads no MCP server', () => {
   });
 });
 
-describe('help-turn failures stay out of the notification stack', () => {
+describe('[security] help-turn failures stay out of the notification stack', () => {
   function notifications(): ServerMsg[] {
     return sent.filter((m) => m.type === 'notification');
   }
@@ -301,6 +319,13 @@ describe('help-turn failures stay out of the notification stack', () => {
     const conn = makeConn();
     await spawnTurn(conn, assistantId);
     expect(notifications()).toHaveLength(0);
+    // ...but the cap hit still reaches the hash-chained audit log: skipping the
+    // toast must not leave a gap in it (review of PR #697).
+    const rows = getDb()
+      .prepare(`SELECT payload_json FROM safety_audit WHERE kind = 'max_turns.hit'`)
+      .all() as Array<{ payload_json: string }>;
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0]!.payload_json)).toMatchObject({ assistant: true });
   });
 
   test('CONTROL: error_max_turns DOES notify for an ordinary project', async () => {
