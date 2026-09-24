@@ -21,15 +21,15 @@ export function AssistantPanel({ onClose }: { onClose: () => void }) {
   const hasContent = session != null && session.messages.length > 0;
 
   return (
-    <div className="assistant-panel" role="dialog" aria-label="Cebab assistant">
+    <div className="assistant-panel" role="dialog" aria-label="Cebab help">
       <header className="assistant-panel-header">
-        <span className="assistant-panel-title">Assistant</span>
+        <span className="assistant-panel-title">Cebab help</span>
         <button
           type="button"
           className="assistant-panel-close icon-btn"
           onClick={onClose}
-          aria-label="Close assistant"
-          title="Close assistant"
+          aria-label="Close help"
+          title="Close help"
         >
           ✕
         </button>

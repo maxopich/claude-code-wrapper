@@ -57,18 +57,18 @@ export function AssistantDock() {
   if (assistantProjectId === undefined) return null;
 
   return (
-    <div className="assistant-dock">
+    <div className="assistant-dock" data-open={open ? 'true' : 'false'}>
       <button
         ref={buttonRef}
         type="button"
         className="assistant-dock-trigger icon-btn"
-        title="Cebab assistant"
-        aria-label="Cebab assistant"
+        title="Cebab help"
+        aria-label="Cebab help"
         aria-expanded={open}
         aria-haspopup="dialog"
         onClick={() => (open ? closePanel() : setOpen(true))}
       >
-        <Icon name="chat" />
+        <Icon name="help" />
       </button>
       {open && (
         <div ref={popoverRef} className="assistant-dock-popover">

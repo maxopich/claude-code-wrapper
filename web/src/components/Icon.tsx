@@ -5,7 +5,7 @@ import type { ReactNode } from 'react';
  * cebab-redesign.html mockup. Decorative (aria-hidden); sized via the
  * global `.ic` / `.ic-lg` rules in styles.css and tinted by `currentColor`.
  */
-export type IconName = 'chat' | 'agents' | 'chain' | 'send' | 'stop';
+export type IconName = 'chat' | 'agents' | 'chain' | 'send' | 'stop' | 'help';
 
 const PATHS: Record<IconName, ReactNode> = {
   chat: <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />,
@@ -34,6 +34,15 @@ const PATHS: Record<IconName, ReactNode> = {
   // center, rendered via stroke+fill currentColor so the button's
   // --err token colors it identically to the existing icons.
   stop: <rect x="6" y="6" width="12" height="12" rx="1.5" fill="currentColor" />,
+  // Cebab-i6fl: a question mark in a circle for the help-assistant trigger,
+  // same stroke style as the rest of the set (stroke currentColor, no fill).
+  help: (
+    <>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M9.5 9a2.5 2.5 0 0 1 4.9.7c0 1.7-2.4 2.1-2.4 3.8" />
+      <path d="M12 17h.01" />
+    </>
+  ),
 };
 
 export function Icon(props: { name: IconName; className?: string }) {
