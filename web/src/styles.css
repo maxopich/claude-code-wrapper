@@ -7653,22 +7653,6 @@ pre {
     width: auto;
     max-width: none;
   }
-  /* Cebab-i6fl: on a phone the open panel is a full-width sheet, and the toasts
-   * move to the TOP while it is open so the two don't stack in the same corner. */
-  .assistant-dock[data-open='true'] .assistant-dock-popover {
-    position: fixed;
-    left: var(--s-2);
-    right: var(--s-2);
-    width: auto;
-    max-width: none;
-  }
-  .assistant-dock[data-open='true'] ~ .notif-stack {
-    top: calc(var(--composer-clearance, 0px) + var(--s-2));
-    bottom: auto;
-    right: var(--s-2);
-    left: var(--s-2);
-    max-width: none;
-  }
 }
 
 /* =========================================================================
@@ -7708,6 +7692,12 @@ pre {
   align-items: center;
   justify-content: center;
   cursor: pointer;
+}
+/* `.icon-btn:hover` would otherwise repaint the trigger in the page's light
+ * grey; the help button keeps its accent colour under the pointer. */
+.assistant-dock-trigger:hover {
+  background: var(--accent);
+  color: var(--on-accent);
 }
 .assistant-dock-trigger:focus-visible {
   outline: 2px solid var(--accent-ink);
@@ -7806,6 +7796,11 @@ pre {
   padding: var(--s-2) var(--s-4);
   border-top: 1px solid var(--line-2);
 }
+.assistant-composer > .grow-textarea-wrap {
+  /* The textarea takes the row; Send stays at the end instead of floating mid-row. */
+  flex: 1 1 auto;
+  min-width: 0;
+}
 .assistant-send {
   flex: 0 0 auto;
 }
@@ -7827,6 +7822,33 @@ pre {
    * above; clamp the width so they never run off the left edge. */
   right: calc(var(--s-4) * 2 + var(--assistant-panel-w));
   max-width: calc(100vw - (var(--s-4) * 3 + var(--assistant-panel-w)));
+}
+
+/* Cebab-i6fl, phone: the open panel is a full-width sheet that sits ABOVE the
+ * chat composer and the help button (position: fixed measures from the screen,
+ * so without the bottom offset it covered Send), and the toasts move to the TOP
+ * of the screen while it is open. These MUST come after the desktop collision
+ * rules above: the selectors are equally specific, so source order decides —
+ * placed earlier, the desktop rule won and the toasts were 0px wide on phones
+ * (measured in the review of PR #696). assistantStyles.test.ts pins the order. */
+@media (max-width: 599.98px) {
+  .assistant-dock[data-open='true'] .assistant-dock-popover {
+    position: fixed;
+    left: var(--s-2);
+    right: var(--s-2);
+    bottom: calc(
+      var(--composer-clearance, 0px) + var(--s-4) + var(--assistant-fab-size) + var(--s-2)
+    );
+    width: auto;
+    max-width: none;
+  }
+  .assistant-dock[data-open='true'] ~ .notif-stack {
+    top: var(--s-2);
+    bottom: auto;
+    right: var(--s-2);
+    left: var(--s-2);
+    max-width: none;
+  }
 }
 
 .notif {

@@ -49,7 +49,9 @@ function classNamesUsed(src: string): Set<string> {
  *  `.assistant-dock-trigger` are distinct entries — a rule for the longer name
  *  does not vacuously satisfy the shorter one. */
 function ruledClasses(css: string): Set<string> {
-  return new Set([...css.matchAll(/\.(assistant-[a-z0-9-]+)/g)].map((m) => m[1]!));
+  // Comments stripped first: a class named only in a comment has no rule.
+  const noComments = css.replace(/\/\*[\s\S]*?\*\//g, '');
+  return new Set([...noComments.matchAll(/\.(assistant-[a-z0-9-]+)/g)].map((m) => m[1]!));
 }
 
 const NEW_TOKENS = [
@@ -78,6 +80,44 @@ function flatRules(css: string): Array<{ selector: string; body: string }> {
   }
   return out;
 }
+
+/** Rules in SOURCE ORDER, each tagged with the `@media` prelude it sits in
+ *  (null at top level). Comments are blanked, not removed, so offsets keep
+ *  source order. The stylesheet is flat apart from at-rule wrappers, so one
+ *  level of container is enough. A comment that NAMES a selector is not a rule
+ *  — the text search this replaces was satisfied by comments (PR #696 review). */
+function rulesInOrder(
+  css: string,
+): Array<{ selector: string; body: string; media: string | null; at: number }> {
+  const src = css.replace(/\/\*[\s\S]*?\*\//g, (c) => ' '.repeat(c.length));
+  const CONTAINER = /^@(media|supports|layer|keyframes|container)\b/;
+  const out: Array<{ selector: string; body: string; media: string | null; at: number }> = [];
+  let media: string | null = null;
+  let start = 0;
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === '{') {
+      const prelude = src.slice(start, i).trim();
+      if (CONTAINER.test(prelude)) {
+        media = prelude;
+        start = i + 1;
+        continue;
+      }
+      const close = src.indexOf('}', i);
+      out.push({ selector: prelude, body: src.slice(i + 1, close), media, at: i });
+      i = close;
+      start = close + 1;
+    } else if (ch === '}') {
+      media = null;
+      start = i + 1;
+    }
+  }
+  return out;
+}
+
+const PHONE = /max-width:\s*599\.98px/;
+const OPEN_NOTIF = ".assistant-dock[data-open='true'] ~ .notif-stack";
+const OPEN_POPOVER = ".assistant-dock[data-open='true'] .assistant-dock-popover";
 
 describe('assistant widget styles (Cebab-i6fl / Cebab-e29)', () => {
   test('the scan actually read the sources', () => {
@@ -134,9 +174,50 @@ describe('assistant widget styles (Cebab-i6fl / Cebab-e29)', () => {
     expect(flatRules(stylesCss).some((r) => r.selector.includes('assistant-'))).toBe(true);
   });
 
-  test('both notif-stack collision rules exist', () => {
-    expect(stylesCss).toContain('.assistant-dock ~ .notif-stack');
-    expect(stylesCss).toContain(".assistant-dock[data-open='true'] ~ .notif-stack");
+  test('the rule walk sees top-level and @media rules (anti-vacuity)', () => {
+    const rules = rulesInOrder(stylesCss);
+    expect(rules.length).toBeGreaterThan(500);
+    expect(rules.some((r) => r.media === null)).toBe(true);
+    expect(rules.some((r) => r.media !== null && PHONE.test(r.media))).toBe(true);
+  });
+
+  test('both desktop collision rules are real top-level rules that set what they claim', () => {
+    const top = rulesInOrder(stylesCss).filter((r) => r.media === null);
+    const lift = top.find((r) => r.selector === '.assistant-dock ~ .notif-stack');
+    expect(lift, 'a top-level .assistant-dock ~ .notif-stack rule').toBeDefined();
+    expect(lift!.body).toMatch(/(^|[\s;])bottom\s*:/);
+    const beside = top.find((r) => r.selector === OPEN_NOTIF);
+    expect(beside, `a top-level ${OPEN_NOTIF} rule`).toBeDefined();
+    expect(beside!.body).toMatch(/(^|[\s;])right\s*:/);
+  });
+
+  test('on a phone the open panel clears the composer and the toasts move to the top, AFTER the desktop rule', () => {
+    // Same specificity as the desktop rule, so source order decides: placed
+    // before it, the desktop rule won and the toasts were 0px wide on phones.
+    const rules = rulesInOrder(stylesCss);
+    const desktop = rules.find((r) => r.media === null && r.selector === OPEN_NOTIF)!;
+    const phoneNotif = rules.filter(
+      (r) => r.media !== null && PHONE.test(r.media) && r.selector === OPEN_NOTIF,
+    );
+    expect(phoneNotif.length, `a phone ${OPEN_NOTIF} rule`).toBeGreaterThan(0);
+    for (const r of phoneNotif) {
+      expect(r.at, 'the phone rule must come after the desktop rule').toBeGreaterThan(desktop.at);
+      expect(r.body).toMatch(/(^|[\s;])top\s*:/);
+    }
+    const phonePopover = rules.find(
+      (r) => r.media !== null && PHONE.test(r.media) && r.selector === OPEN_POPOVER,
+    );
+    expect(phonePopover, `a phone ${OPEN_POPOVER} rule`).toBeDefined();
+    // position: fixed measures from the screen; without this the sheet covers Send.
+    expect(phonePopover!.body).toMatch(/(^|[\s;])bottom\s*:[^;]*--composer-clearance/);
+  });
+
+  test('the help button keeps its accent colour under the pointer', () => {
+    const hover = rulesInOrder(stylesCss).find(
+      (r) => r.media === null && r.selector === '.assistant-dock-trigger:hover',
+    );
+    expect(hover, 'a .assistant-dock-trigger:hover rule').toBeDefined();
+    expect(hover!.body).toMatch(/background\s*:\s*var\(--accent\)/);
   });
 
   test('the .assistant-dock rule clears whatever composer is on screen', () => {
