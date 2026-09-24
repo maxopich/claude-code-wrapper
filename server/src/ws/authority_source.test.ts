@@ -23,9 +23,14 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
 vi.mock('../runner/probe.js', () => ({
   probeSessionStarted: async () => probeResult,
+  // Cebab-ajvv: `runAuthorityProbe` now calls `probeAuthority`, which returns
+  // the scopes alongside the snapshot. Null when the probe produced nothing.
+  probeAuthority: async () =>
+    probeResult ? { started: probeResult, mcpScopes: probeScopes } : null,
 }));
 
 let probeResult: unknown = null;
+let probeScopes: ReadonlyMap<string, string> = new Map();
 
 const { respondWithProjectAuthority } = await import('./server.js');
 const { config } = await import('../config.js');
@@ -54,6 +59,7 @@ function fakeConn() {
 beforeEach(() => {
   sent = [];
   probeResult = null;
+  probeScopes = new Map();
   tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-authority-source-'));
   originalDataDir = config.dataDir;
   config.dataDir = path.join(tmpRoot, '.cebab');
@@ -136,6 +142,36 @@ describe('the authority snapshot reports how it was actually produced', () => {
     expect((conn as unknown as { authorityCache: Map<number, unknown> }).authorityCache.size).toBe(
       0,
     );
+  });
+
+  test("a probe's scope reaches the envelope on a server no file declares", async () => {
+    // Cebab-ajvv: the probe reports a server the file scan cannot find, plus its
+    // scope. The shipped row must carry `reportedScope` while `scope` stays
+    // 'unknown' — the label is visibility only. Reddens if `runAuthorityProbe`
+    // drops the scopes on the way into the cache.
+    probeResult = {
+      type: 'session_started',
+      sessionId: 's1',
+      projectId,
+      model: 'opus-4',
+      tools: ['Bash'],
+      mcpServers: [{ name: 'claude.ai Mail', status: 'pending' }],
+    };
+    probeScopes = new Map([['claude.ai Mail', 'claudeai']]);
+    const conn = fakeConn();
+    await respondWithProjectAuthority(conn, projectId, 'probe');
+
+    const authority = (
+      sent[0] as unknown as {
+        authority: {
+          mcpServers: Array<{ name: string; scope: string; reportedScope?: string }>;
+        };
+      }
+    ).authority;
+    const row = authority.mcpServers.find((s) => s.name === 'claude.ai Mail');
+    expect(row).toBeDefined();
+    expect(row!.scope).toBe('unknown');
+    expect(row!.reportedScope).toBe('claudeai');
   });
 
   test('a project row that does not exist still answers, without a probe', async () => {
