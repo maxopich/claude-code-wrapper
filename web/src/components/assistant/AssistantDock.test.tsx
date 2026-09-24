@@ -115,6 +115,36 @@ describe('AssistantDock / render gate', () => {
   });
 });
 
+describe('AssistantDock / help widget chrome (Cebab-i6fl)', () => {
+  test('the trigger is found by the label "Cebab help"', () => {
+    mount();
+    feed(settingsMsg(ASSISTANT_PID));
+    const byLabel = container.querySelector<HTMLButtonElement>('[aria-label="Cebab help"]');
+    expect(byLabel).not.toBeNull();
+    expect(byLabel).toBe(trigger());
+    expect(byLabel!.getAttribute('title')).toBe('Cebab help');
+  });
+
+  test('data-open flips false -> true -> false as the panel opens and closes', () => {
+    mount();
+    feed(settingsMsg(ASSISTANT_PID));
+    const dock = container.querySelector<HTMLElement>('.assistant-dock');
+    expect(dock).not.toBeNull();
+    expect(dock!.getAttribute('data-open')).toBe('false');
+
+    const btn = trigger()!;
+    act(() => {
+      btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(dock!.getAttribute('data-open')).toBe('true');
+
+    act(() => {
+      btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(dock!.getAttribute('data-open')).toBe('false');
+  });
+});
+
 describe('AssistantDock / popover open + close', () => {
   test('click toggles aria-expanded and mounts a role=dialog panel', () => {
     mount();

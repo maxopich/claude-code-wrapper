@@ -122,6 +122,17 @@
    * TopRunBar / sidebar chrome (default flow) and the modal overlays
    * (z-index: 100 — see .modal-overlay / .tpl-modal-overlay). */
   --notif-stack-z: 90;
+  /* Cebab-i6fl: help-assistant dock geometry — GEOMETRY ONLY, no colours (the
+   * widget's colours come from --accent / --on-accent / --bg-4 per gamma, so
+   * they belong in the gammas, not here). --assistant-dock-z sits BELOW
+   * --notif-stack-z (90) on purpose: the toasts must render above the trigger,
+   * and the `.assistant-dock ~ .notif-stack` rules below then move them clear
+   * of it. Kept here beside --notif-stack-z rather than in a [data-theme]
+   * block so styleTokens.test.ts's per-gamma parity contract is untouched. */
+  --assistant-dock-z: 88;
+  --assistant-fab-size: 44px;
+  --assistant-panel-w: 380px;
+  --assistant-panel-max-h: 560px;
   /* Fonts */
   --font-sans: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif;
   --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
@@ -7642,6 +7653,180 @@ pre {
     width: auto;
     max-width: none;
   }
+  /* Cebab-i6fl: on a phone the open panel is a full-width sheet, and the toasts
+   * move to the TOP while it is open so the two don't stack in the same corner. */
+  .assistant-dock[data-open='true'] .assistant-dock-popover {
+    position: fixed;
+    left: var(--s-2);
+    right: var(--s-2);
+    width: auto;
+    max-width: none;
+  }
+  .assistant-dock[data-open='true'] ~ .notif-stack {
+    top: calc(var(--composer-clearance, 0px) + var(--s-2));
+    bottom: auto;
+    right: var(--s-2);
+    left: var(--s-2);
+    max-width: none;
+  }
+}
+
+/* =========================================================================
+ * Cebab-i6fl: the built-in help assistant, styled as a floating support
+ * widget. Geometry rides the --assistant-* tokens declared beside
+ * --notif-stack-z in the first :root block; colours come from --accent /
+ * --on-accent / --bg-4 per gamma, never a hex literal here. Every rule is
+ * FLAT (no nesting) so templatePreview/cssGate.test.ts's flat-rule regex and
+ * styleTokens.test.ts's block walk both scan it correctly.
+ *
+ * The DOM order in App.tsx is LOAD-BEARING: <AssistantDock/> is a sibling of
+ * <AppShell/> rendered immediately BEFORE <NotificationStack/>, so the
+ * `.assistant-dock ~ .notif-stack` collision rules below can move the toasts
+ * clear of the trigger. AssistantDock renders nothing until the assistant is
+ * on, so those sibling rules only take effect while the button exists.
+ * ========================================================================= */
+.assistant-dock {
+  position: fixed;
+  right: var(--s-4);
+  /* Sit just above whichever composer is on screen. --composer-clearance is
+   * published by useComposerClearance from the mounted composer (InputBox, the
+   * bus draft, the active-run prompt); the help composer deliberately does NOT
+   * publish its own — only one caller may be mounted at a time. The 0px
+   * fallback is the no-composer case. */
+  bottom: calc(var(--composer-clearance, 0px) + var(--s-4));
+  z-index: var(--assistant-dock-z);
+}
+.assistant-dock-trigger {
+  width: var(--assistant-fab-size);
+  height: var(--assistant-fab-size);
+  border: none;
+  border-radius: var(--r-pill);
+  background: var(--accent);
+  color: var(--on-accent);
+  box-shadow: var(--shadow-md);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+.assistant-dock-trigger:focus-visible {
+  outline: 2px solid var(--accent-ink);
+  outline-offset: 2px;
+}
+.assistant-dock-popover {
+  position: absolute;
+  right: 0;
+  bottom: calc(var(--assistant-fab-size) + var(--s-2));
+  width: var(--assistant-panel-w);
+  max-width: calc(100vw - var(--s-4) * 2);
+  max-height: min(
+    var(--assistant-panel-max-h),
+    calc(100dvh - var(--composer-clearance, 0px) - var(--assistant-fab-size) - var(--s-4) * 3)
+  );
+  display: flex;
+}
+.assistant-panel {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-height: inherit;
+  background: var(--bg-4);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+}
+.assistant-panel-header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-4);
+  border-bottom: 1px solid var(--line-2);
+}
+.assistant-panel-title {
+  font-weight: 600;
+  font-size: var(--t-md);
+  color: var(--fg-0);
+}
+.assistant-panel-close {
+  flex: 0 0 auto;
+}
+.assistant-transcript {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-2);
+}
+.assistant-empty {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: var(--s-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s-3);
+}
+.assistant-empty-lead {
+  color: var(--fg-1);
+  font-size: var(--t-md);
+}
+.assistant-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s-2);
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.assistant-chip {
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-pill);
+  background: var(--bg-5);
+  color: var(--fg-1);
+  padding: var(--s-1) var(--s-3);
+  font-size: var(--t-sm);
+  cursor: pointer;
+}
+.assistant-chip:hover {
+  border-color: var(--line-3);
+}
+.assistant-chip:focus-visible {
+  outline: 2px solid var(--accent-ink);
+  outline-offset: 2px;
+}
+.assistant-composer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: flex-end;
+  gap: var(--s-2);
+  padding: var(--s-2) var(--s-4);
+  border-top: 1px solid var(--line-2);
+}
+.assistant-send {
+  flex: 0 0 auto;
+}
+
+/* Collision rules — see the DOM-order note above; App.tsx's sibling order is
+ * load-bearing for both of these. */
+.assistant-dock ~ .notif-stack {
+  /* Lift the toasts above the fab so the two don't share the bottom-right
+   * corner, and shrink the cap by the same amount so the dock stays inside the
+   * viewport. */
+  bottom: calc(var(--composer-clearance, 0px) + var(--assistant-fab-size) + var(--s-4) * 2);
+  max-height: min(
+    50dvh,
+    calc(100dvh - var(--composer-clearance, 0px) - var(--assistant-fab-size) - var(--s-4) * 3)
+  );
+}
+.assistant-dock[data-open='true'] ~ .notif-stack {
+  /* With the panel open, move the toasts to the LEFT of it instead of stacking
+   * above; clamp the width so they never run off the left edge. */
+  right: calc(var(--s-4) * 2 + var(--assistant-panel-w));
+  max-width: calc(100vw - (var(--s-4) * 3 + var(--assistant-panel-w)));
 }
 
 .notif {

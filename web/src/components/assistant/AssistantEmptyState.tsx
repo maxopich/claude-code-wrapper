@@ -23,6 +23,10 @@ export function AssistantEmptyState() {
       <p className="assistant-empty-lead">
         Ask about Cebab — how the app works, what a feature does, or how to get started.
       </p>
+      <p className="assistant-empty-lead">
+        It answers from Cebab&apos;s built-in help pages only. Each question uses your Claude
+        subscription, like any other chat.
+      </p>
       <ul className="assistant-chips" role="list">
         {SUGGESTED_QUESTIONS.map((q) => (
           <li key={q}>
