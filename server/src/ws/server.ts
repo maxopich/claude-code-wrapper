@@ -23,6 +23,7 @@ import {
 } from '../repo/projects.js';
 import { scanProjects } from '../repo/project_scan.js';
 import {
+  ASSISTANT_TOOL_REFUSED_TEXT,
   assertWorkspaceProject,
   assistantKbRoot,
   assistantSpawnPosture,
@@ -7527,6 +7528,30 @@ async function runOneTurn(
     | { behavior: 'allow'; updatedInput: Record<string, unknown> }
     | { behavior: 'deny'; message: string }
   > => {
+    // Cebab-zqhq [security]: the help assistant refuses EVERY tool call that
+    // reaches this gate, before any other branch. The CLI settles the assistant's
+    // in-KB reads itself, so the only calls that arrive here are out-of-KB reads
+    // and MCP tools — exactly the ones a help turn must not make. Parking a
+    // question or a permission on any of them (which the branches below would do)
+    // would wait forever on an approval card the help panel cannot show, which is
+    // the freeze this closes. A best-effort transcript row records the refusal;
+    // the deny is returned even if that write fails, since the refusal is what
+    // unblocks the turn.
+    if (assistant) {
+      try {
+        await persistMessage(sessionId, {
+          type: 'wrapper',
+          subtype: 'assistant_tool_refused',
+          session_id: sessionId,
+          uuid: randomUUID(),
+          toolName,
+          input,
+        } as never);
+      } catch (err) {
+        console.error(`[ws] assistant_tool_refused persist failed for ${sessionId}:`, err);
+      }
+      return { behavior: 'deny', message: ASSISTANT_TOOL_REFUSED_TEXT };
+    }
     // `Cebab-uhn2`: AskUserQuestion is ANSWERED, never approved — and this
     // branch sits ABOVE `shouldAutoAllow` because that is exactly where the bug
     // was. On a trusted project `shouldAutoAllow` returns true for every tool,
@@ -7704,6 +7729,12 @@ async function runOneTurn(
           tools: posture.tools,
           skills: posture.skills,
           disallowedTools: posture.disallowedTools,
+          // Cebab-zqhq: keep every MCP server out of a help turn. `settingSources:
+          // []` already excludes project/user declarations; these two close the
+          // rest — `strictMcpConfig` any other MCP config the SDK would consult,
+          // `disableClaudeAiConnectors` the file-less claude.ai cloud connectors.
+          strictMcpConfig: posture.strictMcpConfig,
+          disableClaudeAiConnectors: posture.disableClaudeAiConnectors,
         }
       : {
           // H04: MCP servers the operator refused at the gate above. `runClaude`
@@ -7900,7 +7931,11 @@ async function runOneTurn(
         // hit it" from "no one chose this number and it tripped". The
         // operator-facing toast is fanned out by the dispatcher as a
         // sticky safety notification.
-        if (out.type === 'result' && out.subtype === 'error_max_turns') {
+        // Cebab-zqhq: no cap toast for the assistant. Its cap is
+        // `ASSISTANT_MAX_TURNS`, not the operator's Settings default the message
+        // tells them to raise, so the toast would point at the wrong knob for a
+        // session the sidebar never lists.
+        if (!assistant && out.type === 'result' && out.subtype === 'error_max_turns') {
           const capNotified = emitNotification(
             {
               class: 'safety',
@@ -8015,7 +8050,16 @@ async function runOneTurn(
     // when the turn dies. `rate_limited` is handled separately on the live
     // stream via the typed `rate_limit_event` path; we skip it here to
     // avoid double-toasting.
-    if (wrap.kind !== 'rate_limited') {
+    // Cebab-zqhq: keep help-turn failures out of the operator's notification
+    // stack. `wrapperErrorDispatch` would point a `process_crashed` toast's
+    // `restart_agent` action at a session the sidebar never lists, and the
+    // `error_max_turns` safety toast at a default the assistant does not use.
+    // The one exception is `auth_expired`: a lapsed login is account-wide and
+    // its Re-authenticate action works, so the operator should still see it. The
+    // `wrapper_error` above still reaches the client either way (slice 4 shows it
+    // in the help panel).
+    const notifyThisKind = !assistant || wrap.kind === 'auth_expired';
+    if (wrap.kind !== 'rate_limited' && notifyThisKind) {
       // Register S02b: `null` means "this ended deliberately, say nothing" —
       // see `wrapperErrorDispatch`. The `wrapper_error` above still reaches
       // the client (so the session banner can show it stopped) and the turn is

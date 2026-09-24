@@ -214,6 +214,39 @@ refused if the append fails) because it sets an initial permission posture,
 unlike the silent `set_project_model`. Single-agent only — the bus runs its own
 gate.
 
+### The help assistant (`Cebab-zqhq`)
+
+The built-in help assistant runs through the ordinary single-agent path as an
+`kind = 'assistant'` project row, under a hard-locked posture
+(`assistant/identity.ts`). Its boundary is several layers, each closing a
+different gap:
+
+- **The tool-name boundary.** `tools: ['Read', 'Glob', 'Grep']` is the SDK's
+  base-set filter, and `disallowedTools` names every mutating/executing built-in
+  explicitly as belt-and-suspenders — so the model's context carries read tools
+  and nothing else.
+- **`settingSources: []`.** No `~/.claude`, no project settings, no CLAUDE.md,
+  no project-declared MCP servers or env injections layer into the turn.
+- **`strictMcpConfig: true` and `disableClaudeAiConnectors: true`.** The empty
+  scope set does not govern everything that can load: a claude.ai connector is
+  declared in no file the scope set reads. `strictMcpConfig` ignores every other
+  MCP configuration the SDK would still consult, and `disableClaudeAiConnectors`
+  keeps the file-less cloud connectors from auto-connecting. Together they mean a
+  help turn loads no MCP server at all.
+- **`canUseTool` refuses first, before any other branch.** The CLI settles the
+  assistant's in-KB reads (`cwd` = `assistant/kb/`) by itself, so those never
+  reach the callback. The only calls that DO reach it are out-of-KB reads and
+  MCP tools — and the assistant arm refuses every one immediately with
+  `ASSISTANT_TOOL_REFUSED_TEXT`, above the AskUserQuestion and permission
+  branches. This is what stops a help turn parking a permission card the help
+  panel cannot show, which used to freeze the turn until the socket closed.
+
+Because the in-cwd reads never reach Cebab, refusing everything the callback
+sees IS the design: there is no path-containment allow-list, because only the
+out-of-KB calls ever arrive. The assistant is also never Trusted
+(`trusted` is forced false in `runOneTurn`), so `shouldAutoAllow` can never
+promote it to auto-allow-everything.
+
 ## The consultant constraint, and its two limits
 
 Because no bus tool call is gated on a human, the **consultant-mode guardrail**

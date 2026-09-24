@@ -169,6 +169,48 @@ describe('buildSdkOptions — tools + skills (Cebab-8x8.1.2)', () => {
   });
 });
 
+describe('buildSdkOptions — MCP isolation (Cebab-zqhq)', () => {
+  test('strictMcpConfig is present ONLY when requested', () => {
+    // Absent leaves the SDK's default (load all MCP configs), which every
+    // ordinary spawn wants; `strictMcpConfig: opts.strictMcpConfig` in the
+    // always-present literal would ship `undefined` and redden the first line.
+    expect('strictMcpConfig' in buildSdkOptions(MINIMAL)).toBe(false);
+    const o = buildSdkOptions({ ...MINIMAL, strictMcpConfig: true });
+    expect(o.strictMcpConfig).toBe(true);
+  });
+
+  test('a false strictMcpConfig stays absent, not a present false', () => {
+    expect('strictMcpConfig' in buildSdkOptions({ ...MINIMAL, strictMcpConfig: false })).toBe(
+      false,
+    );
+  });
+
+  test('disableClaudeAiConnectors lands in options.settings when requested', () => {
+    const o = buildSdkOptions({ ...MINIMAL, disableClaudeAiConnectors: true });
+    expect(o.settings).toEqual({ disableClaudeAiConnectors: true });
+  });
+
+  test('disableClaudeAiConnectors and deniedMcpServers BOTH survive in settings', () => {
+    // The two independent contributions to the inline settings layer must not
+    // clobber each other. Dropping either assignment reddens here.
+    const o = buildSdkOptions({
+      ...MINIMAL,
+      disableClaudeAiConnectors: true,
+      deniedMcpServers: ['sketchy'],
+    });
+    expect(o.settings).toEqual({
+      deniedMcpServers: [{ serverName: 'sketchy' }],
+      disableClaudeAiConnectors: true,
+    });
+  });
+
+  test('neither key touches an ordinary spawn — settings absent, strictMcpConfig absent', () => {
+    const o = buildSdkOptions(MINIMAL);
+    expect('settings' in o).toBe(false);
+    expect('strictMcpConfig' in o).toBe(false);
+  });
+});
+
 describe('buildSdkOptions — the pre-existing assembly (control)', () => {
   // These pass before this PR as well as after. They are here deliberately: the
   // extraction of `buildSdkOptions` out of `runClaude` had to be behaviour-
