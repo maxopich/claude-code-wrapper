@@ -1,9 +1,12 @@
 /**
- * Live measurement, in two parts:
+ * Live measurement, in four parts:
  *
  *   PART 1  which `settingSources` actually load a project's own `.mcp.json`
  *   PART 2  whether an `mcpServers` key in a `.claude/settings*.json` layer
  *           loads at all
+ *   PART 3  the same question for the USER settings layer
+ *   PART 4  the scope LABELS `probeAuthority` captures via
+ *           `Query.mcpServerStatus()` (Cebab-ajvv)
  *
  *   npm --workspace server exec tsx src/mcp_scope_smoke.ts
  *
@@ -95,6 +98,18 @@
  * `<cfg>/.claude.json` control independently reproduces `readClaudeJsonServers`'
  * "loads at EVERY scope" claim, which is what makes the settings-file negative
  * beside it a measurement rather than a silence.
+ *
+ * ---------------------------------------------------------------------------
+ * PART 4 (`Cebab-ajvv`). The scope of an MCP server no file declares comes from
+ * the CLI's OWN report — `Query.mcpServerStatus()` carries a `scope` field —
+ * which `probeAuthority` reads in the same spawn and returns as
+ * `mcpScopes`. This part runs a probe against a `.mcp.json` project and asserts
+ * the POSITIVE CONTROL: `probeserver` must report scope `'project'`. That the
+ * scope answers at init even for a server that is still starting or has failed
+ * is the property slice 1 relies on. Every OTHER row it prints is ambient — a
+ * claude.ai connector, a plugin server — and the "read only the probeserver
+ * column" rule above applies to them: they are information, not a result. The
+ * part exits non-zero if the control is missing.
  */
 import fs from 'node:fs';
 import os from 'node:os';
@@ -110,7 +125,7 @@ import type { SettingSource } from './runner/claude.js';
 // import below is the load-bearing half of it.
 const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-mcp-scope-home-'));
 process.env.CEBAB_DATA_DIR = path.join(tmpRoot, '.cebab');
-const { probeSessionStarted } = await import('./runner/probe.js');
+const { probeSessionStarted, probeAuthority } = await import('./runner/probe.js');
 
 const PROBE_SERVER = 'probeserver';
 /** Parts 2-3: declared in a `.mcp.json` that Part 1 proves the CLI loads. */
@@ -300,6 +315,52 @@ async function probeUserSettingsLayer(): Promise<boolean> {
   return ok;
 }
 
+/**
+ * PART 4 — the scope LABELS `probeAuthority` captures (Cebab-ajvv). Returns
+ * false if the positive control is missing.
+ */
+async function probeScopeLabels(): Promise<boolean> {
+  console.log('\n[mcp-scope] PART 4: MCP scope labels from Query.mcpServerStatus()\n');
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cebab-mcp-scope-labels-'));
+  writeJson(path.join(dir, '.mcp.json'), { mcpServers: { [PROBE_SERVER]: DECL } });
+  try {
+    const probed = await probeAuthority({
+      cwd: dir,
+      projectId: 0,
+      settingSources: ['user', 'project', 'local'],
+    });
+    if (!probed) {
+      console.log('  → NO INIT (probe failed)');
+      return false;
+    }
+    const scopes = probed.mcpScopes;
+    const control = scopes.get(PROBE_SERVER);
+    // POSITIVE CONTROL. A `.mcp.json` server is project scope, and the scope
+    // read answers at init even for a server that is still starting or has
+    // failed — which is the property slice 1 leans on. "Absent" is what a CLI
+    // too old to report scopes, or a status call that did not answer at init,
+    // both look like, so this must be present before any ambient row is trusted.
+    if (control !== 'project') {
+      console.error(
+        `\n[mcp-scope] FAILED: expected ${PROBE_SERVER} → 'project', got ` +
+          `${JSON.stringify(control)}. The scope read measured nothing — the CLI may be ` +
+          'too old to report scopes, or mcpServerStatus() did not answer at init.',
+      );
+      return false;
+    }
+    console.log(`${PROBE_SERVER.padEnd(24)} → ${control}   (control OK)`);
+    // Everything else is ambient — claude.ai connectors, plugin servers.
+    // Informational only, same as the ambient rows in Part 1.
+    for (const [name, scope] of scopes) {
+      if (name === PROBE_SERVER) continue;
+      console.log(`${name.padEnd(24)} → ${scope}   (ambient, informational)`);
+    }
+    return true;
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 async function main(): Promise<void> {
   try {
     if (!(await probeMcpJsonScopes())) {
@@ -314,6 +375,10 @@ async function main(): Promise<void> {
           "the table in readMcpJsonServers' header. That table is what retires the " +
           'TOFU prompt for these rows — do not trust the prompt-skip while it is red.',
       );
+      process.exitCode = 1;
+      return;
+    }
+    if (!(await probeScopeLabels())) {
       process.exitCode = 1;
       return;
     }

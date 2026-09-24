@@ -1350,6 +1350,13 @@ export type ResolverInput = {
     skills?: string[];
     agents?: string[];
     plugins?: { name: string; path: string }[];
+    /**
+     * `Cebab-ajvv`: `serverName → CLI scope label`, captured by the authority
+     * probe. Used ONLY to attribute an undeclared SDK-reported server (the
+     * `scope: 'unknown'` append below); it never touches a file-declared row and
+     * feeds no gate. Absent when no probe captured it.
+     */
+    mcpScopes?: ReadonlyMap<string, string>;
   };
 };
 
@@ -1417,16 +1424,28 @@ export function resolveProjectAuthority(input: ResolverInput): ProjectAuthority 
   // in the measured table above. Those genuinely have no durable anchor to key
   // `(server_name, origin_path, binary_sha)` on, so they stay visible-but-
   // ungated by design rather than by omission.
+  const mcpScopes = input.latestSessionStarted?.mcpScopes;
   for (const im of initMcp) {
     if (!declaredMcp.some((d) => d.name === im.name)) {
       const isCebabInjected = CEBAB_INJECTED_MCP_NAMES.has(im.name);
-      declaredMcp.push({
+      const row: McpServerView = {
         name: im.name,
         status: im.status,
         scope: isCebabInjected ? 'cebab-injected' : 'unknown',
         tools: [],
         trust: 'unknown',
-      });
+      };
+      // `Cebab-ajvv`: label a genuinely undeclared server with the CLI's own
+      // scope, when a probe captured one. LABEL ONLY — `scope` stays `'unknown'`
+      // and `trust` stays `'unknown'`, so it grants nothing; it just tells the
+      // operator a claude.ai connector came from `claudeai` rather than reading
+      // as an unattributable mystery. Never applied to a `cebab-injected` row —
+      // that label is Cebab's own and outranks whatever the CLI calls the bus.
+      if (!isCebabInjected) {
+        const reported = mcpScopes?.get(im.name);
+        if (reported !== undefined) row.reportedScope = reported;
+      }
+      declaredMcp.push(row);
     }
   }
   // Phase 4 (§4.4): JOIN against mcp_trust to populate per-row TOFU

@@ -1,4 +1,9 @@
-import type { ModelInfo, PermissionMode, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type {
+  McpServerStatus,
+  ModelInfo,
+  PermissionMode,
+  SDKMessage,
+} from '@anthropic-ai/claude-agent-sdk';
 import { config } from '../config.js';
 import { runClaude, type RunOptions } from './claude.js';
 import { runMock, type MockOptions } from './mock.js';
@@ -38,6 +43,16 @@ export type Runner = AsyncIterable<SDKMessage> & {
    * makes asking for it during the authority probe free.
    */
   supportedModels?: () => Promise<ModelInfo[]>;
+  /**
+   * The CLI's own per-MCP-server status, including each server's scope label
+   * (Cebab-ajvv). Optional for the same reason `supportedModels` is: the live
+   * runner IS the SDK `Query` and already implements it, the mock does not, and
+   * every caller must cope with a runner that cannot answer.
+   *
+   * `captureMcpScopes` in `runner/probe.ts` reads ONLY the scope from each row
+   * — never the `config`, which carries a claude.ai connector's URL and id.
+   */
+  mcpServerStatus?: () => Promise<McpServerStatus[]>;
 };
 
 /** Picks live SDK vs fixture replay based on MOCK env var. */

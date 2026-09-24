@@ -2523,3 +2523,80 @@ describe('readClaudeJsonServers (x1n.6.23) — the ungated class, closed', () =>
     expect(outcome.refused).toEqual([]);
   });
 });
+
+// Cebab-ajvv: a server no file declares reaches the append loop as
+// `scope: 'unknown'`. When a probe captured the CLI's own scope label, the row
+// carries it as `reportedScope` — VISIBILITY ONLY. `scope`, `trust` and the
+// absence of an `originPath` are unchanged, so the gate treats it exactly as
+// before; the label just answers "where did this come from" for the operator.
+describe('[security] unattributable SDK-reported MCP servers', () => {
+  test('a reported scope labels an undeclared server and grants it nothing', async () => {
+    setProjectTrusted(projectId, true);
+    const out = resolveProjectAuthority({
+      projectId,
+      mode: 'cache',
+      latestSessionStarted: {
+        mcpServers: [{ name: 'claude.ai Mail', status: 'pending' }],
+        mcpScopes: new Map([['claude.ai Mail', 'claudeai']]),
+      },
+    })!;
+    const row = out.mcpServers.find((m) => m.name === 'claude.ai Mail')!;
+    expect(row.reportedScope).toBe('claudeai');
+    // The label buys nothing: no origin anchor, still unknown/unknown, and NOT
+    // the injected label that would grant automatic trust.
+    expect(row.originPath).toBeUndefined();
+    expect(row.trust).toBe('unknown');
+    expect(row.scope).toBe('unknown');
+    expect(row.scope).not.toBe('cebab-injected');
+
+    // Handed to the trust gate, it neither prompts nor refuses — exactly as an
+    // undeclared, origin-less server did before this label existed.
+    const sent: ServerMsg[] = [];
+    const outcome = await awaitMcpTrustDecisions({
+      projectId,
+      gate: makeTrustGateState(),
+      send: (m: ServerMsg) => sent.push(m),
+      servers: [row],
+    });
+    expect(sent).toEqual([]);
+    expect(outcome.refused).toEqual([]);
+  });
+
+  test('cebab_bus keeps its own label whatever the CLI calls it', () => {
+    setProjectTrusted(projectId, true);
+    const out = resolveProjectAuthority({
+      projectId,
+      mode: 'cache',
+      latestSessionStarted: {
+        mcpServers: [{ name: 'cebab_bus', status: 'connected' }],
+        // Even if the CLI reports a scope for the bus, Cebab's own label wins
+        // and no reported scope is attached — its trust is Cebab's to grant.
+        mcpScopes: new Map([['cebab_bus', 'dynamic']]),
+      },
+    })!;
+    const row = out.mcpServers.find((m) => m.name === 'cebab_bus')!;
+    expect(row.scope).toBe('cebab-injected');
+    expect(row.reportedScope).toBeUndefined();
+  });
+
+  test('a file-declared server never takes a reported scope', () => {
+    setProjectTrusted(projectId, true);
+    fs.writeFileSync(
+      path.join(projectPath, '.mcp.json'),
+      JSON.stringify({ mcpServers: { payments: { command: '/bin/echo', args: ['hi'] } } }),
+    );
+    const out = resolveProjectAuthority({
+      projectId,
+      mode: 'cache',
+      latestSessionStarted: {
+        mcpServers: [{ name: 'payments', status: 'connected' }],
+        // The CLI reports a scope for it, but the row came from `.mcp.json`, so
+        // it keeps `scope: 'mcp-json'` and takes no reported label.
+        mcpScopes: new Map([['payments', 'claudeai']]),
+      },
+    })!;
+    const row = out.mcpServers.find((m) => m.name === 'payments')!;
+    expect(row.scope).toBe('mcp-json');
+    expect(row.reportedScope).toBeUndefined();
+  });
+});

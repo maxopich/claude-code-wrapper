@@ -56,8 +56,19 @@
  * `refreshModelCatalogue` cannot throw and cannot extend this probe past its own
  * budget; a failure there leaves the previous catalogue alone and this
  * function's contract unchanged.
+ *
+ * SIDE EFFECT, also deliberate (Cebab-ajvv): the same up-and-before-abort window
+ * reads each MCP server's SCOPE from `Query.mcpServerStatus()` — the CLI's own
+ * label for where a server came from (project / user / local / claudeai /
+ * managed / dynamic). This is the ONE source that can attribute a server no file
+ * declares: a claude.ai connector reads `claudeai`, a plugin server `dynamic`,
+ * where `system/init` carries only `{ name, status }`. It is a LABEL source and
+ * feeds NO gate — `captureMcpScopes` copies the scope string and nothing else,
+ * never the row's `config`, which carries connector URLs and ids. Like the model
+ * catalogue it cannot throw and is bounded by its own timeout, so it can neither
+ * fail this probe nor extend it past that budget.
  */
-import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
+import type { McpServerStatus, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { ServerMsg } from '@cebab/shared/protocol';
 import { pickRunner, type Runner } from './index.js';
 import { registerQuery } from './lifecycle.js';
@@ -81,15 +92,99 @@ export const PROBE_TIMEOUT_MS = 30_000;
 const PROBE_PROMPT = 'probe';
 
 /**
- * Spawn, read the init payload, abort. Resolves to the translated
- * `session_started` message (the same shape a real turn produces, so callers
- * reuse the existing cache/merge path verbatim) or `null` when no init arrived.
+ * Budget for the one `mcpServerStatus()` read, deliberately separate from
+ * `PROBE_TIMEOUT_MS` (which bounds the whole spawn) — same split, and same
+ * reason, as `CATALOGUE_TIMEOUT_MS` in `model_catalogue.ts`. Sharing the probe
+ * budget would let a wedged status call eat the whole probe and turn a free
+ * extra into the reason the panel never answered. Generous against a measured
+ * ~0ms because the failure guarded is a hang, not slowness.
  */
-export async function probeSessionStarted(opts: {
+export const MCP_SCOPE_CAPTURE_TIMEOUT_MS = 2_000;
+
+/**
+ * Read each MCP server's SCOPE label from the CLI's own status report
+ * (Cebab-ajvv). Never throws and never hangs; returns an empty Map on every
+ * failure so a caller cannot be made to fail by it.
+ *
+ * Returns empty when the runner cannot answer (the mock has no
+ * `mcpServerStatus`), when the call rejects, when it does not settle inside
+ * `timeoutMs`, or when it returns something that is not an array. A row is kept
+ * only when its `name` and `scope` are BOTH non-empty strings, mapping
+ * `name → scope`.
+ *
+ * READS ONCE. Scope does not depend on connection status, so this must not wait
+ * for `pending` servers to settle — that is `readSettledStatus`'s job, and doing
+ * it here would turn a label read into a retry loop.
+ *
+ * COPIES ONLY THE SCOPE. The status rows' `config` carries a claude.ai
+ * connector's URL and id; those must never be stored, logged or sent, so nothing
+ * but `name` and `scope` is read off a row.
+ */
+export async function captureMcpScopes(
+  runner: { mcpServerStatus?: () => Promise<unknown> },
+  timeoutMs: number = MCP_SCOPE_CAPTURE_TIMEOUT_MS,
+): Promise<Map<string, string>> {
+  const out = new Map<string, string>();
+  if (typeof runner.mcpServerStatus !== 'function') return out;
+  const TIMED_OUT = Symbol('timeout');
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    const raced = await Promise.race([
+      runner.mcpServerStatus(),
+      new Promise<typeof TIMED_OUT>((resolve) => {
+        timer = setTimeout(() => resolve(TIMED_OUT), timeoutMs);
+      }),
+    ]);
+    if (raced === TIMED_OUT) return out;
+    if (!Array.isArray(raced)) return out;
+    for (const row of raced as McpServerStatus[]) {
+      const name = (row as { name?: unknown })?.name;
+      const scope = (row as { scope?: unknown })?.scope;
+      if (
+        typeof name === 'string' &&
+        name.length > 0 &&
+        typeof scope === 'string' &&
+        scope.length > 0
+      ) {
+        out.set(name, scope);
+      }
+    }
+    return out;
+  } catch {
+    // A CLI that died mid-handshake, or one too old to answer this control
+    // request. The label is a nice-to-have; its absence just leaves the
+    // undeclared rows reading `scope: 'unknown'`, which is the pre-Cebab-ajvv
+    // behaviour.
+    return out;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/**
+ * What a probe recovers: the translated `session_started` (the same shape a
+ * real turn produces, so callers reuse the existing cache/merge path verbatim)
+ * AND the MCP scope labels captured in the same spawn. `mcpScopes` is empty when
+ * the runner could not answer — see `captureMcpScopes`.
+ */
+export type ProbeResult = {
+  started: ServerMsg;
+  mcpScopes: ReadonlyMap<string, string>;
+};
+
+/**
+ * Spawn, read the init payload, abort. Resolves to a {@link ProbeResult} or
+ * `null` when no init arrived.
+ *
+ * At init, before the abort in `finally`, it does two reads in order — the
+ * model catalogue then the MCP scopes — because both need the control channel
+ * up. Neither can throw or extend the probe past its own budget.
+ */
+export async function probeAuthority(opts: {
   cwd: string;
   projectId: number;
   settingSources: readonly SettingSource[];
-}): Promise<ServerMsg | null> {
+}): Promise<ProbeResult | null> {
   // [security] Resolve against the scopes THIS spawn will use, not the
   // project's Trust setting — the same rule `gateProjectsForSpawn` carries.
   // A probe resolved against different scopes would compute denials for a
@@ -153,7 +248,9 @@ export async function probeSessionStarted(opts: {
       if (m.type !== 'system' || m.subtype !== 'init') continue;
       // Before the abort, while the control channel is still up.
       await refreshModelCatalogue(runner);
-      return translate(msg, opts.projectId);
+      const mcpScopes = await captureMcpScopes(runner);
+      const started = translate(msg, opts.projectId);
+      return started ? { started, mcpScopes } : null;
     }
     return null;
   } catch {
@@ -175,4 +272,19 @@ export async function probeSessionStarted(opts: {
     // accumulate per button click.
     unregister?.();
   }
+}
+
+/**
+ * The bare `session_started`, for the callers that never wanted the scopes: the
+ * `get_model_catalogue` refresh (which discards the result), and the
+ * `mcp_scope_smoke` / `managed_file_smoke` / probe test paths. Keeps its
+ * historical signature so those sites are unchanged — the scope-carrying result
+ * reaches only `runAuthorityProbe`, which calls `probeAuthority` directly.
+ */
+export async function probeSessionStarted(opts: {
+  cwd: string;
+  projectId: number;
+  settingSources: readonly SettingSource[];
+}): Promise<ServerMsg | null> {
+  return (await probeAuthority(opts))?.started ?? null;
 }

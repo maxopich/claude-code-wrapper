@@ -91,7 +91,8 @@ import {
   trustDerivedScopes,
   type SettingScope,
 } from '../repo/project_authority.js';
-import { probeSessionStarted } from '../runner/probe.js';
+import { probeAuthority, probeSessionStarted } from '../runner/probe.js';
+import { cacheSessionStarted, type CachedSessionStarted } from './authority_cache.js';
 import { openMcpControlSession } from '../runner/mcp_control.js';
 import { handleMcpControl } from './mcp_control.js';
 import { createProbeScheduler, type ProbeScheduler } from '../runner/probe_schedule.js';
@@ -2616,25 +2617,9 @@ function mutationRecordToView(m: MutationRecord): MultiAgentMutationView {
  * (per cebab-1's gotcha #3: never auto-fire a probe to refill this; only
  * the operator's explicit "Refresh" button does that, Phase 3b).
  *
- * Stored shape mirrors the relevant subset of the `session_started`
- * ServerMsg. Doesn't include sessionId because the AuthorityPanel is
- * project-scoped (per spec §6.1) and we only need ONE init snapshot per
- * project per connection — the most recent wins.
+ * The type and its writer moved to `./authority_cache.ts` (Cebab-ajvv) so the
+ * MCP-scope label carry-over has one home; see `cacheSessionStarted` there.
  */
-type CachedSessionStarted = {
-  capturedAt: number;
-  model?: string;
-  tools?: string[];
-  cwd?: string;
-  permissionMode?: string;
-  apiKeySource?: string;
-  mcpServers?: { name: string; status: string }[];
-  slashCommands?: string[];
-  skills?: string[];
-  agents?: string[];
-  plugins?: { name: string; path: string }[];
-};
-
 type Conn = {
   ws: WebSocket;
   pendingPermissions: Map<string, PendingPermission>;
@@ -2925,9 +2910,10 @@ function sendProjects(conn: Conn, rows: ProjectRow[]): void {
  *   - `runOneTurn` (single-agent) — trust-derived scopes, the default.
  *
  * They are not every path to a spawn, and this comment used to say they were.
- * `probeSessionStarted` is a sixth — reached from `runAuthorityProbe` below,
- * from the `get_model_catalogue` refresh, and from two live smoke scripts —
- * and it slipped past review twice on the strength of that sentence
+ * `probeAuthority` (and its `probeSessionStarted` wrapper) is a sixth — reached
+ * from `runAuthorityProbe` below, from the `get_model_catalogue` refresh, and
+ * from two live smoke scripts — and it slipped past review twice on the strength
+ * of that sentence
  * (Cebab-ygu.6 / Cebab-ygu.17). It cannot use this gate: it fires ~400ms after
  * the operator lands on a project, so it has no operator to park on. It takes
  * the strict posture instead and starts only servers that are already trusted;
@@ -3176,13 +3162,16 @@ export function reportHookObservations(
 async function runAuthorityProbe(conn: Conn, projectId: number): Promise<boolean> {
   const project = getProject(projectId);
   if (!project) return false;
-  const started = await probeSessionStarted({
+  const probed = await probeAuthority({
     cwd: project.path,
     projectId,
     settingSources: trustDerivedScopes(project.trusted === 1),
   });
-  if (!started) return false;
-  cacheSessionStartedIfNeeded(conn, started);
+  if (!probed) return false;
+  // Cebab-ajvv: the probe is the only spawn that reads MCP scope labels; pass
+  // them so a connector no file declares gets attributed instead of showing
+  // `scope: 'unknown'`.
+  cacheSessionStartedIfNeeded(conn, probed.started, probed.mcpScopes);
   return true;
 }
 
@@ -3221,20 +3210,15 @@ export async function respondWithProjectAuthority(
   send(conn.ws, { type: 'project_authority', projectId, authority });
 }
 
-function cacheSessionStartedIfNeeded(conn: Conn, out: ServerMsg): void {
-  if (out.type !== 'session_started') return;
-  const snapshot: CachedSessionStarted = { capturedAt: Date.now() };
-  if (out.model !== undefined) snapshot.model = out.model;
-  if (out.tools !== undefined) snapshot.tools = out.tools;
-  if (out.cwd !== undefined) snapshot.cwd = out.cwd;
-  if (out.permissionMode !== undefined) snapshot.permissionMode = out.permissionMode;
-  if (out.apiKeySource !== undefined) snapshot.apiKeySource = out.apiKeySource;
-  if (out.mcpServers !== undefined) snapshot.mcpServers = out.mcpServers;
-  if (out.slashCommands !== undefined) snapshot.slashCommands = out.slashCommands;
-  if (out.skills !== undefined) snapshot.skills = out.skills;
-  if (out.agents !== undefined) snapshot.agents = out.agents;
-  if (out.plugins !== undefined) snapshot.plugins = out.plugins;
-  conn.authorityCache.set(out.projectId, snapshot);
+function cacheSessionStartedIfNeeded(
+  conn: Conn,
+  out: ServerMsg,
+  freshScopes?: ReadonlyMap<string, string>,
+): void {
+  // Cebab-ajvv: delegate to the shared writer, which carries MCP scope labels
+  // forward. The turn and history-replay call sites pass no `freshScopes` and
+  // get the carry-over automatically; only `runAuthorityProbe` supplies them.
+  cacheSessionStarted(conn.authorityCache, out, freshScopes);
 }
 
 /**

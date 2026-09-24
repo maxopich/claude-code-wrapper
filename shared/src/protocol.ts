@@ -4473,6 +4473,26 @@ export type McpServerView = {
   pinOversizedReason?: 'script_bytes' | 'arg_count';
   firstSeenAt?: number;
   lastSeenAt?: number;
+  /**
+   * `Cebab-ajvv`: the CLI's OWN scope label for this server, read verbatim from
+   * `Query.mcpServerStatus()` (the SDK documents its values as project, user,
+   * local, claudeai, managed; the bundled CLI also emits `dynamic` for plugin
+   * servers). It answers "where did a server that no file Cebab reads declares
+   * come from" — a claude.ai connector reads `claudeai`, a plugin server reads
+   * `dynamic` — which the guessed `scope: 'unknown'` above cannot.
+   *
+   * PRESENT ONLY on rows that no file Cebab reads declares (the `scope:
+   * 'unknown'` append), and ABSENT until a probe has captured it — a resolve
+   * with no probed scopes leaves it off entirely. A file-declared row never
+   * carries it.
+   *
+   * LABEL ONLY. No gate, enrichment or refusal path may read it — the same
+   * discipline `scope: 'cebab-injected'` is held to. A label taken from what a
+   * session REPORTS about itself must never buy an exemption: it is derived
+   * from the server's own handshake, so trusting it to widen authority would let
+   * a server name its own scope into a skip. It exists to be shown, nothing else.
+   */
+  reportedScope?: string;
 };
 
 /**
