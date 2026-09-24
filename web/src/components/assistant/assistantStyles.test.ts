@@ -212,6 +212,18 @@ describe('assistant widget styles (Cebab-i6fl / Cebab-e29)', () => {
     expect(phonePopover!.body).toMatch(/(^|[\s;])bottom\s*:[^;]*--composer-clearance/);
   });
 
+  test('on a phone the open panel height subtracts the composer, so its header stays below the toasts', () => {
+    // Review of PR #698: a flat 60dvh cap put the header under the top-moved
+    // toasts with a 120px composer and off-screen with a 310px one.
+    const popover = rulesInOrder(stylesCss).find(
+      (r) => r.media !== null && PHONE.test(r.media) && r.selector === OPEN_POPOVER,
+    );
+    expect(popover, `a phone ${OPEN_POPOVER} rule`).toBeDefined();
+    const cap = /(^|[\s;])max-height\s*:([^;]*);/.exec(popover!.body);
+    expect(cap, 'the phone sheet has a max-height').not.toBeNull();
+    expect(cap![2]).toContain('--composer-clearance');
+  });
+
   test('the help button keeps its accent colour under the pointer', () => {
     const hover = rulesInOrder(stylesCss).find(
       (r) => r.media === null && r.selector === '.assistant-dock-trigger:hover',

@@ -21,11 +21,11 @@ import { connectWs, type WsHandle } from './ws';
 import {
   activeSession,
   initialState,
+  assistantRoute,
   isSessionPending,
   mcpStatusBannerServers,
   reduce,
   resolveNotificationActionEffect,
-  routesToAssistant,
   sessionSelectionRequests,
   showsNewChatPreview,
 } from './store';
@@ -225,6 +225,11 @@ export function App() {
   // through this ref into the provider's reducer — same shape as the inbox /
   // gate handlers. No requestRef companion: the AssistantDock owns its trigger.
   const assistantHandlerRef = useRef<((msg: ServerMsg) => void) | null>(null);
+  // Cebab-eo71: second AssistantProvider bridge. The provider populates it with
+  // its connection_lost dispatch; AppShell's WS close handler calls it so a
+  // running help answer ends with the connection line (ws_close only reaches the
+  // main store). Same shape as `assistantHandlerRef`.
+  const assistantConnLostRef = useRef<(() => void) | null>(null);
   const handleAck = useCallback((id: string, ackReason?: string) => {
     wsRef.current?.send({ type: 'ack_notification', id, ackReason });
   }, []);
@@ -356,7 +361,11 @@ export function App() {
                       adjacency it needs. Same send + handlerRef pair as the
                       inbox provider.
                     */}
-                      <AssistantProvider send={assistantSend} handlerRef={assistantHandlerRef}>
+                      <AssistantProvider
+                        send={assistantSend}
+                        handlerRef={assistantHandlerRef}
+                        connLostRef={assistantConnLostRef}
+                      >
                         <AppShell
                           wsRef={wsRef}
                           notifPushRef={notifPushRef}
@@ -374,6 +383,7 @@ export function App() {
                           recoveryLogHandlerRef={recoveryLogHandlerRef}
                           forensicViewerHandlerRef={forensicViewerHandlerRef}
                           assistantHandlerRef={assistantHandlerRef}
+                          assistantConnLostRef={assistantConnLostRef}
                           onAck={handleAck}
                         />
                         <AssistantDock />
@@ -548,11 +558,18 @@ type AppShellProps = {
    * Cebab-8x8.3.2: bridge ref the AssistantProvider populates. onMessage
    * routes EVERY ServerMsg here (the provider filters internally): the
    * `settings` envelope carries `assistantProjectId`, and the assistant
-   * session's stream is session-keyed. Assistant-project envelopes are routed
-   * here from the `routesToAssistant` branch too, so they never touch the
+   * session's stream is session-keyed. Assistant-owned envelopes are routed
+   * here from the `assistantRoute` branch too, so they never touch the
    * store's reducer.
    */
   assistantHandlerRef: React.MutableRefObject<((msg: ServerMsg) => void) | null>;
+  /**
+   * Cebab-eo71: second AssistantProvider bridge. AppShell's WS close handler
+   * calls this so a running help answer ends with the connection line instead
+   * of spinning (`ws_close` reaches only the main store, not the out-of-store
+   * assistant session).
+   */
+  assistantConnLostRef: React.MutableRefObject<(() => void) | null>;
   /** Cluster A Phase 5: ack handler shared between the dock and the inbox. */
   onAck: (id: string, ackReason?: string) => void;
 };
@@ -574,9 +591,17 @@ function AppShell({
   recoveryLogHandlerRef,
   forensicViewerHandlerRef,
   assistantHandlerRef,
+  assistantConnLostRef,
   onAck,
 }: AppShellProps) {
   const [state, dispatch] = useReducer(reduce, initialState);
+  // Cebab-eo71: the session ids the help assistant has claimed. Filled from
+  // `assistantRoute`'s `claim` in onMessage so a session-keyed `wrapper_error`
+  // for an owned id routes to the panel instead of the operator's chat. A ref,
+  // not state — the WS closure reads it synchronously and it must never trigger
+  // a re-render. Persists across reconnects (a stale id only ever keeps a late
+  // envelope off the main store, which is always correct).
+  const assistantOwnedSessionsRef = useRef<Set<string>>(new Set());
   // Cluster D Phase 4c (UI-D6): the WS onMessage callback in the connect
   // effect closes over a stale `state` snapshot. The banner ↔ toast dedup
   // predicate needs the LATEST state to answer "is the rate-limit banner
@@ -870,6 +895,14 @@ function AppShell({
         },
         onClose: (info) => {
           dispatch({ type: 'ws_close' });
+          // Cebab-eo71: `ws_close` reaches only the main store; the assistant
+          // session lives outside it, so a running help answer would spin
+          // forever. End it with the connection line via the provider callback.
+          try {
+            assistantConnLostRef.current?.();
+          } catch (err) {
+            console.error('[assistant] connection-lost handler threw', err);
+          }
           // Cluster I C2 UI: drop the cached auth token on close. The
           // server rotates tokens on every boot, so reusing a stale
           // value after a reconnect would 403 against the new token's
@@ -902,20 +935,27 @@ function AppShell({
           });
         },
         onMessage: (msg) => {
-          // Cebab-8x8.3.1: assistant envelopes never reach the reducer. The
-          // assistant is filtered out of `listProjects()`, so its id is never
-          // in `state.projects`; a `reduceServer` pass keyed on that id would
-          // corrupt AppState (and `case 'projects'` wipes the session maps on
-          // every boot/workspace switch, since the assistant is never listed).
-          // Route them to the `subscribeServerMsg` side channel ONLY — the
-          // established home for payloads that must not live in AppState — and
-          // skip dispatch and every provider bridge below. Panel state lives
-          // outside AppState.
-          if (routesToAssistant(stateRef.current, msg)) {
-            // Cebab-8x8.3.2: the assistant's projectId-carrying envelopes
-            // (`session_started` / `session_running`) reach the AssistantProvider
-            // here — the general bridge below is skipped by the early return, so
-            // this is their only path in. The provider filters internally.
+          // Cebab-8x8.3.1 / Cebab-eo71: assistant envelopes never reach the
+          // reducer. The assistant is filtered out of `listProjects()`, so its
+          // id is never in `state.projects`; a `reduceServer` pass keyed on that
+          // id would corrupt AppState (and `case 'projects'` wipes the session
+          // maps on every boot/workspace switch, since the assistant is never
+          // listed). Worse, the assistant's session-keyed `wrapper_error` has no
+          // projectId, so `routesToAssistant` alone would let it fall through to
+          // `reduceServer`, whose fallback adopts `state.activeProjectId` and
+          // mints an errored chat inside the operator's open project.
+          //
+          // `assistantRoute` closes both: it claims the assistant's session id
+          // off the two projectId-carrying framing envelopes, then routes any
+          // later session-keyed envelope for that owned id to the panel too.
+          // `assistantOwnedSessionsRef` is filled synchronously here so the
+          // claim is visible to the `wrapper_error` that arrives right after.
+          const route = assistantRoute(stateRef.current, msg, assistantOwnedSessionsRef.current);
+          if (route.claim) assistantOwnedSessionsRef.current.add(route.claim);
+          if (route.toAssistant) {
+            // Route to the `subscribeServerMsg` side channel + the
+            // AssistantProvider bridge ONLY — no dispatch, no
+            // notifyFromServerMsg, and none of the other provider bridges below.
             try {
               assistantHandlerRef.current?.(msg);
             } catch (err) {
@@ -1114,6 +1154,8 @@ function AppShell({
     recoveryLogHandlerRef,
     reopenHandlerRef,
     assistantHandlerRef,
+    assistantConnLostRef,
+    assistantOwnedSessionsRef,
     wsRetryNonce,
   ]);
 

@@ -1,5 +1,12 @@
 import type { ContentBlock, ServerMsg } from '@cebab/shared/protocol';
-import type { MessageView, SessionView } from '../../store';
+import { cancelledLine, type MessageView, type SessionView } from '../../store';
+
+/** The optimistic placeholder id seeded on a first send, before the server
+ *  hands back a real session id. Lives here (rather than in `AssistantContext`,
+ *  which imports this module) so both the reducer and the provider can share it
+ *  with no import cycle. `session_running` / `session_started` migrate this
+ *  bucket onto the real id. */
+export const PENDING_SESSION_ID = 'assistant-pending';
 
 /**
  * Cebab-8x8.3.2: the message reducer for the floating assistant widget.
@@ -92,6 +99,31 @@ export function assistantReducer(state: SessionView | null, msg: ServerMsg): Ses
     };
   }
 
+  if (msg.type === 'session_running') {
+    // Cebab-eo71: the server frames the turn with `session_running`. It carries
+    // a projectId (so the provider gates it like session_started) AND a
+    // sessionId — but a running:true can be the FIRST envelope to name the real
+    // id, before session_started, so it is handled ahead of the id self-gate
+    // below (which would otherwise drop it while state is still the placeholder).
+    if (msg.running) {
+      // Migrate the optimistic pending bucket onto the real id, the same
+      // migration session_started does. If there is no pending session (or one
+      // is already adopted), there is nothing to do — a bare running:true does
+      // not invent a session and never re-points an adopted one.
+      if (state && state.id === PENDING_SESSION_ID) {
+        return { ...state, id: msg.sessionId, projectId: msg.projectId, status: 'running' };
+      }
+      return state;
+    }
+    // running:false ends the turn. A session still 'running' — one whose turn
+    // died with no `result` (a crash, a lapsed login) — becomes 'done' with the
+    // elapsed timer stopped. A session already ended by its own `result` or
+    // `wrapper_error` keeps that status. Self-gate on the adopted id.
+    if (!state || msg.sessionId !== state.id) return state;
+    if (state.status !== 'running') return state;
+    return { ...state, status: 'done', runStartedAt: null };
+  }
+
   // Everything below is session-keyed. Ignore anything that isn't for the
   // adopted session (or that arrives before one exists) — same reference out,
   // so React bails and the panel doesn't rerender on other sessions' traffic.
@@ -146,10 +178,53 @@ export function assistantReducer(state: SessionView | null, msg: ServerMsg): Ses
       };
     }
 
+    case 'wrapper_error': {
+      // Cebab-eo71: a turn that failed. The server sends this before its
+      // `session_running { running: false }`, so without it the panel would
+      // spin forever (assistantReducer used to ignore both). An `aborted` is a
+      // DELIBERATE ending — the operator pressed Stop — so it takes the neutral
+      // `cancelled` row and the `done` status a normally-ended turn gets, never
+      // the red error one (mirrors store.ts's wrapper_error case). Every other
+      // kind (a crash, a lapsed login, a usage limit, a refused second turn on
+      // a busy session) is a real failure: status 'error' plus an error view.
+      // Both clear the stream buffer and stop the elapsed timer.
+      if (msg.kind === 'aborted') {
+        return {
+          ...state,
+          status: 'done',
+          runStartedAt: null,
+          streamingText: '',
+          messages: [
+            ...state.messages,
+            { kind: 'cancelled', id: nextId(), message: cancelledLine(msg.message) },
+          ],
+        };
+      }
+      return {
+        ...state,
+        status: 'error',
+        runStartedAt: null,
+        streamingText: '',
+        messages: [
+          ...state.messages,
+          { kind: 'error', id: nextId(), errorKind: msg.kind, message: msg.message },
+        ],
+      };
+    }
+
+    case 'session_interrupted': {
+      // Cebab-eo71: the server's ack of a Stop. It is a no-op here — the turn is
+      // ended by the `wrapper_error { kind: 'aborted' }` (or the `result`) that
+      // follows it, which is what appends the visible cancelled/result row.
+      return state;
+    }
+
     case 'permission_request': {
-      // store.ts:2949 — recorded for fidelity. The assistant runs trusted, so
-      // this is not expected; the transcript renders it WITHOUT an approval
-      // card (no `onPermissionDecide` wired) so there's nothing to answer.
+      // store.ts:2949 — recorded for fidelity. The assistant runs UNTRUSTED, and
+      // the server refuses every tool call it is asked about, so no
+      // permission_request is emitted in the normal case; this is kept as a
+      // defence. The transcript renders it WITHOUT an approval card (no
+      // `onPermissionDecide` wired) so there's nothing to answer.
       const m: MessageView = {
         kind: 'permission_request',
         id: nextId(),

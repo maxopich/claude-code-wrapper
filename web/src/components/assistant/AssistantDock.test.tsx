@@ -24,6 +24,7 @@ let container: HTMLElement;
 let root: Root;
 let sent: ClientMsg[];
 let handler: (msg: ServerMsg) => void;
+let fireConnLost: () => void;
 
 function settingsMsg(assistantProjectId?: number): ServerMsg {
   return {
@@ -40,9 +41,11 @@ function settingsMsg(assistantProjectId?: number): ServerMsg {
 // captured here so the test can feed ServerMsgs the way onMessage does.
 function Host() {
   const handlerRef = useRef<((msg: ServerMsg) => void) | null>(null);
+  const connLostRef = useRef<(() => void) | null>(null);
   handler = (msg) => handlerRef.current?.(msg);
+  fireConnLost = () => connLostRef.current?.();
   return (
-    <AssistantProvider send={(m) => sent.push(m)} handlerRef={handlerRef}>
+    <AssistantProvider send={(m) => sent.push(m)} handlerRef={handlerRef} connLostRef={connLostRef}>
       <AssistantDock />
     </AssistantProvider>
   );
@@ -81,6 +84,48 @@ function sendViaComposer(text: string) {
   act(() => {
     btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   });
+}
+
+/** The single button at the end of the composer row — Send when idle, Stop
+ *  while an answer runs (both carry the `.assistant-send` class; they are told
+ *  apart by aria-label). */
+function composerButton(): HTMLButtonElement {
+  const btn = container.querySelector<HTMLButtonElement>('.assistant-send');
+  if (!btn) throw new Error('composer button not mounted');
+  return btn;
+}
+
+/** Type into the composer WITHOUT clicking Send (the standard native-setter +
+ *  input-event dance for a controlled React textarea). */
+function typeComposer(text: string) {
+  const ta = container.querySelector<HTMLTextAreaElement>('.assistant-composer textarea');
+  if (!ta) throw new Error('composer textarea not mounted');
+  const setValue = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')?.set;
+  if (!setValue) throw new Error('no native value setter');
+  act(() => {
+    setValue.call(ta, text);
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+}
+
+/** Press Enter in the composer textarea (GrowTextarea submits on Enter). */
+function pressEnter() {
+  const ta = container.querySelector<HTMLTextAreaElement>('.assistant-composer textarea');
+  if (!ta) throw new Error('composer textarea not mounted');
+  act(() => {
+    ta.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+  });
+}
+
+function openPanel() {
+  act(() => {
+    trigger()!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+}
+
+/** The server adopts a real session id for the in-flight turn. */
+function startedMsg(sessionId = SID): ServerMsg {
+  return { type: 'session_started', sessionId, projectId: ASSISTANT_PID, model: 'm', tools: [] };
 }
 
 beforeEach(() => {
@@ -245,6 +290,9 @@ describe('AssistantDock / send shape', () => {
       model: 'm',
       tools: [],
     });
+    // Cebab-eo71: the first turn must END before a follow-up can be sent — Send
+    // is replaced by Stop while an answer runs. End it with a result.
+    feed({ type: 'result', sessionId: SID, subtype: 'success', totalCostUsd: 0.01, durationMs: 5 });
 
     sendViaComposer('and how do I run one?');
 
@@ -258,7 +306,10 @@ describe('AssistantDock / send shape', () => {
   });
 
   // The placeholder is this component's own invention. Sending it would make the
-  // server resume a session id it never issued.
+  // server resume a session id it never issued. Cebab-eo71: a second send before
+  // session_started is now BLOCKED (the first turn is still running, so Send is
+  // replaced by a disabled Stop), which upholds the same guarantee a stricter
+  // way — the one send that goes out carries no sessionId at all.
   test('a second send BEFORE session_started never ships the pending placeholder', () => {
     mount();
     feed(settingsMsg(ASSISTANT_PID));
@@ -266,15 +317,114 @@ describe('AssistantDock / send shape', () => {
       trigger()!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     sendViaComposer('first');
-    sendViaComposer('second');
-    expect(sent).toHaveLength(2);
-    for (const msg of sent) {
-      expect((msg as { sessionId?: string }).sessionId).toBeUndefined();
-    }
+    // Second attempt while the first is still running — the composer button is
+    // now Stop (disabled, no id yet) and Enter can't submit.
+    typeComposer('second');
+    pressEnter();
+    const sends = sent.filter((m) => m.type === 'send_message');
+    expect(sends).toHaveLength(1);
+    expect((sends[0] as { sessionId?: string }).sessionId).toBeUndefined();
+  });
+});
+
+describe('AssistantDock / stop, reset, failures, connection loss (Cebab-eo71)', () => {
+  test('while an answer runs, Stop ships exactly { type: interrupt, sessionId } for the adopted id', () => {
+    mount();
+    feed(settingsMsg(ASSISTANT_PID));
+    openPanel();
+    sendViaComposer('how do I copy an agent?');
+    feed(startedMsg());
+    // Send has been replaced by Stop, now enabled (the id is known).
+    const btn = composerButton();
+    expect(btn.getAttribute('aria-label')).toBe('Stop the answer');
+    expect(btn.disabled).toBe(false);
+    act(() => {
+      btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const interrupts = sent.filter((m) => m.type === 'interrupt');
+    expect(interrupts).toEqual([{ type: 'interrupt', sessionId: SID }]);
+  });
+
+  test('Stop is disabled before the server hands back a session id', () => {
+    mount();
+    feed(settingsMsg(ASSISTANT_PID));
+    openPanel();
+    sendViaComposer('question');
+    // Running, but only the optimistic placeholder id exists.
+    const btn = composerButton();
+    expect(btn.getAttribute('aria-label')).toBe('Stop the answer');
+    expect(btn.disabled).toBe(true);
+  });
+
+  test('after a failure, Send is shown and enabled again', () => {
+    mount();
+    feed(settingsMsg(ASSISTANT_PID));
+    openPanel();
+    sendViaComposer('question');
+    feed(startedMsg());
+    feed({ type: 'wrapper_error', sessionId: SID, kind: 'process_crashed', message: 'boom' });
+    // Not running any more → Send returns, and enabled once there is text.
+    typeComposer('another question');
+    const btn = composerButton();
+    expect(btn.getAttribute('aria-label')).toBe('Send message');
+    expect(btn.disabled).toBe(false);
+  });
+
+  test('after New conversation, the next send carries no sessionId key', () => {
+    mount();
+    feed(settingsMsg(ASSISTANT_PID));
+    openPanel();
+    sendViaComposer('first question');
+    feed(startedMsg());
+    // End the turn so reset() is allowed (it is a no-op while running).
+    feed({ type: 'result', sessionId: SID, subtype: 'success', totalCostUsd: 0.01, durationMs: 5 });
+    const newConv = container.querySelector<HTMLButtonElement>('.assistant-panel-newconv');
+    expect(newConv).not.toBeNull();
+    expect(newConv!.disabled).toBe(false);
+    act(() => {
+      newConv!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    sendViaComposer('fresh start');
+    const last = sent[sent.length - 1] as { type: string; sessionId?: string };
+    expect(last.type).toBe('send_message');
+    expect('sessionId' in last).toBe(false);
+  });
+
+  test('connection_lost ends a running answer with the connection line', () => {
+    mount();
+    feed(settingsMsg(ASSISTANT_PID));
+    openPanel();
+    sendViaComposer('question');
+    feed(startedMsg());
+    act(() => {
+      fireConnLost();
+    });
+    expect(container.textContent).toContain(
+      'Connection lost. This answer was cut off; ask again once Cebab reconnects.',
+    );
+    // The turn is over — Send is back.
+    expect(composerButton().getAttribute('aria-label')).toBe('Send message');
+  });
+
+  test('a second send_message cannot be shipped while an answer runs', () => {
+    mount();
+    feed(settingsMsg(ASSISTANT_PID));
+    openPanel();
+    sendViaComposer('first question');
+    feed(startedMsg());
+    // Enter while running must not ship a second send_message (the composer's
+    // submit early-returns; the button is Stop, not Send).
+    typeComposer('second question');
+    pressEnter();
+    expect(sent.filter((m) => m.type === 'send_message')).toHaveLength(1);
   });
 });
 
 describe('AssistantDock / permission_request renders no approval card', () => {
+  // Cebab-eo71: the assistant runs UNTRUSTED and the server refuses every tool
+  // call it is asked about, so no permission_request is emitted in the normal
+  // case; the transcript filter is a defence. A permission_request that did
+  // arrive must never render an approval card the operator can't answer here.
   test('a permission_request for the assistant session shows no approval card', () => {
     mount();
     feed(settingsMsg(ASSISTANT_PID));
