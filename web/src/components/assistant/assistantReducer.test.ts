@@ -207,3 +207,112 @@ describe('assistantReducer / pendingToolName pairing is reused, not duplicated',
     expect(pendingToolName(s)).toBe('Read');
   });
 });
+
+// Cebab-eo71: the reducer no longer ignores session_running / wrapper_error, so
+// a failed turn ends with a visible outcome instead of spinning forever.
+describe('assistantReducer / session_running framing', () => {
+  function pending(): SessionView {
+    return {
+      id: 'assistant-pending',
+      projectId: ASSISTANT_PID,
+      status: 'running',
+      messages: [{ kind: 'user', id: 'u1', text: 'how do I copy an agent?' }],
+      streamingText: '',
+      runStartedAt: 123,
+      heldMessages: [],
+    };
+  }
+
+  test('running:true adopts the id from the pending placeholder and keeps the message', () => {
+    const migrated = assistantReducer(pending(), {
+      type: 'session_running',
+      projectId: ASSISTANT_PID,
+      sessionId: SID,
+      running: true,
+    });
+    expect(migrated?.id).toBe(SID);
+    expect(migrated?.status).toBe('running');
+    expect(migrated?.messages).toEqual([
+      { kind: 'user', id: 'u1', text: 'how do I copy an agent?' },
+    ]);
+  });
+
+  test('running:false while still running flips the session to done', () => {
+    const s = adopt();
+    expect(s.status).toBe('running');
+    const done = assistantReducer(s, {
+      type: 'session_running',
+      projectId: ASSISTANT_PID,
+      sessionId: SID,
+      running: false,
+    });
+    expect(done?.status).toBe('done');
+    expect(done?.runStartedAt).toBeNull();
+  });
+
+  test('running:false after a result leaves the ended status unchanged', () => {
+    let s = adopt();
+    s = assistantReducer(s, {
+      type: 'result',
+      sessionId: SID,
+      subtype: 'success',
+      durationMs: 5,
+      totalCostUsd: 0.01,
+    })!;
+    expect(s.status).toBe('done');
+    const out = assistantReducer(s, {
+      type: 'session_running',
+      projectId: ASSISTANT_PID,
+      sessionId: SID,
+      running: false,
+    });
+    // Same reference out — nothing changed, so the panel doesn't rerender.
+    expect(out).toBe(s);
+    expect(out?.status).toBe('done');
+  });
+});
+
+describe('assistantReducer / wrapper_error ends the turn', () => {
+  test('a process_crashed failure gives status error plus an error view', () => {
+    let s = adopt();
+    s = assistantReducer(s, {
+      type: 'stream_delta',
+      sessionId: SID,
+      uuid: 'a',
+      delta: { kind: 'text', blockIndex: 0, text: 'half an answer' },
+    })!;
+    const out = assistantReducer(s, {
+      type: 'wrapper_error',
+      sessionId: SID,
+      kind: 'process_crashed',
+      message: 'exit 1: boom',
+    })!;
+    expect(out.status).toBe('error');
+    expect(out.runStartedAt).toBeNull();
+    expect(out.streamingText).toBe('');
+    const last = out.messages[out.messages.length - 1];
+    expect(last.kind).toBe('error');
+    if (last.kind === 'error') {
+      expect(last.errorKind).toBe('process_crashed');
+      expect(last.message).toBe('exit 1: boom');
+    }
+  });
+
+  test('an aborted failure gives status done plus a neutral cancelled view', () => {
+    const s = adopt();
+    const out = assistantReducer(s, {
+      type: 'wrapper_error',
+      sessionId: SID,
+      kind: 'aborted',
+      message: 'the SDK abort text',
+    })!;
+    expect(out.status).toBe('done');
+    expect(out.runStartedAt).toBeNull();
+    const last = out.messages[out.messages.length - 1];
+    expect(last.kind).toBe('cancelled');
+    if (last.kind === 'cancelled') {
+      // cancelledLine maps the non-"Turn cancelled:" text to the neutral line.
+      expect(last.message).toBe('Stopped by you');
+    }
+  });
+});

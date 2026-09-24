@@ -1479,6 +1479,54 @@ export function routesToAssistant(state: AppState, msg: ServerMsg): boolean {
   return 'projectId' in msg && msg.projectId === assistantProjectId;
 }
 
+/**
+ * Cebab-eo71: the App.tsx fan-out's full routing decision for the built-in help
+ * assistant — a superset of {@link routesToAssistant} that also keeps the
+ * assistant's SESSION-keyed failures off the Redux reducer.
+ *
+ * `routesToAssistant` matches only the envelopes that carry the assistant's
+ * `projectId` — its `session_started` and `session_running`. Everything else the
+ * assistant's turn produces is session-keyed and projectId-less: `stream_delta`,
+ * `result`, and crucially `wrapper_error`. A `wrapper_error` reaching
+ * `reduceServer` falls through its `projectFor(...) ?? state.activeProjectId`
+ * fallback, which mints an errored SessionView — or adopts a pending first turn
+ * — inside whatever project the operator has open. That is the leak this closes:
+ * a help-assistant failure must never land in one of the operator's own chats.
+ *
+ * `ownedSessionIds` is the set of session ids the assistant has claimed. App.tsx
+ * fills it synchronously from the `claim` returned here — set on the two
+ * projectId-carrying envelopes (`session_started` / `session_running`) that are
+ * the first to name the assistant's real session id — so by the time a
+ * `wrapper_error` for that session arrives, its id is already owned and the
+ * envelope routes to the panel instead of the store.
+ *
+ * A `notification` envelope is NEVER claimed and NEVER routed by an owned id: a
+ * lapsed-login toast rides the app-wide notification stack, and folding it into
+ * the assistant would silence it there. (A `notification` carries no sessionId
+ * anyway; the guard is defence-in-depth, and the acceptance test names it.)
+ */
+export function assistantRoute(
+  state: AppState,
+  msg: ServerMsg,
+  ownedSessionIds: ReadonlySet<string>,
+): { toAssistant: boolean; claim?: string } {
+  if (routesToAssistant(state, msg)) {
+    if (msg.type === 'session_started' || msg.type === 'session_running') {
+      return { toAssistant: true, claim: msg.sessionId };
+    }
+    return { toAssistant: true };
+  }
+  if (
+    msg.type !== 'notification' &&
+    'sessionId' in msg &&
+    typeof msg.sessionId === 'string' &&
+    ownedSessionIds.has(msg.sessionId)
+  ) {
+    return { toAssistant: true };
+  }
+  return { toAssistant: false };
+}
+
 function putSession(
   state: AppState,
   projectId: number,
@@ -1692,7 +1740,7 @@ function authExpiredAfter(
  * if the server ever stops prefixing it, this degrades to the single neutral
  * "Stopped by you" line, still not an error.
  */
-function cancelledLine(message: string): string {
+export function cancelledLine(message: string): string {
   return message.startsWith('Turn cancelled:')
     ? 'Cancelled — you declined the prompt'
     : 'Stopped by you';

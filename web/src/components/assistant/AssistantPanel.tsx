@@ -17,22 +17,36 @@ import { AssistantEmptyState } from './AssistantEmptyState';
  * empty state too.
  */
 export function AssistantPanel({ onClose }: { onClose: () => void }) {
-  const { session } = useAssistant();
+  const { session, running, reset } = useAssistant();
   const hasContent = session != null && session.messages.length > 0;
 
   return (
     <div className="assistant-panel" role="dialog" aria-label="Cebab help">
       <header className="assistant-panel-header">
         <span className="assistant-panel-title">Cebab help</span>
-        <button
-          type="button"
-          className="assistant-panel-close icon-btn"
-          onClick={onClose}
-          aria-label="Close help"
-          title="Close help"
-        >
-          ✕
-        </button>
+        {/* Cebab-eo71: the header's controls live in a group so a third button
+            can't land mid-header (the header is space-between with the title). */}
+        <div className="assistant-panel-actions">
+          <button
+            type="button"
+            className="assistant-panel-newconv"
+            onClick={reset}
+            disabled={running || session == null}
+            aria-label="New conversation"
+            title="New conversation"
+          >
+            New conversation
+          </button>
+          <button
+            type="button"
+            className="assistant-panel-close icon-btn"
+            onClick={onClose}
+            aria-label="Close help"
+            title="Close help"
+          >
+            ✕
+          </button>
+        </div>
       </header>
       {hasContent ? <AssistantTranscript session={session} /> : <AssistantEmptyState />}
       <AssistantComposer />

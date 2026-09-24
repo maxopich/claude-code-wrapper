@@ -11,7 +11,7 @@ import {
 } from 'react';
 import type { ClientMsg, ServerMsg } from '@cebab/shared/protocol';
 import type { MessageView, SessionView } from '../../store';
-import { assistantReducer } from './assistantReducer';
+import { assistantReducer, PENDING_SESSION_ID } from './assistantReducer';
 
 /**
  * Cebab-8x8.3.2: context for the floating assistant widget.
@@ -34,15 +34,18 @@ import { assistantReducer } from './assistantReducer';
  * and self-gate inside `assistantReducer` on the adopted session id.
  */
 
-/** Placeholder id for the optimistic session created by a first send, before
- *  the server's `session_started` hands back the real id. `assistantReducer`
- *  migrates it (keeping scrollback) on that message. */
-const PENDING_SESSION_ID = 'assistant-pending';
-
 let userSeq = 0;
 function nextUserId(): string {
   userSeq += 1;
   return `assistant-user-${userSeq}`;
+}
+
+// Cebab-eo71: ids for the synthetic cancelled row a connection_lost appends.
+// Monotonic + unique, the same way the reducer mints its own message ids.
+let connLostSeq = 0;
+function nextConnLostId(): string {
+  connLostSeq += 1;
+  return `assistant-connlost-${connLostSeq}`;
 }
 
 type ProviderState = {
@@ -50,7 +53,14 @@ type ProviderState = {
   session: SessionView | null;
 };
 
-type ProviderAction = { type: 'server'; msg: ServerMsg } | { type: 'user_send'; text: string };
+type ProviderAction =
+  | { type: 'server'; msg: ServerMsg }
+  | { type: 'user_send'; text: string }
+  /** Cebab-eo71: the socket dropped — end a running answer with the connection
+   *  line. Not a ServerMsg: App.tsx fires it from the WS close handler. */
+  | { type: 'connection_lost' }
+  /** Cebab-eo71: start a fresh conversation. No-op while an answer is running. */
+  | { type: 'reset' };
 
 const initialState: ProviderState = { assistantProjectId: undefined, session: null };
 
@@ -82,6 +92,43 @@ function providerReducer(state: ProviderState, action: ProviderAction): Provider
     };
   }
 
+  if (action.type === 'reset') {
+    // Cebab-eo71: drop the session so the next send starts fresh with no
+    // sessionId — a NEW conversation. Refuse while an answer is running: a
+    // dropped in-flight session would strand the server turn with nothing on
+    // screen. The button that fires this is disabled while running too; this is
+    // the belt to that suspenders.
+    if (state.session?.status === 'running') return state;
+    if (state.session === null) return state;
+    return { ...state, session: null };
+  }
+
+  if (action.type === 'connection_lost') {
+    // Cebab-eo71: a running answer can never complete over a dead socket, so end
+    // it with a neutral cancelled line rather than leaving the panel spinning
+    // (App.tsx dispatches ws_close to the main store only, which never touches
+    // the out-of-store assistant session). Nothing to do if idle.
+    const s = state.session;
+    if (!s || s.status !== 'running') return state;
+    return {
+      ...state,
+      session: {
+        ...s,
+        status: 'done',
+        runStartedAt: null,
+        streamingText: '',
+        messages: [
+          ...s.messages,
+          {
+            kind: 'cancelled',
+            id: nextConnLostId(),
+            message: 'Connection lost. This answer was cut off; ask again once Cebab reconnects.',
+          },
+        ],
+      },
+    };
+  }
+
   const { msg } = action;
   if (msg.type === 'settings') {
     // The only field we read; may be undefined (server without an assistant).
@@ -89,7 +136,13 @@ function providerReducer(state: ProviderState, action: ProviderAction): Provider
     return { ...state, assistantProjectId: msg.assistantProjectId };
   }
   // Gate session adoption by projectId; other messages self-gate by sessionId.
-  if (msg.type === 'session_started' && msg.projectId !== state.assistantProjectId) {
+  // Cebab-eo71: session_running carries a projectId too, so it is gated the same
+  // way session_started is — otherwise another project's framing envelope could
+  // reach the assistant reducer.
+  if (
+    (msg.type === 'session_started' || msg.type === 'session_running') &&
+    msg.projectId !== state.assistantProjectId
+  ) {
     return state;
   }
   const nextSession = assistantReducer(state.session, msg);
@@ -102,9 +155,18 @@ export type AssistantContextValue = {
   assistantProjectId?: number;
   /** The assistant session, or null before the first turn. */
   session: SessionView | null;
-  /** Optimistically echo + ship a `send_message`. No-op on empty text or
-   *  before `assistantProjectId` is known. */
+  /** Optimistically echo + ship a `send_message`. No-op on empty text, before
+   *  `assistantProjectId` is known, or while an answer is running. */
   sendMessage: (text: string) => void;
+  /** Cebab-eo71: true while the current answer is in flight. */
+  running: boolean;
+  /** Cebab-eo71: interrupt the running answer. Ships `{ type: 'interrupt',
+   *  sessionId }` for the adopted id; a no-op before the server has handed one
+   *  back (the pending placeholder). */
+  stop: () => void;
+  /** Cebab-eo71: drop the session so the next send opens a fresh conversation.
+   *  A no-op while an answer is running. */
+  reset: () => void;
 };
 
 const Ctx = createContext<AssistantContextValue | null>(null);
@@ -119,13 +181,24 @@ export type AssistantProviderProps = {
    * unmount — identical to {@link InboxProvider}'s handlerRef.
    */
   handlerRef?: MutableRefObject<((msg: ServerMsg) => void) | null>;
+  /**
+   * Cebab-eo71: second bridge, same pattern as {@link handlerRef}. App.tsx's WS
+   * close handler calls this so a running help answer ends with the connection
+   * line instead of spinning (ws_close reaches only the main store).
+   */
+  connLostRef?: MutableRefObject<(() => void) | null>;
 };
 
-export function AssistantProvider({ children, send, handlerRef }: AssistantProviderProps) {
+export function AssistantProvider({
+  children,
+  send,
+  handlerRef,
+  connLostRef,
+}: AssistantProviderProps) {
   const [state, dispatch] = useReducer(providerReducer, initialState);
 
-  // Mirror state into a ref so `sendMessage` reads the current projectId
-  // without re-creating its identity on every session update.
+  // Mirror state into a ref so `sendMessage` / `stop` read the current session
+  // without re-creating their identity on every session update.
   const stateRef = useRef(state);
   useEffect(() => {
     stateRef.current = state;
@@ -143,12 +216,28 @@ export function AssistantProvider({ children, send, handlerRef }: AssistantProvi
     };
   }, [handleServerMsg, handlerRef]);
 
+  const handleConnectionLost = useCallback(() => {
+    dispatch({ type: 'connection_lost' });
+  }, []);
+
+  useEffect(() => {
+    if (!connLostRef) return;
+    connLostRef.current = handleConnectionLost;
+    return () => {
+      connLostRef.current = null;
+    };
+  }, [handleConnectionLost, connLostRef]);
+
   const sendMessage = useCallback(
     (text: string) => {
       const trimmed = text.trim();
       if (!trimmed) return;
       const projectId = stateRef.current.assistantProjectId;
       if (projectId === undefined) return;
+      // Cebab-eo71: the server refuses a second turn on a busy session with a
+      // wrapper_error. Don't ship one — the composer swaps Send for Stop while
+      // running, so this guards the programmatic path.
+      if (stateRef.current.session?.status === 'running') return;
       // Read the adopted id BEFORE dispatching: `stateRef` still holds the
       // pre-dispatch state, which is what we want — the id the server handed
       // back on `session_started`, never the optimistic one seeded below.
@@ -171,9 +260,31 @@ export function AssistantProvider({ children, send, handlerRef }: AssistantProvi
     [send],
   );
 
+  const stop = useCallback(() => {
+    const s = stateRef.current.session;
+    // No-op before the server has handed back a real id: the pending
+    // placeholder is never a server session, so there is nothing to interrupt.
+    if (!s || s.id === PENDING_SESSION_ID) return;
+    if (s.status !== 'running') return;
+    send({ type: 'interrupt', sessionId: s.id });
+  }, [send]);
+
+  const reset = useCallback(() => {
+    dispatch({ type: 'reset' });
+  }, []);
+
+  const running = state.session?.status === 'running';
+
   const value = useMemo<AssistantContextValue>(
-    () => ({ assistantProjectId: state.assistantProjectId, session: state.session, sendMessage }),
-    [state.assistantProjectId, state.session, sendMessage],
+    () => ({
+      assistantProjectId: state.assistantProjectId,
+      session: state.session,
+      sendMessage,
+      running,
+      stop,
+      reset,
+    }),
+    [state.assistantProjectId, state.session, sendMessage, running, stop, reset],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

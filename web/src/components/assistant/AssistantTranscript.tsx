@@ -14,9 +14,11 @@ import { ThinkingIndicator } from '../ThinkingIndicator';
  * cards, live-session plumbing).
  *
  * `permission_request` messages are filtered OUT of the render: the assistant
- * runs trusted and emits none in the normal case, and rendering one would show
- * an approval card the operator can't meaningfully answer here. Tool failures
- * still surface — they arrive as `tool_result` error cards, which DO render.
+ * runs UNTRUSTED and the server refuses every tool call it is asked about, so
+ * none is emitted in the normal case; the filter is a defence, and rendering one
+ * would show an approval card the operator can't meaningfully answer here. Tool
+ * failures still surface — they arrive as `tool_result` error cards, which DO
+ * render.
  */
 export function AssistantTranscript({ session }: { session: SessionView }) {
   const phase = sessionPhase(session, session.status === 'running');

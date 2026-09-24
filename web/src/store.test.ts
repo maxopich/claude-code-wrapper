@@ -2,6 +2,7 @@ import { describe, expect, test } from 'vitest';
 import {
   activeSession,
   activitySuppressed,
+  assistantRoute,
   countControlledParticipants,
   eventDefaultCollapsed,
   initialState,
@@ -3031,6 +3032,125 @@ describe('store / assistant project id wiring (Cebab-8x8.3.1)', () => {
         blocks: [],
       }),
     ).toBe(false);
+  });
+});
+
+// Cebab-eo71: assistantRoute extends the projectId-only routing with the
+// session-keyed path — the assistant's FAILURES (wrapper_error) carry no
+// projectId, so without claiming the session id off the framing envelopes they
+// would land in the operator's open chat via reduceServer's activeProjectId
+// fallback.
+describe('store / assistantRoute (Cebab-eo71)', () => {
+  const ASSISTANT_PID = 99;
+  const OTHER_PID = 7;
+  const A_SID = 'assistant-sess-1';
+
+  function stateWithSettings(assistantProjectId?: number) {
+    return reduce(initialState, {
+      type: 'server',
+      msg: {
+        type: 'settings',
+        workspaceRoot: null,
+        workspaceRootValid: true,
+        defaultWorkspaceRoot: '/home/op/agents',
+        defaultHopBudget: 30,
+        ...(assistantProjectId !== undefined ? { assistantProjectId } : {}),
+      },
+    });
+  }
+  function withAssistant() {
+    return stateWithSettings(ASSISTANT_PID);
+  }
+
+  test("the assistant's session_running is routed and claims its session id", () => {
+    const s = withAssistant();
+    expect(
+      assistantRoute(
+        s,
+        { type: 'session_running', projectId: ASSISTANT_PID, sessionId: A_SID, running: true },
+        new Set(),
+      ),
+    ).toEqual({ toAssistant: true, claim: A_SID });
+  });
+
+  test('a wrapper_error whose session id is owned routes to the assistant', () => {
+    const s = withAssistant();
+    // The claim from the framing envelope is already in the owned set.
+    const r = assistantRoute(
+      s,
+      { type: 'wrapper_error', sessionId: A_SID, kind: 'process_crashed', message: 'boom' },
+      new Set([A_SID]),
+    );
+    expect(r.toAssistant).toBe(true);
+    // A failure envelope is never a claim — only the framing envelopes claim.
+    expect(r.claim).toBeUndefined();
+  });
+
+  test('CONTROL: an UNOWNED wrapper_error is not routed — and the reducer would then mint an errored chat under the open project', () => {
+    const s = withAssistant();
+    // Owned set empty: the id was never claimed (a pre-init failure the widget
+    // never learned about, or the leak this closes).
+    expect(
+      assistantRoute(
+        s,
+        { type: 'wrapper_error', sessionId: A_SID, kind: 'process_crashed', message: 'boom' },
+        new Set(),
+      ).toAssistant,
+    ).toBe(false);
+
+    // Why the route matters: dispatched to the main reducer with a project open,
+    // the sessionless-by-project error falls back to state.activeProjectId and
+    // creates an errored SessionView inside the operator's OWN chat.
+    const opened = reduce(s, { type: 'select_project', projectId: OTHER_PID });
+    expect(opened.activeProjectId).toBe(OTHER_PID);
+    const after = reduce(opened, {
+      type: 'server',
+      msg: { type: 'wrapper_error', sessionId: A_SID, kind: 'process_crashed', message: 'boom' },
+    });
+    const leaked = after.sessionsByProject[OTHER_PID]?.[A_SID];
+    expect(leaked?.status).toBe('error');
+    expect(leaked?.messages.some((m) => m.kind === 'error')).toBe(true);
+  });
+
+  test('a notification carrying an owned session id is NOT routed (it belongs on the toast stack)', () => {
+    const s = withAssistant();
+    const notif: ServerMsg = {
+      type: 'notification',
+      id: 'n1',
+      ts: 0,
+      severity: 'warn',
+      class: 'operational',
+      dedupeKey: 'k',
+      title: 'Your login lapsed',
+      sessionId: A_SID,
+      sticky: true,
+    };
+    expect(assistantRoute(s, notif, new Set([A_SID])).toAssistant).toBe(false);
+  });
+
+  test('without an assistantProjectId, nothing is routed by projectId', () => {
+    const s = stateWithSettings(undefined);
+    expect(
+      assistantRoute(
+        s,
+        { type: 'session_running', projectId: ASSISTANT_PID, sessionId: A_SID, running: true },
+        new Set(),
+      ).toAssistant,
+    ).toBe(false);
+  });
+
+  test('removing the owned-id arm breaks the failure route (anti-vacuity anchor)', () => {
+    // The wrapper_error above is routed ONLY because A_SID is owned; with an
+    // empty owned set it is not (this is the arm the acceptance says must matter).
+    const s = withAssistant();
+    const msg: ServerMsg = {
+      type: 'wrapper_error',
+      sessionId: A_SID,
+      kind: 'process_crashed',
+      message: 'boom',
+    };
+    expect(assistantRoute(s, msg, new Set([A_SID])).toAssistant).toBe(true);
+    expect(assistantRoute(s, msg, new Set()).toAssistant).toBe(false);
   });
 });
 
