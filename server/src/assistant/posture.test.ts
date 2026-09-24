@@ -73,6 +73,17 @@ describe('assistantSpawnPosture (Cebab-8x8.1.2)', () => {
     expect([...ASSISTANT_DISALLOWED_TOOLS]).toEqual(disallowedTools);
   });
 
+  test('strictMcpConfig and disableClaudeAiConnectors are both true (Cebab-zqhq)', () => {
+    // `settingSources: []` keeps project/user MCP declarations out, but a
+    // claude.ai connector is declared in no file the scope set reads, and other
+    // MCP configuration the SDK consults is not scoped by it either. These two
+    // are the knobs that keep a help turn loading zero MCP servers; dropping
+    // either would let one back in.
+    const p = assistantSpawnPosture(KB);
+    expect(p.strictMcpConfig).toBe(true);
+    expect(p.disableClaudeAiConnectors).toBe(true);
+  });
+
   test('the arrays are fresh copies, not shared module constants', () => {
     // Callers spread these into an options object; a shared reference that a
     // consumer mutated would poison the next turn's posture.

@@ -8,12 +8,15 @@ keep user-facing answers in `kb/`.
 Being outside `kb/` is **not** a confinement boundary, and this page used to
 imply it was (`Cebab-6fax.6`): it said the assistant's read tools were "scoped
 there". Nothing scopes paths. The assistant runs with `cwd` set to
-`assistant/kb/` and a read-only tool set, which makes reading elsewhere
-_inconvenient and gated_, not impossible — an absolute path is still an
-ordinary Read, answered by the permission gate. Two things follow. Do not put
-anything in this file that would matter if the assistant read it. And know that
-the gate the confinement rests on is currently unanswerable from the assistant
-widget, so such a read parks the turn rather than prompting (`Cebab-6fax.35`).
+`assistant/kb/` and a read-only tool set. Reads **inside** `assistant/kb/` are
+settled by the CLI itself and never reach Cebab, so they just work. Any other
+tool call — a Read of an absolute path outside the KB, a Glob elsewhere, an MCP
+tool — reaches Cebab's permission gate and is **refused on the spot**
+(`Cebab-zqhq`): the model gets the refusal back as the tool result and the
+operator sees no prompt. So the confinement rests on the CLI's in-folder read
+rule plus that refusal, not on a path check. Do not put anything in this file
+that would matter if the assistant read it — the refusal keeps it out of reach,
+but only because it lives outside the KB folder the CLI reads freely.
 
 ## What the knowledge base is
 

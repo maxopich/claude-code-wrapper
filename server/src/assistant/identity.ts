@@ -33,6 +33,17 @@ export const ASSISTANT_PROJECT_NAME = 'cebab/assistant';
 export const ASSISTANT_MAX_TURNS = 12;
 
 /**
+ * The message the model gets back when it reaches for any tool call the
+ * assistant does not settle itself. Reads inside the KB (`assistant/kb/`) are
+ * settled by the CLI and never reach `canUseTool`; every other call does, and
+ * is refused on the spot with this text rather than parking a permission card
+ * the help panel cannot show. The refusal is the fix for the frozen turn.
+ */
+export const ASSISTANT_TOOL_REFUSED_TEXT =
+  'Refused: the Cebab help assistant can only read its own help pages. ' +
+  'Answer from those pages, or say you do not know.';
+
+/**
  * The assistant's own system prompt, and the ONLY production path that REPLACES
  * one (`RunOptions.systemPrompt`).
  *
@@ -113,13 +124,20 @@ export type AssistantPosture = {
   tools: string[];
   skills: string[];
   disallowedTools: string[];
+  strictMcpConfig: boolean;
+  disableClaudeAiConnectors: boolean;
 };
 
 export function assistantSpawnPosture(cwd: string): AssistantPosture {
   return {
     cwd,
-    // Never auto-allow: the assistant is not Trusted, so every tool routes
-    // through the permission gate.
+    // The assistant is not Trusted, so it never auto-allows. But that does NOT
+    // mean every tool routes through the permission gate: the CLI settles reads
+    // inside `cwd` (the KB) by itself, so an in-KB Read never reaches
+    // `canUseTool`. What DOES reach it is exactly the out-of-KB reads and any
+    // MCP tool, and `runOneTurn` refuses all of those immediately
+    // (`ASSISTANT_TOOL_REFUSED_TEXT`) rather than parking a permission card the
+    // help panel cannot answer.
     permissionMode: 'default',
     // Empty scope set: no ~/.claude, no project settings, no CLAUDE.md, no
     // project-declared MCP servers or env injections layered into the turn.
@@ -131,6 +149,13 @@ export function assistantSpawnPosture(cwd: string): AssistantPosture {
     // and a help turn should see none.
     skills: [],
     disallowedTools: [...ASSISTANT_DISALLOWED_TOOLS],
+    // `settingSources: []` already keeps a project `.mcp.json` and user MCP
+    // servers out, but neither governs everything that can load: a claude.ai
+    // connector is declared in no file the scope set reads, and
+    // `strictMcpConfig` closes any other MCP configuration the SDK would still
+    // consult. Both belong to the posture so no help turn loads a server.
+    strictMcpConfig: true,
+    disableClaudeAiConnectors: true,
   };
 }
 

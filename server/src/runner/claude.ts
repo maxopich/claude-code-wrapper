@@ -124,6 +124,23 @@ export type RunOptions = {
    * project" guarantee is preserved.
    */
   deniedMcpServers?: string[];
+  /**
+   * SDK `Options.strictMcpConfig`: when true, only MCP servers passed via
+   * `mcpServers` are used and every other MCP configuration (project
+   * `.mcp.json`, user settings, plugins, on-disk agent frontmatter) is ignored.
+   * Set only by the built-in help assistant. Absent otherwise, so an ordinary
+   * spawn is byte-identical to before.
+   */
+  strictMcpConfig?: boolean;
+  /**
+   * When true, merge `{ disableClaudeAiConnectors: true }` into the SDK's inline
+   * `settings` layer, so claude.ai cloud connectors are not auto-fetched or
+   * connected. A connector is declared in no file `settingSources` reads, so
+   * this is the only knob that keeps a help turn from loading one. Merged
+   * alongside any MCP-denial settings — neither overwrites the other. Absent
+   * otherwise, so an ordinary spawn gains no `settings` layer it didn't have.
+   */
+  disableClaudeAiConnectors?: boolean;
   /** Required by the SDK when permissionMode is 'bypassPermissions'. */
   allowDangerouslySkipPermissions?: boolean;
   /** External cancellation. */
@@ -380,7 +397,18 @@ export function buildSdkOptions(opts: RunOptions): Options {
   const denial = mcpDenialOptions(opts.deniedMcpServers);
   const allDisallowed = [...(opts.disallowedTools ?? []), ...(denial.disallowedTools ?? [])];
   if (allDisallowed.length > 0) options.disallowedTools = allDisallowed;
-  if (denial.settings) options.settings = denial.settings;
+  // The inline `settings` layer can carry two independent contributions — the
+  // MCP-denial `deniedMcpServers` and the assistant's `disableClaudeAiConnectors`
+  // — and neither may clobber the other. Merge into one object; leave the key
+  // ABSENT when neither applies so an ordinary spawn gains no `settings` layer.
+  const settings: NonNullable<Options['settings']> = {
+    ...(typeof denial.settings === 'object' ? denial.settings : {}),
+    ...(opts.disableClaudeAiConnectors ? { disableClaudeAiConnectors: true } : {}),
+  };
+  if (Object.keys(settings).length > 0) options.settings = settings;
+  // Only when explicitly true: absent leaves the SDK's default (load all MCP
+  // configurations), which is what every ordinary spawn wants.
+  if (opts.strictMcpConfig) options.strictMcpConfig = true;
   if (opts.allowDangerouslySkipPermissions) options.allowDangerouslySkipPermissions = true;
   // Truthiness, not `!== undefined`: an empty string is not a model, and the
   // key must stay ABSENT rather than become `undefined` when nothing is chosen.
